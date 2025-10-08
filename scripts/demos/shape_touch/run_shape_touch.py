@@ -524,14 +524,14 @@ class BallRollingEnv(DirectRLEnv):
         root_pos_w = self._robot.data.root_link_pos_w
         root_quat_w = self._robot.data.root_link_quat_w
         # compute the pose of the body in the root frame
-        ee_pose_b, ee_quat_b = math_utils.subtract_frame_transforms(root_pos_w, root_quat_w, ee_pos_w, ee_quat_w)
+        ee_pos_b, ee_quat_b = math_utils.subtract_frame_transforms(root_pos_w, root_quat_w, ee_pos_w, ee_quat_w)
         # account for the offset
         # if self.cfg.body_offset is not None:
-        ee_pose_b, ee_quat_b = math_utils.combine_frame_transforms(
-            ee_pose_b, ee_quat_b, self._offset_pos, self._offset_rot
+        ee_pos_b, ee_quat_b = math_utils.combine_frame_transforms(
+            ee_pos_b, ee_quat_b, self._offset_pos, self._offset_rot
         )
 
-        return ee_pose_b, ee_quat_b
+        return ee_pos_b, ee_quat_b
 
     def _compute_frame_jacobian(self):
         """Computes the geometric Jacobian of the target frame in the root frame.
@@ -583,6 +583,11 @@ def run_simulator(env: BallRollingEnv):
         env.sim.step(render=False)
 
         positions, orientations = env.goal_prim_view.get_world_poses()
+
+        # todo rmv test
+        positions = torch.tensor([[0.500235, 6.63033e-05, 0.0240838]], device="cuda:0")
+        orientations = torch.tensor([[0.923887, -0.382665, -2.73208e-05, -8.24001e-05]], device="cuda:0")
+
         env.ik_commands[:, :3] = positions - env.scene.env_origins
         env.ik_commands[:, 3:] = orientations
 
