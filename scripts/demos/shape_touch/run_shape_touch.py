@@ -584,10 +584,6 @@ def run_simulator(env: BallRollingEnv):
 
         positions, orientations = env.goal_prim_view.get_world_poses()
 
-        # todo rmv test
-        positions = torch.tensor([[0.500235, 6.63033e-05, 0.0240838]], device="cuda:0")
-        orientations = torch.tensor([[0.923887, -0.382665, -2.73208e-05, -8.24001e-05]], device="cuda:0")
-
         env.ik_commands[:, :3] = positions - env.scene.env_origins
         env.ik_commands[:, 3:] = orientations
 
