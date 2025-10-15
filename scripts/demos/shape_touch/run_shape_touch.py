@@ -356,13 +356,12 @@ class BallRollingEnv(DirectRLEnv):
         # self._jacobi_joint_ids = self._joint_ids # we take every joint
 
         # ee offset w.r.t panda hand -> based on the asset
-        self._offset_pos = torch.tensor([0.0, 0.0, 0.131], device=self.device).repeat(self.num_envs, 1)
+        self._offset_pos = torch.tensor([0.0, 0.0, 0.11765], device=self.device).repeat(self.num_envs, 1)
         self._offset_rot = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).repeat(self.num_envs, 1)
         # ---
 
         # create buffer to store actions (= ik_commands)
         self.ik_commands = torch.zeros((self.num_envs, self._ik_controller.action_dim), device=self.device)
-        # self.ik_commands[:, 3:] = torch.tensor([0,1,0,0],device=self.device)
 
         self.step_count = 0
 
@@ -396,9 +395,7 @@ class BallRollingEnv(DirectRLEnv):
                 FrameTransformerCfg.FrameCfg(
                     prim_path="/World/envs/env_.*/Robot/panda_hand",
                     name="end_effector",
-                    offset=OffsetCfg(
-                        pos=(0.0, 0.0, 0.131),  # 0.1034
-                    ),
+                    offset=OffsetCfg(pos=(0.0, 0.0, 0.11765), rot=(1.0, 0.0, 0.0, 0.0)),
                 ),
             ],
         )
@@ -424,7 +421,7 @@ class BallRollingEnv(DirectRLEnv):
             prim_path="/Goal",
             size=0.01,
             position=np.array([0.5, 0.0, 0.021]),
-            orientation=np.array([0, 1, 0, 0]),
+            orientation=np.array([1, 0, 0, 0]),
             visible=False,
         )
 
@@ -481,7 +478,7 @@ class BallRollingEnv(DirectRLEnv):
             goal_pos = self.main_pose[:, :3]
             goal_pos[:, 2] += 0.001
 
-            goal_orient = torch.tensor([[0, 1, 0, 0]], device=self.device)
+            goal_orient = torch.tensor([[1, 0, 0, 0]], device=self.device)
             self.goal_prim_view.set_world_poses(positions=goal_pos, orientations=goal_orient)
 
         # reset robot state

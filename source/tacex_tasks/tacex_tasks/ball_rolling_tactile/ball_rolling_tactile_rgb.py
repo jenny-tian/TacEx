@@ -268,7 +268,7 @@ class BallRollingTactileRGBCfg(DirectRLEnvCfg):
                 prim_path="/World/envs/env_.*/Robot/panda_hand",
                 name="end_effector",
                 offset=OffsetCfg(
-                    pos=(0.0, 0.0, 0.131),  # 0ffset from panda hand frame origin to gelpad top
+                    pos=(0.0, 0.0, 0.11765),  # 0ffset from panda hand frame origin to gelpad top
                     rot=(0.0, 0.0, 1.0, 0.0),
                     # rot=(0, 0.92388, -0.38268, 0) # our panda hand asset has rotation from (180,0,-45) -> we subtract 180 for defining the rotation limits
                 ),

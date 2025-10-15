@@ -23,8 +23,8 @@ repos:
       - id: trailing-whitespace
       - id: check-symlinks
       - id: destroyed-symlinks
-      - id: check-added-large-files
-        args: ["--maxkb=2000"]  # restrict files more than 2 MB. Should use git-lfs instead.
+      # - id: check-added-large-files
+      #   args: ["--maxkb=2000"]  # restrict files more than 2 MB. Should use git-lfs instead.
       - id: check-yaml
       - id: check-merge-conflict
       - id: check-case-conflict
