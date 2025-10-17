@@ -196,6 +196,20 @@ def create_shapes_cfg() -> dict[str, RigidObjectCfg]:
     return shapes
 
 
+def load_setup_config():
+    setup_cfg = {
+        "imgw": 320,
+        "imgh": 240,
+        "brd_frac": 0.15,
+        "pixmm": 0.0632,  # unit [mm/pixel]
+        "base_center_x": 0.5,
+        "base_center_y": 0.0,
+        "obj_height": 0.02,
+    }
+
+    return setup_cfg
+
+
 @configclass
 class BallRollingEnvCfg(DirectRLEnvCfg):
     # viewer settings
@@ -304,7 +318,7 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
                     FrameTransformerCfg.FrameCfg(prim_path=f"/World/envs/env_.*/{obj_name}")
                     for obj_name in list(shapes.keys())
                 ],
-                debug_vis=True,
+                debug_vis=False,
                 visualizer_cfg=marker_cfg,
             ),
         ),
@@ -318,8 +332,6 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
     )
 
     ik_controller_cfg = DifferentialIKControllerCfg(command_type="pose", use_relative_mode=False, ik_method="dls")
-
-    main_pose = [0.5, 0.0, 0.02, 1, 0, 0, 0]
 
     # some filler values, needed for DirectRLEnv class
     episode_length_s = 0
@@ -341,16 +353,15 @@ class BallRollingEnv(DirectRLEnv):
         )
         # Obtain the frame index of the end-effector
         body_ids, body_names = self._robot.find_bodies("panda_hand")
-        # save only the first body index
+        # only save the first body index
         self._body_idx = body_ids[0]
         self._body_name = body_names[0]
 
         # For a fixed base robot, the frame index is one less than the body index.
         # This is because the root body is not included in the returned Jacobians.
         self._jacobi_body_idx = self._body_idx - 1
-        # self._jacobi_joint_ids = self._joint_ids # we take every joint
 
-        # ee offset w.r.t panda hand -> based on the asset
+        # ee offset w.r.t panda hand
         self._offset_pos = torch.tensor([0.0, 0.0, 0.11765], device=self.device).repeat(self.num_envs, 1)
         self._offset_rot = torch.tensor([0.0, 0, 1.0, 0.0], device=self.device).repeat(self.num_envs, 1)
         # ---
@@ -362,10 +373,15 @@ class BallRollingEnv(DirectRLEnv):
 
         self.goal_prim_view = None
 
-        self.main_pose = torch.tensor([self.cfg.main_pose], device=self.device)
-
         # add handle for debug visualization (this is set to a valid handle inside set_debug_vis)
         self.set_debug_vis(self.cfg.debug_vis)
+
+        # for sim data collection
+        setup_cfg = load_setup_config()
+        self.start_pose = torch.tensor(
+            [[setup_cfg["base_center_x"], setup_cfg["base_center_y"], setup_cfg["obj_height"], 1, 0, 0, 0]],
+            device=self.device,
+        )
 
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
@@ -390,7 +406,7 @@ class BallRollingEnv(DirectRLEnv):
                 FrameTransformerCfg.FrameCfg(
                     prim_path="/World/envs/env_.*/Robot/panda_hand",
                     name="end_effector",
-                    offset=OffsetCfg(pos=(0.0, 0.0, 0.11765), rot=(0.0, 0.0, 1.0, 0.0)),
+                    offset=OffsetCfg(pos=(0.0, 0.0, 0.11765), rot=(0.0, 0, 1.0, 0.0)),
                 ),
             ],
         )
@@ -452,6 +468,7 @@ class BallRollingEnv(DirectRLEnv):
         ee_pos_b, ee_quat_b = math_utils.combine_frame_transforms(
             ee_pos_b, ee_quat_b, self._offset_pos, self._offset_rot
         )
+
         # compute the joint commands
         joint_pos_des = self._ik_controller.compute(ee_pos_b, ee_quat_b, jacobian, joint_pos)
 
@@ -477,7 +494,7 @@ class BallRollingEnv(DirectRLEnv):
         # set goal pos
         if self.goal_prim_view is not None:
             # move goal back to main area
-            goal_pos = self.main_pose[:, :3]
+            goal_pos = self.start_pose[:, :3]
             goal_pos[:, 2] += 0.001
 
             goal_orient = torch.tensor([[1, 0, 0, 0]], device=self.device)
@@ -523,6 +540,8 @@ def run_simulator(env: BallRollingEnv):
         env._apply_action()
         env.scene.write_data_to_sim()
         env.sim.step(render=False)
+
+        # env.ik_commands = env.start_pose
 
         # update isaac buffers() -> also updates sensors
         env.scene.update(dt=env.physics_dt)
