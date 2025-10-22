@@ -175,9 +175,14 @@ def create_shapes_cfg() -> dict[str, RigidObjectCfg]:
     for i, file_path in enumerate(usd_files_path):
         file_name = file_path.stem
 
+        if i == 0:
+            pos = [0.5, 0.0, 0.02]
+        else:
+            pos = [0.55, -0.025 * len(usd_files_path) / 2 + 0.025 * i, 0.02]
+
         shapes[file_name] = RigidObjectCfg(
             prim_path=f"/World/envs/env_.*/{file_name}",
-            init_state=RigidObjectCfg.InitialStateCfg(pos=[0.5, 0.025 * i, 0.02]),
+            init_state=RigidObjectCfg.InitialStateCfg(pos=pos),
             spawn=sim_utils.UsdFileCfg(
                 usd_path=str(file_path),
                 # scale=(0.8, 0.8, 0.8),
@@ -251,6 +256,25 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
         ),
     )
 
+    # spawn indenter_holder for cool visuals
+    indenter_holder_plate = AssetBaseCfg(
+        prim_path="/World/indenter_holder",
+        init_state=AssetBaseCfg.InitialStateCfg(pos=[0.5, 0.0, 0.02]),
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=f"{TACEX_ASSETS_DATA_DIR}/Props/indenter_holder_plate.usd",
+            # scale=(0.8, 0.8, 0.8),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                solver_position_iteration_count=16,
+                solver_velocity_iteration_count=1,
+                max_angular_velocity=1000.0,
+                max_linear_velocity=1000.0,
+                max_depenetration_velocity=5.0,
+                kinematic_enabled=True,
+                disable_gravity=False,
+            ),
+        ),
+    )
+
     # light
     light = AssetBaseCfg(
         prim_path="/World/light",
@@ -304,7 +328,7 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
                     FrameTransformerCfg.FrameCfg(prim_path=f"/World/envs/env_.*/{obj_name}")
                     for obj_name in list(shapes.keys())
                 ],
-                debug_vis=True,
+                debug_vis=False,
                 visualizer_cfg=marker_cfg,
             ),
         ),
@@ -384,7 +408,7 @@ class BallRollingEnv(DirectRLEnv):
         marker_cfg.prim_path = "/Visuals/FrameTransformer"
         ee_frame_cfg = FrameTransformerCfg(
             prim_path="/World/envs/env_.*/Robot/panda_link0",
-            debug_vis=True,
+            debug_vis=False,
             visualizer_cfg=marker_cfg,
             target_frames=[
                 FrameTransformerCfg.FrameCfg(
@@ -411,6 +435,14 @@ class BallRollingEnv(DirectRLEnv):
             orientation=ground.init_state.rot,
         )
 
+        indenter_holder_plate = self.cfg.indenter_holder_plate
+        indenter_holder_plate.spawn.func(
+            indenter_holder_plate.prim_path,
+            indenter_holder_plate.spawn,
+            translation=indenter_holder_plate.init_state.pos,
+            orientation=indenter_holder_plate.init_state.rot,
+        )
+
         # goal marker
         VisualCuboid(
             prim_path="/Goal",
@@ -418,14 +450,6 @@ class BallRollingEnv(DirectRLEnv):
             position=np.array([0.5, 0.0, 0.021]),
             orientation=np.array([1, 0, 0, 0]),
             visible=False,
-        )
-
-        # just for visualizen what the main prim is
-        VisualCuboid(
-            prim_path="/Visuals/main_area",
-            size=0.02,
-            position=np.array([0.5, 0.0, -0.005]),
-            color=np.array([255.0, 0.0, 0.0]),
         )
 
         # add lights
