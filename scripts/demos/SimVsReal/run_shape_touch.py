@@ -175,9 +175,14 @@ def create_shapes_cfg() -> dict[str, RigidObjectCfg]:
     for i, file_path in enumerate(usd_files_path):
         file_name = file_path.stem
 
+        if i == 0:
+            pos = [0.5, 0.0, 0.02]
+        else:
+            pos = [0.55, -0.025 * len(usd_files_path) / 2 + 0.025 * i, 0.02]
+
         shapes[file_name] = RigidObjectCfg(
             prim_path=f"/World/envs/env_.*/{file_name}",
-            init_state=RigidObjectCfg.InitialStateCfg(pos=[0.5, 0.025 * i, 0.02]),
+            init_state=RigidObjectCfg.InitialStateCfg(pos=pos),
             spawn=sim_utils.UsdFileCfg(
                 usd_path=str(file_path),
                 # scale=(0.8, 0.8, 0.8),
@@ -194,20 +199,6 @@ def create_shapes_cfg() -> dict[str, RigidObjectCfg]:
         )
 
     return shapes
-
-
-def load_setup_config():
-    setup_cfg = {
-        "imgw": 320,
-        "imgh": 240,
-        "brd_frac": 0.15,
-        "pixmm": 0.0632,  # unit [mm/pixel]
-        "base_center_x": 0.5,
-        "base_center_y": 0.0,
-        "obj_height": 0.02,
-    }
-
-    return setup_cfg
 
 
 @configclass
@@ -261,6 +252,25 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
                 static_friction=1.0,
                 dynamic_friction=1.0,
                 restitution=0.0,
+            ),
+        ),
+    )
+
+    # spawn indenter_holder for cool visuals
+    indenter_holder_plate = AssetBaseCfg(
+        prim_path="/World/indenter_holder",
+        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.5, 0.0, 0.02), rot=(0.7071068, 0, 0, 0.7071068)),
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=f"{TACEX_ASSETS_DATA_DIR}/Props/indenter_holder_plate.usd",
+            # scale=(0.8, 0.8, 0.8),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                solver_position_iteration_count=16,
+                solver_velocity_iteration_count=1,
+                max_angular_velocity=1000.0,
+                max_linear_velocity=1000.0,
+                max_depenetration_velocity=5.0,
+                kinematic_enabled=True,
+                disable_gravity=False,
             ),
         ),
     )
@@ -333,6 +343,8 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
 
     ik_controller_cfg = DifferentialIKControllerCfg(command_type="pose", use_relative_mode=False, ik_method="dls")
 
+    main_pose = [0.5, 0.0, 0.02, 1, 0, 0, 0]
+
     # some filler values, needed for DirectRLEnv class
     episode_length_s = 0
     action_space = 0
@@ -353,15 +365,16 @@ class BallRollingEnv(DirectRLEnv):
         )
         # Obtain the frame index of the end-effector
         body_ids, body_names = self._robot.find_bodies("panda_hand")
-        # only save the first body index
+        # save only the first body index
         self._body_idx = body_ids[0]
         self._body_name = body_names[0]
 
         # For a fixed base robot, the frame index is one less than the body index.
         # This is because the root body is not included in the returned Jacobians.
         self._jacobi_body_idx = self._body_idx - 1
+        # self._jacobi_joint_ids = self._joint_ids # we take every joint
 
-        # ee offset w.r.t panda hand
+        # ee offset w.r.t panda hand -> based on the asset
         self._offset_pos = torch.tensor([0.0, 0.0, 0.11765], device=self.device).repeat(self.num_envs, 1)
         self._offset_rot = torch.tensor([0.0, 0, 1.0, 0.0], device=self.device).repeat(self.num_envs, 1)
         # ---
@@ -373,15 +386,10 @@ class BallRollingEnv(DirectRLEnv):
 
         self.goal_prim_view = None
 
+        self.main_pose = torch.tensor([self.cfg.main_pose], device=self.device)
+
         # add handle for debug visualization (this is set to a valid handle inside set_debug_vis)
         self.set_debug_vis(self.cfg.debug_vis)
-
-        # for sim data collection
-        setup_cfg = load_setup_config()
-        self.start_pose = torch.tensor(
-            [[setup_cfg["base_center_x"], setup_cfg["base_center_y"], setup_cfg["obj_height"], 1, 0, 0, 0]],
-            device=self.device,
-        )
 
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
@@ -400,13 +408,13 @@ class BallRollingEnv(DirectRLEnv):
         marker_cfg.prim_path = "/Visuals/FrameTransformer"
         ee_frame_cfg = FrameTransformerCfg(
             prim_path="/World/envs/env_.*/Robot/panda_link0",
-            debug_vis=True,
+            debug_vis=False,
             visualizer_cfg=marker_cfg,
             target_frames=[
                 FrameTransformerCfg.FrameCfg(
                     prim_path="/World/envs/env_.*/Robot/panda_hand",
                     name="end_effector",
-                    offset=OffsetCfg(pos=(0.0, 0.0, 0.11765), rot=(0.0, 0, 1.0, 0.0)),
+                    offset=OffsetCfg(pos=(0.0, 0.0, 0.11765), rot=(0.0, 0.0, 1.0, 0.0)),
                 ),
             ],
         )
@@ -427,6 +435,14 @@ class BallRollingEnv(DirectRLEnv):
             orientation=ground.init_state.rot,
         )
 
+        indenter_holder_plate = self.cfg.indenter_holder_plate
+        indenter_holder_plate.spawn.func(
+            indenter_holder_plate.prim_path,
+            indenter_holder_plate.spawn,
+            translation=indenter_holder_plate.init_state.pos,
+            orientation=indenter_holder_plate.init_state.rot,
+        )
+
         # goal marker
         VisualCuboid(
             prim_path="/Goal",
@@ -434,14 +450,6 @@ class BallRollingEnv(DirectRLEnv):
             position=np.array([0.5, 0.0, 0.021]),
             orientation=np.array([1, 0, 0, 0]),
             visible=False,
-        )
-
-        # just for visualizen what the main prim is
-        VisualCuboid(
-            prim_path="/Visuals/main_area",
-            size=0.02,
-            position=np.array([0.5, 0.0, -0.005]),
-            color=np.array([255.0, 0.0, 0.0]),
         )
 
         # add lights
@@ -468,7 +476,6 @@ class BallRollingEnv(DirectRLEnv):
         ee_pos_b, ee_quat_b = math_utils.combine_frame_transforms(
             ee_pos_b, ee_quat_b, self._offset_pos, self._offset_rot
         )
-
         # compute the joint commands
         joint_pos_des = self._ik_controller.compute(ee_pos_b, ee_quat_b, jacobian, joint_pos)
 
@@ -494,7 +501,7 @@ class BallRollingEnv(DirectRLEnv):
         # set goal pos
         if self.goal_prim_view is not None:
             # move goal back to main area
-            goal_pos = self.start_pose[:, :3]
+            goal_pos = self.main_pose[:, :3]
             goal_pos[:, 2] += 0.001
 
             goal_orient = torch.tensor([[1, 0, 0, 0]], device=self.device)
@@ -540,8 +547,6 @@ def run_simulator(env: BallRollingEnv):
         env._apply_action()
         env.scene.write_data_to_sim()
         env.sim.step(render=False)
-
-        # env.ik_commands = env.start_pose
 
         # update isaac buffers() -> also updates sensors
         env.scene.update(dt=env.physics_dt)
