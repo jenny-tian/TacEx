@@ -14,12 +14,11 @@ parser = argparse.ArgumentParser(
     description="Control Franka, which is equipped with one GelSight Mini Sensor, by moving the Frame in the GUI"
 )
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to spawn.")
-parser.add_argument("--sys", type=bool, default=True, help="Whether to track system utilization.")
 parser.add_argument(
     "--debug_vis",
     default=True,
     action="store_true",
-    help="Whether to render tactile images in the# append AppLauncher cli args",
+    help="If tactile images should be rendered inside the GUI.",
 )
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
@@ -211,7 +210,7 @@ def load_setup_config():
 
 
 @configclass
-class BallRollingEnvCfg(DirectRLEnvCfg):
+class ShapeTouchEnvCfg(DirectRLEnvCfg):
     # viewer settings
     viewer: ViewerCfg = ViewerCfg()
     # viewer.eye = (0.6, 0.1, 0.025)
@@ -229,8 +228,7 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
         dt=1 / 60,
         render_interval=decimation,
         physx=PhysxCfg(
-            enable_ccd=True,  # needed for more stable ball_rolling
-            # bounce_threshold_velocity=10000,
+            enable_ccd=True,
         ),
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
@@ -340,10 +338,10 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
     state_space = 0
 
 
-class BallRollingEnv(DirectRLEnv):
-    cfg: BallRollingEnvCfg
+class ShapeTouchEnv(DirectRLEnv):
+    cfg: ShapeTouchEnvCfg
 
-    def __init__(self, cfg: BallRollingEnvCfg, render_mode: str | None = None, **kwargs):
+    def __init__(self, cfg: ShapeTouchEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
 
         # --- for IK ---
@@ -512,7 +510,7 @@ class BallRollingEnv(DirectRLEnv):
         pass
 
 
-def run_simulator(env: BallRollingEnv):
+def run_simulator(env: ShapeTouchEnv):
     """Runs the simulation loop."""
     # for convenience, we directly turn on debug_vis
     if env.cfg.gsmini.debug_vis:
@@ -556,13 +554,13 @@ def run_simulator(env: BallRollingEnv):
 def main():
     """Main function."""
     # Define simulation env
-    env_cfg = BallRollingEnvCfg()
+    env_cfg = ShapeTouchEnvCfg()
     # override configurations with non-hydra CLI arguments
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     env_cfg.gsmini.debug_vis = args_cli.debug_vis
 
-    experiment = BallRollingEnv(env_cfg)
+    experiment = ShapeTouchEnv(env_cfg)
 
     # Now we are ready!
     print("[INFO]: Setup complete...")

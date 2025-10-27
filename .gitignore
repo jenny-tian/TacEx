@@ -61,3 +61,5 @@ tests/
 
 # Docker history
 .isaac-lab-docker-history
+
+real_data/

@@ -14,12 +14,12 @@ parser = argparse.ArgumentParser(
     description="Control Franka, which is equipped with one GelSight Mini Sensor, by moving the Frame in the GUI"
 )
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to spawn.")
-parser.add_argument("--sys", type=bool, default=True, help="Whether to track system utilization.")
+parser.add_argument("--path", type=str, help="Path to data folder.")
 parser.add_argument(
     "--debug_vis",
     default=True,
     action="store_true",
-    help="Whether to render tactile images in the# append AppLauncher cli args",
+    help="If tactile images should be rendered inside the GUI.",
 )
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
@@ -34,6 +34,7 @@ simulation_app = app_launcher.app
 import traceback
 from contextlib import suppress
 from pathlib import Path
+import json
 
 import omni.ui
 
@@ -78,6 +79,11 @@ from tacex_assets.robots.franka.franka_gsmini_single_rigid import (
 )
 from tacex_assets.sensors.gelsight_mini.gsmini_cfg import GelSightMiniCfg
 
+data_dir_path = Path(__file__).parent.resolve()
+ROBOT_DATA: dict = {}
+with open(f"{data_dir_path}/real_data/2025-10-27-14_39_03/robot_data.json", "r") as file:
+    ROBOT_DATA = json.load(file)
+
 
 class CustomEnvWindow(BaseEnvWindow):
     """Window manager for the RL environment."""
@@ -92,7 +98,7 @@ class CustomEnvWindow(BaseEnvWindow):
         # initialize base window
         super().__init__(env, window_name)
 
-        self.object_names = list(create_shapes_cfg().keys())
+        self.object_names = list(env.cfg.shapes.keys())
         self.current_object_name = self.object_names[0]
 
         # add custom UI elements
@@ -162,7 +168,7 @@ class CustomEnvWindow(BaseEnvWindow):
         self.env.reset()
 
 
-def create_shapes_cfg() -> dict[str, RigidObjectCfg]:
+def create_shapes_cfg(base_center_x, base_center_y, base_center_z) -> dict[str, RigidObjectCfg]:
     """Creates RigidObjectCfg's for each usd file in the `{TACEX_ASSETS_DATA_DIR}/Props/tactile_test_shapes/` directory.
 
     The objects are spawned on a line along the y axis.
@@ -176,16 +182,19 @@ def create_shapes_cfg() -> dict[str, RigidObjectCfg]:
         file_name = file_path.stem
 
         if i == 0:
-            pos = [0.5, 0.0, 0.02]
+            pos = [base_center_x, base_center_y, base_center_z]
         else:
-            pos = [0.55, -0.025 * len(usd_files_path) / 2 + 0.025 * i, 0.02]
+            pos = [
+                base_center_x + 0.05,
+                +base_center_y - 0.025 * len(usd_files_path) / 2 + 0.025 * i,
+                base_center_z,
+            ]
 
         shapes[file_name] = RigidObjectCfg(
             prim_path=f"/World/envs/env_.*/{file_name}",
             init_state=RigidObjectCfg.InitialStateCfg(pos=pos),
             spawn=sim_utils.UsdFileCfg(
                 usd_path=str(file_path),
-                # scale=(0.8, 0.8, 0.8),
                 rigid_props=sim_utils.RigidBodyPropertiesCfg(
                     solver_position_iteration_count=16,
                     solver_velocity_iteration_count=1,
@@ -202,11 +211,9 @@ def create_shapes_cfg() -> dict[str, RigidObjectCfg]:
 
 
 @configclass
-class BallRollingEnvCfg(DirectRLEnvCfg):
+class ShapeTouchEnvCfg(DirectRLEnvCfg):
     # viewer settings
     viewer: ViewerCfg = ViewerCfg()
-    # viewer.eye = (0.6, 0.1, 0.025)
-    # viewer.lookat = (-1.2, -2.0, -0.2)
     viewer.eye = (0.55, -0.06, 0.025)
     viewer.lookat = (-4.8, 6.0, -0.2)
 
@@ -220,8 +227,7 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
         dt=1 / 60,
         render_interval=decimation,
         physx=PhysxCfg(
-            enable_ccd=True,  # needed for more stable ball_rolling
-            # bounce_threshold_velocity=10000,
+            enable_ccd=True,
         ),
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
@@ -244,7 +250,7 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
     # Ground-plane
     ground = AssetBaseCfg(
         prim_path="/World/defaultGroundPlane",
-        init_state=AssetBaseCfg.InitialStateCfg(pos=(0, 0, 0)),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=(0, 0, ROBOT_DATA[0]["base_center_z"] - 0.02)),
         spawn=sim_utils.GroundPlaneCfg(
             physics_material=sim_utils.RigidBodyMaterialCfg(
                 friction_combine_mode="multiply",
@@ -259,10 +265,16 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
     # spawn indenter_holder for cool visuals
     indenter_holder_plate = AssetBaseCfg(
         prim_path="/World/indenter_holder",
-        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.5, 0.0, 0.02), rot=(0.7071068, 0, 0, 0.7071068)),
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=(
+                ROBOT_DATA[0]["base_center_x"],
+                ROBOT_DATA[0]["base_center_y"],
+                ROBOT_DATA[0]["base_center_z"],
+            ),
+            rot=(0.7071068, 0, 0, 0.7071068),
+        ),
         spawn=sim_utils.UsdFileCfg(
             usd_path=f"{TACEX_ASSETS_DATA_DIR}/Props/indenter_holder_plate.usd",
-            # scale=(0.8, 0.8, 0.8),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 solver_position_iteration_count=16,
                 solver_velocity_iteration_count=1,
@@ -275,7 +287,12 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
         ),
     )
 
-    # light
+    shapes: dict = create_shapes_cfg(
+        base_center_x=ROBOT_DATA[0]["base_center_x"],
+        base_center_y=ROBOT_DATA[0]["base_center_y"],
+        base_center_z=ROBOT_DATA[0]["base_center_z"],
+    )
+
     light = AssetBaseCfg(
         prim_path="/World/light",
         spawn=sim_utils.DomeLightCfg(color=(0.75, 0.75, 0.75), intensity=3000.0),
@@ -284,8 +301,6 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
     robot: ArticulationCfg = FRANKA_PANDA_ARM_SINGLE_GSMINI_HIGH_PD_RIGID_CFG.replace(
         prim_path="/World/envs/env_.*/Robot",
     )
-
-    shapes: dict = create_shapes_cfg()
 
     # setup marker for FOTS frame_transformer
     marker_cfg = FRAME_MARKER_CFG.copy()
@@ -297,7 +312,7 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
         sensor_camera_cfg=GelSightMiniCfg.SensorCameraCfg(
             prim_path_appendix="/Camera",
             update_period=0,
-            resolution=(320, 240),
+            resolution=(ROBOT_DATA[0]["imgw"], ROBOT_DATA[0]["imgh"]),
             data_types=["depth"],
             clipping_range=(0.024, 0.034),
         ),
@@ -318,7 +333,7 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
                 dx=26,
                 dy=29,
             ),
-            tactile_img_res=(320, 240),
+            tactile_img_res=(ROBOT_DATA[0]["imgw"], ROBOT_DATA[0]["imgh"]),
             device="cuda",
             frame_transformer_cfg=FrameTransformerCfg(
                 prim_path="/World/envs/env_.*/Robot/gelsight_mini_gelpad",  # "/World/envs/env_.*/Robot/gelsight_mini_case",
@@ -338,12 +353,20 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
     gsmini.optical_sim_cfg = gsmini.optical_sim_cfg.replace(
         with_shadow=False,
         device="cuda",
-        tactile_img_res=(320, 240),
+        tactile_img_res=(ROBOT_DATA[0]["imgw"], ROBOT_DATA[0]["imgh"]),
     )
 
     ik_controller_cfg = DifferentialIKControllerCfg(command_type="pose", use_relative_mode=False, ik_method="dls")
 
-    main_pose = [0.5, 0.0, 0.02, 1, 0, 0, 0]
+    main_pose = [
+        ROBOT_DATA[0]["base_center_x"],
+        ROBOT_DATA[0]["base_center_y"],
+        ROBOT_DATA[0]["base_center_z"],
+        1,
+        0,
+        0,
+        0,
+    ]
 
     # some filler values, needed for DirectRLEnv class
     episode_length_s = 0
@@ -352,10 +375,10 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
     state_space = 0
 
 
-class BallRollingEnv(DirectRLEnv):
-    cfg: BallRollingEnvCfg
+class ShapeTouchEnv(DirectRLEnv):
+    cfg: ShapeTouchEnvCfg
 
-    def __init__(self, cfg: BallRollingEnvCfg, render_mode: str | None = None, **kwargs):
+    def __init__(self, cfg: ShapeTouchEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
 
         # --- for IK ---
@@ -372,9 +395,8 @@ class BallRollingEnv(DirectRLEnv):
         # For a fixed base robot, the frame index is one less than the body index.
         # This is because the root body is not included in the returned Jacobians.
         self._jacobi_body_idx = self._body_idx - 1
-        # self._jacobi_joint_ids = self._joint_ids # we take every joint
 
-        # ee offset w.r.t panda hand -> based on the asset
+        # ee offset w.r.t panda hand
         self._offset_pos = torch.tensor([0.0, 0.0, 0.11765], device=self.device).repeat(self.num_envs, 1)
         self._offset_rot = torch.tensor([0.0, 0, 1.0, 0.0], device=self.device).repeat(self.num_envs, 1)
         # ---
@@ -519,7 +541,7 @@ class BallRollingEnv(DirectRLEnv):
         pass
 
 
-def run_simulator(env: BallRollingEnv):
+def run_simulator(env: ShapeTouchEnv):
     """Runs the simulation loop."""
     # for convenience, we directly turn on debug_vis
     if env.cfg.gsmini.debug_vis:
@@ -536,15 +558,31 @@ def run_simulator(env: BallRollingEnv):
     env.reset()
     env.goal_prim_view = XFormPrim(prim_paths_expr="/Goal", name="Goal", usd=True)
 
+    data_point_idx = 0
+    step = 0
+
+    old_obj: RigidObject = env.scene.rigid_objects["line"]
+    new_obj: RigidObject = env.scene.rigid_objects["hexagon"]
+    new_pose = new_obj.data.root_pose_w
+    # swap position of old and new obj
+    old_obj.write_root_pose_to_sim(new_pose)
+    new_obj.write_root_pose_to_sim(env.main_pose)
+
     # Simulation loop
     while simulation_app.is_running():
-        positions, orientations = env.goal_prim_view.get_world_poses()
-        env.ik_commands[:, :3] = positions - env.scene.env_origins
-        env.ik_commands[:, 3:] = orientations
+        # positions, orientations = env.goal_prim_view.get_world_poses()
+        # env.ik_commands[:, :3] = positions - env.scene.env_origins
+        # env.ik_commands[:, 3:] = orientations
 
-        # perform physics step
-        env._pre_physics_step(None)
-        env._apply_action()
+        # # perform physics step
+        # env._pre_physics_step(None)
+        # env._apply_action()
+        if step % 50 == 0 and data_point_idx < len(ROBOT_DATA) - 1:
+            data_point_idx += 1
+            data = ROBOT_DATA[data_point_idx]
+            print("frame_num, ", data["corresponding_frame"])
+            joint_pos_des = torch.tensor(ROBOT_DATA[data_point_idx]["joint_pos"])
+            env._robot.set_joint_position_target(joint_pos_des)
         env.scene.write_data_to_sim()
         env.sim.step(render=False)
 
@@ -553,6 +591,8 @@ def run_simulator(env: BallRollingEnv):
         # render scene for cameras (used by sensor)
         env.sim.render()
 
+        step += 1
+
     env.close()
 
     pynvml.nvmlShutdown()
@@ -560,14 +600,16 @@ def run_simulator(env: BallRollingEnv):
 
 def main():
     """Main function."""
+
     # Define simulation env
-    env_cfg = BallRollingEnvCfg()
+    env_cfg = ShapeTouchEnvCfg()
+
     # override configurations with non-hydra CLI arguments
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     env_cfg.gsmini.debug_vis = args_cli.debug_vis
 
-    experiment = BallRollingEnv(env_cfg)
+    experiment = ShapeTouchEnv(env_cfg)
 
     # Now we are ready!
     print("[INFO]: Setup complete...")
