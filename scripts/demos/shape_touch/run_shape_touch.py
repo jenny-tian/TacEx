@@ -169,17 +169,25 @@ def create_shapes_cfg() -> dict[str, RigidObjectCfg]:
         shapes: dict of names and corresponding RigidObjectCfg's
     """
     shapes = {}
-    usd_files_path = list(Path(f"{TACEX_ASSETS_DATA_DIR}/Props/tactile_test_shapes/").glob("*.usd"))
+    usd_files_path = sorted(list(Path(f"{TACEX_ASSETS_DATA_DIR}/Props/tactile_test_shapes/").glob("*.usd")))
 
     for i, file_path in enumerate(usd_files_path):
         file_name = file_path.stem
 
+        if i == 0:
+            pos = [0.5, 0.0, 0.02]
+        else:
+            pos = [
+                0.5 - 0.25,
+                -0.025 * len(usd_files_path) / 2 + 0.025 * i,
+                0.02,
+            ]
+
         shapes[file_name] = RigidObjectCfg(
             prim_path=f"/World/envs/env_.*/{file_name}",
-            init_state=RigidObjectCfg.InitialStateCfg(pos=[0.5, 0.025 * i, 0.02]),
+            init_state=RigidObjectCfg.InitialStateCfg(pos=pos),
             spawn=sim_utils.UsdFileCfg(
                 usd_path=str(file_path),
-                # scale=(0.8, 0.8, 0.8),
                 rigid_props=sim_utils.RigidBodyPropertiesCfg(
                     solver_position_iteration_count=16,
                     solver_velocity_iteration_count=1,
@@ -193,20 +201,6 @@ def create_shapes_cfg() -> dict[str, RigidObjectCfg]:
         )
 
     return shapes
-
-
-def load_setup_config():
-    setup_cfg = {
-        "imgw": 320,
-        "imgh": 240,
-        "brd_frac": 0.15,
-        "pixmm": 0.0632,  # unit [mm/pixel]
-        "base_center_x": 0.5,
-        "base_center_y": 0.0,
-        "obj_height": 0.02,
-    }
-
-    return setup_cfg
 
 
 @configclass
@@ -331,6 +325,8 @@ class ShapeTouchEnvCfg(DirectRLEnvCfg):
 
     ik_controller_cfg = DifferentialIKControllerCfg(command_type="pose", use_relative_mode=False, ik_method="dls")
 
+    main_pose = [0.5, 0.0, 0.02, 1, 0, 0, 0]
+
     # some filler values, needed for DirectRLEnv class
     episode_length_s = 0
     action_space = 0
@@ -371,15 +367,10 @@ class ShapeTouchEnv(DirectRLEnv):
 
         self.goal_prim_view = None
 
+        self.main_pose = torch.tensor([self.cfg.main_pose], device=self.device)
+
         # add handle for debug visualization (this is set to a valid handle inside set_debug_vis)
         self.set_debug_vis(self.cfg.debug_vis)
-
-        # for sim data collection
-        setup_cfg = load_setup_config()
-        self.start_pose = torch.tensor(
-            [[setup_cfg["base_center_x"], setup_cfg["base_center_y"], setup_cfg["obj_height"], 1, 0, 0, 0]],
-            device=self.device,
-        )
 
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)

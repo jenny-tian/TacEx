@@ -106,9 +106,7 @@ class TaximSimulator(GelSightSimulator):
             with_shadow=self.cfg.with_shadow,
             press_depth=self._indentation_depth,
             orig_hm_fmt=False,
-        ).movedim(
-            1, 3
-        )  # *255).type(torch.uint8)
+        ).movedim(1, 3)  # *255).type(torch.uint8)
 
         return self.tactile_rgb_img
 

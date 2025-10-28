@@ -14,7 +14,6 @@ parser = argparse.ArgumentParser(
     description="Control Franka, which is equipped with one GelSight Mini Sensor, by moving the Frame in the GUI"
 )
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to spawn.")
-parser.add_argument("--path", type=str, help="Path to data folder.")
 parser.add_argument(
     "--debug_vis",
     default=True,
@@ -34,7 +33,6 @@ simulation_app = app_launcher.app
 import traceback
 from contextlib import suppress
 from pathlib import Path
-import json
 
 import omni.ui
 
@@ -44,7 +42,6 @@ with suppress(ImportError):
 
 import numpy as np
 import torch
-import cv2
 
 import carb
 import pynvml
@@ -80,16 +77,6 @@ from tacex_assets.robots.franka.franka_gsmini_single_rigid import (
 )
 from tacex_assets.sensors.gelsight_mini.gsmini_cfg import GelSightMiniCfg
 
-from tacex_tasks.utils import DirectLiveVisualizer
-
-
-# data_dir_path = Path(__file__).parent.resolve() / "real_data/1_hexagon"
-data_dir_path = Path(__file__).parent.resolve() / "real_data/0_calib_cylinder_r2mm"
-
-ROBOT_DATA: dict = {}
-with open(f"{data_dir_path}/robot_data.json", "r") as file:
-    ROBOT_DATA = json.load(file)
-
 
 class CustomEnvWindow(BaseEnvWindow):
     """Window manager for the RL environment."""
@@ -104,7 +91,7 @@ class CustomEnvWindow(BaseEnvWindow):
         # initialize base window
         super().__init__(env, window_name)
 
-        self.object_names = list(env.cfg.shapes.keys())
+        self.object_names = list(create_shapes_cfg().keys())
         self.current_object_name = self.object_names[0]
 
         # add custom UI elements
@@ -174,7 +161,7 @@ class CustomEnvWindow(BaseEnvWindow):
         self.env.reset()
 
 
-def create_shapes_cfg(base_center_x, base_center_y, base_center_z) -> dict[str, RigidObjectCfg]:
+def create_shapes_cfg() -> dict[str, RigidObjectCfg]:
     """Creates RigidObjectCfg's for each usd file in the `{TACEX_ASSETS_DATA_DIR}/Props/tactile_test_shapes/` directory.
 
     The objects are spawned on a line along the y axis.
@@ -188,12 +175,12 @@ def create_shapes_cfg(base_center_x, base_center_y, base_center_z) -> dict[str, 
         file_name = file_path.stem
 
         if i == 0:
-            pos = [base_center_x, base_center_y, base_center_z]
+            pos = [0.5, 0.0, 0.02]
         else:
             pos = [
-                base_center_x - 0.25,
-                +base_center_y - 0.025 * len(usd_files_path) / 2 + 0.025 * i,
-                base_center_z,
+                0.5 - 0.25,
+                -0.025 * len(usd_files_path) / 2 + 0.025 * i,
+                0.02,
             ]
 
         shapes[file_name] = RigidObjectCfg(
@@ -220,6 +207,8 @@ def create_shapes_cfg(base_center_x, base_center_y, base_center_z) -> dict[str, 
 class ShapeTouchEnvCfg(DirectRLEnvCfg):
     # viewer settings
     viewer: ViewerCfg = ViewerCfg()
+    # viewer.eye = (0.6, 0.1, 0.025)
+    # viewer.lookat = (-1.2, -2.0, -0.2)
     viewer.eye = (0.55, -0.06, 0.025)
     viewer.lookat = (-4.8, 6.0, -0.2)
 
@@ -256,7 +245,7 @@ class ShapeTouchEnvCfg(DirectRLEnvCfg):
     # Ground-plane
     ground = AssetBaseCfg(
         prim_path="/World/defaultGroundPlane",
-        init_state=AssetBaseCfg.InitialStateCfg(pos=(0, 0, ROBOT_DATA[0]["base_center_z"] - 0.02)),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=(0, 0, 0)),
         spawn=sim_utils.GroundPlaneCfg(
             physics_material=sim_utils.RigidBodyMaterialCfg(
                 friction_combine_mode="multiply",
@@ -268,37 +257,7 @@ class ShapeTouchEnvCfg(DirectRLEnvCfg):
         ),
     )
 
-    # spawn indenter_holder for cool visuals
-    indenter_holder_plate = AssetBaseCfg(
-        prim_path="/World/indenter_holder",
-        init_state=AssetBaseCfg.InitialStateCfg(
-            pos=(
-                ROBOT_DATA[0]["base_center_x"],
-                ROBOT_DATA[0]["base_center_y"],
-                ROBOT_DATA[0]["base_center_z"],
-            ),
-            rot=(0.7071068, 0, 0, 0.7071068),
-        ),
-        spawn=sim_utils.UsdFileCfg(
-            usd_path=f"{TACEX_ASSETS_DATA_DIR}/Props/indenter_holder_plate.usd",
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                solver_position_iteration_count=16,
-                solver_velocity_iteration_count=1,
-                max_angular_velocity=1000.0,
-                max_linear_velocity=1000.0,
-                max_depenetration_velocity=5.0,
-                kinematic_enabled=True,
-                disable_gravity=False,
-            ),
-        ),
-    )
-
-    shapes: dict = create_shapes_cfg(
-        base_center_x=ROBOT_DATA[0]["base_center_x"],
-        base_center_y=ROBOT_DATA[0]["base_center_y"],
-        base_center_z=ROBOT_DATA[0]["base_center_z"],
-    )
-
+    # light
     light = AssetBaseCfg(
         prim_path="/World/light",
         spawn=sim_utils.DomeLightCfg(color=(0.75, 0.75, 0.75), intensity=3000.0),
@@ -307,6 +266,8 @@ class ShapeTouchEnvCfg(DirectRLEnvCfg):
     robot: ArticulationCfg = FRANKA_PANDA_ARM_SINGLE_GSMINI_HIGH_PD_RIGID_CFG.replace(
         prim_path="/World/envs/env_.*/Robot",
     )
+
+    shapes: dict = create_shapes_cfg()
 
     # setup marker for FOTS frame_transformer
     marker_cfg = FRAME_MARKER_CFG.copy()
@@ -318,7 +279,7 @@ class ShapeTouchEnvCfg(DirectRLEnvCfg):
         sensor_camera_cfg=GelSightMiniCfg.SensorCameraCfg(
             prim_path_appendix="/Camera",
             update_period=0,
-            resolution=(ROBOT_DATA[0]["imgw"], ROBOT_DATA[0]["imgh"]),
+            resolution=(320, 240),
             data_types=["depth"],
             clipping_range=(0.024, 0.034),
         ),
@@ -339,7 +300,7 @@ class ShapeTouchEnvCfg(DirectRLEnvCfg):
                 dx=26,
                 dy=29,
             ),
-            tactile_img_res=(ROBOT_DATA[0]["imgw"], ROBOT_DATA[0]["imgh"]),
+            tactile_img_res=(320, 240),
             device="cuda",
             frame_transformer_cfg=FrameTransformerCfg(
                 prim_path="/World/envs/env_.*/Robot/gelsight_mini_gelpad",  # "/World/envs/env_.*/Robot/gelsight_mini_case",
@@ -359,20 +320,12 @@ class ShapeTouchEnvCfg(DirectRLEnvCfg):
     gsmini.optical_sim_cfg = gsmini.optical_sim_cfg.replace(
         with_shadow=False,
         device="cuda",
-        tactile_img_res=(ROBOT_DATA[0]["imgw"], ROBOT_DATA[0]["imgh"]),
+        tactile_img_res=(320, 240),
     )
 
     ik_controller_cfg = DifferentialIKControllerCfg(command_type="pose", use_relative_mode=False, ik_method="dls")
 
-    main_pose = [
-        ROBOT_DATA[0]["base_center_x"],
-        ROBOT_DATA[0]["base_center_y"],
-        ROBOT_DATA[0]["base_center_z"],
-        1,
-        0,
-        0,
-        0,
-    ]
+    main_pose = [0.5, 0.0, 0.02, 1, 0, 0, 0]
 
     # some filler values, needed for DirectRLEnv class
     episode_length_s = 0
@@ -394,7 +347,7 @@ class ShapeTouchEnv(DirectRLEnv):
         )
         # Obtain the frame index of the end-effector
         body_ids, body_names = self._robot.find_bodies("panda_hand")
-        # save only the first body index
+        # only save the first body index
         self._body_idx = body_ids[0]
         self._body_name = body_names[0]
 
@@ -419,31 +372,6 @@ class ShapeTouchEnv(DirectRLEnv):
         # add handle for debug visualization (this is set to a valid handle inside set_debug_vis)
         self.set_debug_vis(self.cfg.debug_vis)
 
-        # create visualizer for real frame etc.
-        if self.cfg.debug_vis:
-            # add plots
-            self.visualizers = {
-                "Images": DirectLiveVisualizer(
-                    self.cfg.debug_vis, self.num_envs, self._window, visualizer_name="Images"
-                ),
-                "Metrics": DirectLiveVisualizer(
-                    self.cfg.debug_vis, self.num_envs, self._window, visualizer_name="Metrics"
-                ),
-            }
-
-            self.visualizers["Images"].terms["real_tactile_img"] = torch.zeros(
-                (
-                    self.num_envs,
-                    self.gsmini.tactile_image_shape[0],
-                    self.gsmini.tactile_image_shape[1],
-                    self.gsmini.tactile_image_shape[2],
-                )
-            )
-            self.visualizers["Metrics"].terms["SSIM"] = torch.zeros((self.num_envs, 1))
-
-            for vis in self.visualizers.values():
-                vis.create_visualizer()
-
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
         self.scene.articulations["robot"] = self._robot
@@ -467,7 +395,7 @@ class ShapeTouchEnv(DirectRLEnv):
                 FrameTransformerCfg.FrameCfg(
                     prim_path="/World/envs/env_.*/Robot/panda_hand",
                     name="end_effector",
-                    offset=OffsetCfg(pos=(0.0, 0.0, 0.11765), rot=(0.0, 0.0, 1.0, 0.0)),
+                    offset=OffsetCfg(pos=(0.0, 0.0, 0.11765), rot=(0.0, 0, 1.0, 0.0)),
                 ),
             ],
         )
@@ -488,21 +416,21 @@ class ShapeTouchEnv(DirectRLEnv):
             orientation=ground.init_state.rot,
         )
 
-        indenter_holder_plate = self.cfg.indenter_holder_plate
-        indenter_holder_plate.spawn.func(
-            indenter_holder_plate.prim_path,
-            indenter_holder_plate.spawn,
-            translation=indenter_holder_plate.init_state.pos,
-            orientation=indenter_holder_plate.init_state.rot,
-        )
-
         # goal marker
         VisualCuboid(
             prim_path="/Goal",
             size=0.01,
-            position=np.array([ROBOT_DATA[0]["base_center_x"], ROBOT_DATA[0]["base_center_y"], 0.021]),
+            position=np.array([0.5, 0.0, 0.021]),
             orientation=np.array([1, 0, 0, 0]),
             visible=False,
+        )
+
+        # just for visualizen what the main prim is
+        VisualCuboid(
+            prim_path="/Visuals/main_area",
+            size=0.02,
+            position=np.array([0.5, 0.0, -0.005]),
+            color=np.array([255.0, 0.0, 0.0]),
         )
 
         # add lights
@@ -529,6 +457,7 @@ class ShapeTouchEnv(DirectRLEnv):
         ee_pos_b, ee_quat_b = math_utils.combine_frame_transforms(
             ee_pos_b, ee_quat_b, self._offset_pos, self._offset_rot
         )
+
         # compute the joint commands
         joint_pos_des = self._ik_controller.compute(ee_pos_b, ee_quat_b, jacobian, joint_pos)
 
@@ -554,7 +483,8 @@ class ShapeTouchEnv(DirectRLEnv):
         # set goal pos
         if self.goal_prim_view is not None:
             # move goal back to main area
-            goal_pos = self.main_pose[:, :3]
+            goal_pos = self.start_pose[:, :3]
+            goal_pos[:, 2] += 0.001
 
             goal_orient = torch.tensor([[1, 0, 0, 0]], device=self.device)
             self.goal_prim_view.set_world_poses(positions=goal_pos, orientations=goal_orient)
@@ -588,43 +518,15 @@ def run_simulator(env: ShapeTouchEnv):
     env.reset()
     env.goal_prim_view = XFormPrim(prim_paths_expr="/Goal", name="Goal", usd=True)
 
-    data_point_idx = 1
-    step = 0
-
-    env._window._set_main_obj("obj_02_hexagon")
-
     # Simulation loop
     while simulation_app.is_running():
-        if step % 35 == 0 and data_point_idx < len(ROBOT_DATA) - 1:
-            data = ROBOT_DATA[data_point_idx]
-            print("corresponding_frame: ", data["corresponding_frame"])
+        positions, orientations = env.goal_prim_view.get_world_poses()
+        env.ik_commands[:, :3] = positions - env.scene.env_origins
+        env.ik_commands[:, 3:] = orientations
 
-            env.visualizers["Images"].terms["real_tactile_img"] = torch.tensor(
-                cv2.cvtColor(cv2.imread(data_dir_path / data["corresponding_frame"]), cv2.COLOR_RGB2BGR)
-            ).unsqueeze(0)
-
-            print("(x,y,z): ", data["(x,y,z)"])
-            print("indentation_depth: ", data["indentation_depth"])
-
-            ee_pose_w = env._robot.data.body_pose_w[:, env._body_idx]
-            root_pose_w = env._robot.data.root_pose_w
-            # compute ee frame in root frame
-            ee_pos_b, ee_quat_b = math_utils.subtract_frame_transforms(
-                root_pose_w[:, 0:3], root_pose_w[:, 3:7], ee_pose_w[:, 0:3], ee_pose_w[:, 3:7]
-            )
-
-            # apply ee offset
-            ee_pos_b, ee_quat_b = math_utils.combine_frame_transforms(
-                ee_pos_b, ee_quat_b, env._offset_pos, env._offset_rot
-            )
-            print("--- Sim ---")
-            print("ee pos ", ee_pos_b[0])
-            print("sensor indentation depth ", env.gsmini.indentation_depth / 1000)
-            print("")
-            joint_pos_des = torch.tensor(data["joint_pos"])
-
-            data_point_idx += 1
-            env._robot.set_joint_position_target(joint_pos_des)
+        # perform physics step
+        env._pre_physics_step(None)
+        env._apply_action()
         env.scene.write_data_to_sim()
         env.sim.step(render=False)
 
@@ -633,7 +535,16 @@ def run_simulator(env: ShapeTouchEnv):
         # render scene for cameras (used by sensor)
         env.sim.render()
 
-        step += 1
+        ee_pose_w = env._robot.data.body_pose_w[:, env._body_idx]
+        root_pose_w = env._robot.data.root_pose_w
+        # compute ee frame in root frame
+        ee_pos_b, ee_quat_b = math_utils.subtract_frame_transforms(
+            root_pose_w[:, 0:3], root_pose_w[:, 3:7], ee_pose_w[:, 0:3], ee_pose_w[:, 3:7]
+        )
+        # apply ee offset
+        ee_pos_b, ee_quat_b = math_utils.combine_frame_transforms(ee_pos_b, ee_quat_b, env._offset_pos, env._offset_rot)
+
+        print("Indentation depth [mm] ", env.gsmini.indentation_depth)
 
     env.close()
 
@@ -642,10 +553,8 @@ def run_simulator(env: ShapeTouchEnv):
 
 def main():
     """Main function."""
-
     # Define simulation env
     env_cfg = ShapeTouchEnvCfg()
-
     # override configurations with non-hydra CLI arguments
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device

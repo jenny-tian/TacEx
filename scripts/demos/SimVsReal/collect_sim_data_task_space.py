@@ -256,7 +256,9 @@ class ShapeTouchEnvCfg(DirectRLEnvCfg):
     # Ground-plane
     ground = AssetBaseCfg(
         prim_path="/World/defaultGroundPlane",
-        init_state=AssetBaseCfg.InitialStateCfg(pos=(0, 0, ROBOT_DATA[0]["base_center_z"] - 0.02)),
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=(0, 0, ROBOT_DATA[0]["base_center_z"] + ROBOT_DATA[0]["HEIGHT_OFFSET"] - 0.02)
+        ),
         spawn=sim_utils.GroundPlaneCfg(
             physics_material=sim_utils.RigidBodyMaterialCfg(
                 friction_combine_mode="multiply",
@@ -275,7 +277,7 @@ class ShapeTouchEnvCfg(DirectRLEnvCfg):
             pos=(
                 ROBOT_DATA[0]["base_center_x"],
                 ROBOT_DATA[0]["base_center_y"],
-                ROBOT_DATA[0]["base_center_z"],
+                ROBOT_DATA[0]["base_center_z"] + ROBOT_DATA[0]["HEIGHT_OFFSET"],
             ),
             rot=(0.7071068, 0, 0, 0.7071068),
         ),
@@ -296,7 +298,7 @@ class ShapeTouchEnvCfg(DirectRLEnvCfg):
     shapes: dict = create_shapes_cfg(
         base_center_x=ROBOT_DATA[0]["base_center_x"],
         base_center_y=ROBOT_DATA[0]["base_center_y"],
-        base_center_z=ROBOT_DATA[0]["base_center_z"],
+        base_center_z=ROBOT_DATA[0]["base_center_z"] + ROBOT_DATA[0]["HEIGHT_OFFSET"],
     )
 
     light = AssetBaseCfg(
@@ -367,7 +369,7 @@ class ShapeTouchEnvCfg(DirectRLEnvCfg):
     main_pose = [
         ROBOT_DATA[0]["base_center_x"],
         ROBOT_DATA[0]["base_center_y"],
-        ROBOT_DATA[0]["base_center_z"],
+        ROBOT_DATA[0]["base_center_z"] + ROBOT_DATA[0]["HEIGHT_OFFSET"],
         1,
         0,
         0,
@@ -591,11 +593,11 @@ def run_simulator(env: ShapeTouchEnv):
     data_point_idx = 1
     step = 0
 
-    env._window._set_main_obj("obj_02_hexagon")
+    env._window._set_main_obj("0_calib_cylinder_r2mm")  # obj_02_hexagon
 
     # Simulation loop
     while simulation_app.is_running():
-        if step % 35 == 0 and data_point_idx < len(ROBOT_DATA) - 1:
+        if step % 50 == 0 and data_point_idx < len(ROBOT_DATA) - 1:
             data = ROBOT_DATA[data_point_idx]
             print("corresponding_frame: ", data["corresponding_frame"])
 
@@ -618,13 +620,17 @@ def run_simulator(env: ShapeTouchEnv):
                 ee_pos_b, ee_quat_b, env._offset_pos, env._offset_rot
             )
             print("--- Sim ---")
-            print("ee pos ", ee_pos_b[0])
+            print("ee pos ", ee_pos_b)
             print("sensor indentation depth ", env.gsmini.indentation_depth / 1000)
             print("")
-            joint_pos_des = torch.tensor(data["joint_pos"])
+
+            positions = torch.tensor(data["(x,y,z)"], device=env.device).unsqueeze(0)
+            env.ik_commands[:, :3] = positions - env.scene.env_origins
+            env.ik_commands[:, 3:] = torch.tensor([1.0, 0, 0.0, 0.0], device=env.device).repeat(env.num_envs, 1)
 
             data_point_idx += 1
-            env._robot.set_joint_position_target(joint_pos_des)
+        env._pre_physics_step(None)
+        env._apply_action()
         env.scene.write_data_to_sim()
         env.sim.step(render=False)
 

@@ -118,7 +118,7 @@ class GelSightSensor(SensorBase):
 
     @property
     def tactile_image_shape(self) -> tuple[int, int, int]:
-        """Shape of the simulated tactile RGB image, i.e. (channels, height, width)."""
+        """Shape of the simulated tactile RGB image, i.e. (height, width, channels)."""
         return (self.cfg.optical_sim_cfg.tactile_img_res[1], self.cfg.optical_sim_cfg.tactile_img_res[0], 3)
 
     @property
@@ -457,9 +457,9 @@ class GelSightSensor(SensorBase):
                         )
                         self._windows["camera_rgb"][str(i)] = window
                         # create image provider
-                        self._img_providers["camera_rgb"][
-                            str(i)
-                        ] = omni.ui.ByteImageProvider()  # default format omni.ui.TextureFormat.RGBA8_UNORM
+                        self._img_providers["camera_rgb"][str(i)] = (
+                            omni.ui.ByteImageProvider()
+                        )  # default format omni.ui.TextureFormat.RGBA8_UNORM
 
                     frame = self._data.output["camera_rgb"][i].cpu().numpy()
 
@@ -492,9 +492,9 @@ class GelSightSensor(SensorBase):
                         )
                         self._windows["camera_depth"][str(i)] = window
                         # create image provider
-                        self._img_providers["camera_depth"][
-                            str(i)
-                        ] = omni.ui.ByteImageProvider()  # default format omni.ui.TextureFormat.RGBA8_UNORM
+                        self._img_providers["camera_depth"][str(i)] = (
+                            omni.ui.ByteImageProvider()
+                        )  # default format omni.ui.TextureFormat.RGBA8_UNORM
 
                     frame = self._data.output["camera_depth"][i].cpu().numpy()
                     # # image is channel first, convert to channel last
