@@ -41,6 +41,7 @@ with suppress(ImportError):
     import isaacsim.gui.components.ui_utils as ui_utils
 
 import numpy as np
+import cv2
 import torch
 
 import carb
@@ -76,6 +77,7 @@ from tacex_assets.robots.franka.franka_gsmini_single_rigid import (
     FRANKA_PANDA_ARM_SINGLE_GSMINI_HIGH_PD_RIGID_CFG,
 )
 from tacex_assets.sensors.gelsight_mini.gsmini_cfg import GelSightMiniCfg
+from tacex_tasks.utils import DirectLiveVisualizer
 
 
 class CustomEnvWindow(BaseEnvWindow):
@@ -372,6 +374,25 @@ class ShapeTouchEnv(DirectRLEnv):
         # add handle for debug visualization (this is set to a valid handle inside set_debug_vis)
         self.set_debug_vis(self.cfg.debug_vis)
 
+        # create visualizer for real frame etc.
+        self.visualizers = {
+            "Images": DirectLiveVisualizer(self.cfg.debug_vis, self.num_envs, self._window, visualizer_name="Images"),
+            "Metrics": DirectLiveVisualizer(self.cfg.debug_vis, self.num_envs, self._window, visualizer_name="Metrics"),
+        }
+
+        self.visualizers["Images"].terms["real_tactile_img"] = torch.zeros(
+            (
+                self.num_envs,
+                self.gsmini.tactile_image_shape[0],
+                self.gsmini.tactile_image_shape[1],
+                self.gsmini.tactile_image_shape[2],
+            )
+        )
+        self.visualizers["Metrics"].terms["SSIM"] = torch.zeros((self.num_envs, 1))
+
+        for vis in self.visualizers.values():
+            vis.create_visualizer()
+
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
         self.scene.articulations["robot"] = self._robot
@@ -501,6 +522,28 @@ class ShapeTouchEnv(DirectRLEnv):
         pass
 
 
+pixmm = 0.0632  # mm/pixel
+cylinder_radius_mm = 2.0
+
+
+def detect_circle(img, expected_circle_radius, pixmm):
+    img = img.copy()
+    gray_scale = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    gray_scale = cv2.medianBlur(gray_scale, 5)
+
+    circles = cv2.HoughCircles(
+        gray_scale,
+        cv2.HOUGH_GRADIENT,
+        1,
+        10,
+        param1=25,
+        param2=15,
+        minRadius=int(expected_circle_radius / pixmm - 1),
+        maxRadius=int(expected_circle_radius / pixmm + 1),
+    )
+    return circles
+
+
 def run_simulator(env: ShapeTouchEnv):
     """Runs the simulation loop."""
     # for convenience, we directly turn on debug_vis
@@ -543,6 +586,35 @@ def run_simulator(env: ShapeTouchEnv):
         )
         # apply ee offset
         ee_pos_b, ee_quat_b = math_utils.combine_frame_transforms(ee_pos_b, ee_quat_b, env._offset_pos, env._offset_rot)
+
+        # get img of env 0
+        tactile_rgb = env.gsmini.data.output["tactile_rgb"].cpu().numpy()[0]
+        tactile_rgb = cv2.normalize(
+            src=tactile_rgb, dst=None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U
+        )
+        detected_circles = detect_circle(tactile_rgb, expected_circle_radius=cylinder_radius_mm, pixmm=pixmm)
+
+        # draw should be-position of circle
+        cv2.circle(
+            tactile_rgb,
+            (int(tactile_rgb.shape[0] / 2), int(tactile_rgb.shape[1] / 2)),
+            int(cylinder_radius_mm / pixmm),
+            (0, 0, 0),
+            2,
+        )
+        cv2.circle(tactile_rgb, (int(tactile_rgb.shape[0] / 2), int(tactile_rgb.shape[1] / 2)), 2, (0, 0, 0), 2)
+
+        # draw detected circle
+        if detected_circles is not None:
+            detected_circles = np.uint16(np.around(detected_circles))
+            x, y, r = detected_circles[0][0]
+            # draw inner_circle
+            cv2.circle(tactile_rgb, (x, y), r, (0, 255, 0), 2)  # circle outline
+            cv2.circle(tactile_rgb, (x, y), 2, (0, 255, 0), 2)  # circle center
+
+        tactile_rgb = tactile_rgb.astype(np.uint8)
+        tactile_rgb = cv2.cvtColor(tactile_rgb, cv2.COLOR_RGB2RGBA)
+        env.visualizers["Images"].terms["real_tactile_img"] = tactile_rgb * 255
 
         print("Indentation depth [mm] ", env.gsmini.indentation_depth)
 

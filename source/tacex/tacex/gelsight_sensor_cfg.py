@@ -32,7 +32,26 @@ class GelSightSensorCfg(SensorBaseCfg):
         update_period: float = 0
         resolution: tuple[int, int] = (32, 24)
         data_types: list[str] = ["depth"]
-        clipping_range: tuple[float, float] = (0.0, 1.0)
+        clipping_range: tuple[float, float] = (0.024, 0.028)
+        update_latest_camera_pose: bool = False
+
+        focal_length: float = 20
+        """Focal length of the sensor camera (in [cm])."""
+
+        focus_distance: float = 0.025
+        """Distance from camera to focus plane (in [m])."""
+
+        border_fraction: float = 0.65  # 0.15
+        """Fraction of the image dimensions to crop from each border. Value clamped in [0.0, 0.49] 
+        
+        Behavior is the same as for the GelSightSDK (https://github.com/gelsightinc/gsrobotics/blob/321d6a22da64529138ff10237335038fd8c5189f/utilities/image_processing.py#L108)
+        """
+
+        fov_width = 0.00186  # 0.002525
+        """Field of view width (in [m])."""
+
+        fov_height = 0.00143  # 0.002075
+        """Field of view height (in [m])."""
 
     sensor_camera_cfg: SensorCameraCfg = SensorCameraCfg()
 

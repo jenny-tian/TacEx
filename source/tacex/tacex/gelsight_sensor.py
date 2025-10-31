@@ -10,9 +10,11 @@ import cv2
 import omni.kit.commands
 import omni.usd
 from isaacsim.core.prims import XFormPrim
+import isaacsim.core.utils.prims as prims_utils
 from pxr import Sdf
 
 from isaaclab.sensors import SensorBase, TiledCamera, TiledCameraCfg
+import isaaclab.sim as sim_utils
 
 from .gelsight_sensor_data import GelSightSensorData
 from .simulation_approaches.gelsight_simulator import GelSightSimulator
@@ -224,41 +226,10 @@ class GelSightSensor(SensorBase):
 
         self._indentation_depth = torch.zeros((self._num_envs), device=self._device)
 
-        if self.cfg.sensor_camera_cfg is not None:
-            self.camera_cfg: TiledCameraCfg = TiledCameraCfg(
-                prim_path=self.cfg.prim_path + self.cfg.sensor_camera_cfg.prim_path_appendix,
-                update_period=self.cfg.sensor_camera_cfg.update_period,
-                height=self.cfg.sensor_camera_cfg.resolution[1],
-                width=self.cfg.sensor_camera_cfg.resolution[0],
-                data_types=self.cfg.sensor_camera_cfg.data_types,
-                update_latest_camera_pose=True,  # needed for FEM based marker sim
-                spawn=None,  # use camera which is part of the GelSight Mini Asset
-                # note: clipping range doesn't matter for existing camera prim -> only applied when camera is spawned # TODO fix?
-                # spawn=sim_utils.PinholeCameraCfg(
-                #    focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 1.0e5)
-                # ),
-                # depth_clipping_behavior="max", # doesn't work, cause "max" value is taking from spawn config, which we dont have
-            )
-            self.camera = TiledCamera(cfg=self.camera_cfg)
-
-            # use normal camera
-            # self.camera_cfg: CameraCfg = CameraCfg(
-            #         prim_path= self.cfg.prim_path + self.cfg.sensor_camera_cfg.prim_path_appendix,
-            #         update_period= self.cfg.sensor_camera_cfg.update_period,
-            #         height= self.cfg.sensor_camera_cfg.resolution[1],
-            #         width= self.cfg.sensor_camera_cfg.resolution[0],
-            #         data_types= self.cfg.sensor_camera_cfg.data_types,
-            #         spawn= None, # use camera which is part of the GelSight Mini Asset
-            #         # spawn=sim_utils.PinholeCameraCfg(
-            #         #    focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 1.0e5)
-            #         # ),
-            #         #depth_clipping_behavior="max", # doesn't work, cause "max" value is taking from spawn config, which we dont have
-            # )
-            # self.camera = Camera(cfg=self.camera_cfg)
-
-            # need to initialize the camera manually, since its not part of the scene cfg
-            self.camera._initialize_impl()
-            self.camera._is_initialized = True
+        # need to initialize the camera manually, since its not part of the scene cfg
+        self.camera = self._create_tiled_camera()
+        self.camera._initialize_impl()
+        self.camera._is_initialized = True
 
         self._data.output["height_map"] = torch.zeros(
             (self._num_envs, self.camera_cfg.height, self.camera_cfg.width), device=self.cfg.device
@@ -297,15 +268,6 @@ class GelSightSensor(SensorBase):
                 device=self.cfg.device,
             )
         if "marker_motion" in self.cfg.data_types:
-            # self._data.output["marker_motion"]= torch.zeros(
-            #     (
-            #         self._num_envs,
-            #         self.cfg.marker_motion_sim_cfg.marker_params.num_markers_row,
-            #         self.cfg.marker_motion_sim_cfg.marker_params.num_markers_col,
-            #         2 # two, because each marker at (row,col) has position value (y,x)
-            #     ),
-            #     device=self.cfg.device
-            # )
             self._data.output["marker_motion"] = torch.zeros(
                 (
                     self._num_envs,
@@ -361,10 +323,9 @@ class GelSightSensor(SensorBase):
             self.camera.update(dt=0, force_recompute=True)
 
         if self.compute_indentation_depth_func is not None:
-            # -- height_map
+            # get height map and indentation depth data
             self._get_height_map()
-            # -- pressing depth
-            self._indentation_depth[:] = self.compute_indentation_depth_func()  # type: ignore #todo uncomment
+            self._indentation_depth[:] = self.compute_indentation_depth_func()
 
         if "camera_depth" in self._data.output:
             self._get_camera_depth()
@@ -381,7 +342,7 @@ class GelSightSensor(SensorBase):
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         # we actually set the debug_vis in _initialize_impl, since we need the _prim_view, which
-        # is only correctly initialized after _initialize_impl method (in ManagerBased workflow, in Direct workflow you can control it yourself)
+        # is only correctly initialized after _initialize_impl method (thats the case in ManagerBased workflow - in Direct workflow you can control it yourself)
         self._initialize_debug_vis_flag: bool = debug_vis
 
     def _initialize_debug_vis(self, debug_vis: bool):
@@ -608,20 +569,51 @@ class GelSightSensor(SensorBase):
             # or that we dont need a height map in general
             pass
 
-    def _show_height_map_inside_gui(self, index):
-        plt.close()
-        height_map = self._data.output["height_map"][index].cpu().numpy()
-        np.save("height_map.npy", height_map)
+    # def _show_height_map_inside_gui(self, index):
+    #     plt.close()
+    #     height_map = self._data.output["height_map"][index].cpu().numpy()
+    #     np.save("height_map.npy", height_map)
 
-        X = np.arange(0, height_map.shape[0])
-        Y = np.arange(0, height_map.shape[1])
-        X, Y = np.meshgrid(X, Y)
-        Z = height_map
-        fig, ax = plt.subplots(subplot_kw={"projection": "3d"})
-        ax.plot_surface(X, Y, Z.T)
-        # plt.show()
-        print("saving height_map img")
-        plt.savefig(f"height_map{index}.png")
+    #     X = np.arange(0, height_map.shape[0])
+    #     Y = np.arange(0, height_map.shape[1])
+    #     X, Y = np.meshgrid(X, Y)
+    #     Z = height_map
+    #     fig, ax = plt.subplots(subplot_kw={"projection": "3d"})
+    #     ax.plot_surface(X, Y, Z.T)
+    #     # plt.show()
+    #     print("saving height_map img")
+    #     plt.savefig(f"height_map{index}.png")
+
+    def _create_tiled_camera(self) -> TiledCamera:
+        # compute camera parameters for desired field-of-view
+        border_fraction = min(max(0, self.cfg.sensor_camera_cfg.border_fraction), 0.49)
+
+        fov_width = self.cfg.sensor_camera_cfg.fov_width * (1 - border_fraction)
+        fov_height = self.cfg.sensor_camera_cfg.fov_height * (1 - border_fraction)
+
+        horizontal_aperture = (
+            fov_width * self.cfg.sensor_camera_cfg.focal_length * 10 / self.cfg.sensor_camera_cfg.focus_distance
+        )
+        vertical_aperture = (
+            fov_height * self.cfg.sensor_camera_cfg.focal_length * 10 / self.cfg.sensor_camera_cfg.focus_distance
+        )
+        self.camera_cfg: TiledCameraCfg = TiledCameraCfg(
+            prim_path=self.cfg.prim_path + self.cfg.sensor_camera_cfg.prim_path_appendix,
+            update_period=self.cfg.sensor_camera_cfg.update_period,
+            width=self.cfg.sensor_camera_cfg.resolution[0],
+            height=self.cfg.sensor_camera_cfg.resolution[1],
+            data_types=self.cfg.sensor_camera_cfg.data_types,
+            update_latest_camera_pose=self.cfg.sensor_camera_cfg.update_latest_camera_pose,  # needed for FEM based marker sim
+            spawn=sim_utils.PinholeCameraCfg(
+                focal_length=self.cfg.sensor_camera_cfg.focal_length,
+                focus_distance=self.cfg.sensor_camera_cfg.focus_distance,
+                horizontal_aperture=horizontal_aperture,
+                vertical_aperture=vertical_aperture,
+                clipping_range=self.cfg.sensor_camera_cfg.clipping_range,
+            ),
+            depth_clipping_behavior="max",
+        )
+        return TiledCamera(cfg=self.camera_cfg)
 
     """
     Internal simulation callbacks.
