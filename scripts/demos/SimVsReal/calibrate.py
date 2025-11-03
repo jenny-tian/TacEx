@@ -380,7 +380,7 @@ class ShapeTouchEnv(DirectRLEnv):
             "Metrics": DirectLiveVisualizer(self.cfg.debug_vis, self.num_envs, self._window, visualizer_name="Metrics"),
         }
 
-        self.visualizers["Images"].terms["real_tactile_img"] = torch.zeros(
+        self.visualizers["Images"].terms["circle_detection"] = torch.zeros(
             (
                 self.num_envs,
                 self.gsmini.tactile_image_shape[0],
@@ -588,7 +588,7 @@ def run_simulator(env: ShapeTouchEnv):
         ee_pos_b, ee_quat_b = math_utils.combine_frame_transforms(ee_pos_b, ee_quat_b, env._offset_pos, env._offset_rot)
 
         # get img of env 0
-        tactile_rgb = env.gsmini.data.output["tactile_rgb"].cpu().numpy()[0]
+        tactile_rgb = env.gsmini.data.output["tactile_rgb"][0].cpu().numpy()
         tactile_rgb = cv2.normalize(
             src=tactile_rgb, dst=None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U
         )
@@ -597,12 +597,12 @@ def run_simulator(env: ShapeTouchEnv):
         # draw should be-position of circle
         cv2.circle(
             tactile_rgb,
-            (int(tactile_rgb.shape[0] / 2), int(tactile_rgb.shape[1] / 2)),
+            (int(tactile_rgb.shape[1] / 2), int(tactile_rgb.shape[0] / 2)),
             int(cylinder_radius_mm / pixmm),
             (0, 0, 0),
             2,
         )
-        cv2.circle(tactile_rgb, (int(tactile_rgb.shape[0] / 2), int(tactile_rgb.shape[1] / 2)), 2, (0, 0, 0), 2)
+        cv2.circle(tactile_rgb, (int(tactile_rgb.shape[1] / 2), int(tactile_rgb.shape[0] / 2)), 2, (0, 0, 0), 2)
 
         # draw detected circle
         if detected_circles is not None:
@@ -612,9 +612,8 @@ def run_simulator(env: ShapeTouchEnv):
             cv2.circle(tactile_rgb, (x, y), r, (0, 255, 0), 2)  # circle outline
             cv2.circle(tactile_rgb, (x, y), 2, (0, 255, 0), 2)  # circle center
 
-        tactile_rgb = tactile_rgb.astype(np.uint8)
-        tactile_rgb = cv2.cvtColor(tactile_rgb, cv2.COLOR_RGB2RGBA)
-        env.visualizers["Images"].terms["real_tactile_img"] = tactile_rgb * 255
+        tactile_rgb = torch.tensor(tactile_rgb).unsqueeze(0)
+        env.visualizers["Images"].terms["circle_detection"] = tactile_rgb
 
         print("Indentation depth [mm] ", env.gsmini.indentation_depth)
 

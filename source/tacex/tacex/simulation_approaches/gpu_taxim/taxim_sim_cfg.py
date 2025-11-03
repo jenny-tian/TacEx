@@ -30,7 +30,11 @@ class TaximSimulatorCfg(GelSightSimulatorCfg):
 
     # Asset Data
     gelpad_to_camera_min_distance: float = 0.024
-    """Min distance of camera to the gelpad.
-    Used for computing the indentation depth out of the
-    camera height map.
+    """Minimum distance of camera to the gelpad. 
+
+    E.g., for the GsMini simulation model its 0.024m, because we placed the 
+    camera at the bottom of the sensor case and the distance between bottom and gelpad
+    is 24cm.
+
+    The value is used for computing the indentation depth out of the camera height map.
     """

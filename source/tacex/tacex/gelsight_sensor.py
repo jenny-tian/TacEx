@@ -605,7 +605,8 @@ class GelSightSensor(SensorBase):
             data_types=self.cfg.sensor_camera_cfg.data_types,
             update_latest_camera_pose=self.cfg.sensor_camera_cfg.update_latest_camera_pose,  # needed for FEM based marker sim
             spawn=sim_utils.PinholeCameraCfg(
-                focal_length=self.cfg.sensor_camera_cfg.focal_length,
+                focal_length=self.cfg.sensor_camera_cfg.focal_length
+                * (1 - border_fraction),  # adjust focal length for same zoom-factor
                 focus_distance=self.cfg.sensor_camera_cfg.focus_distance,
                 horizontal_aperture=horizontal_aperture,
                 vertical_aperture=vertical_aperture,

@@ -115,11 +115,6 @@ class TaximSimulator(GelSightSimulator):
         min_distance_obj = height_map.amin((1, 2))
         # smallest distance between object and sensor case
         dist_obj_sensor_case = min_distance_obj - self.cfg.gelpad_to_camera_min_distance
-
-        # print("dist_obj_sensor_case", dist_obj_sensor_case)
-        # if (dist_obj_sensor_case < 0):  # object is "inside the sensor", cause the object is closer to the camera than the edge of the sensor
-        #     # print("Object is inside the sensor!!! Gelpad would be broken!!!")
-        #     dist_obj_sensor_case = 0
         dist_obj_sensor_case = torch.where(dist_obj_sensor_case < 0, 0, dist_obj_sensor_case)
 
         self._indentation_depth[:] = torch.where(

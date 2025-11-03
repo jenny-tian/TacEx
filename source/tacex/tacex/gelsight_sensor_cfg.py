@@ -41,7 +41,7 @@ class GelSightSensorCfg(SensorBaseCfg):
         focus_distance: float = 0.025
         """Distance from camera to focus plane (in [m])."""
 
-        border_fraction: float = 0.65  # 0.15
+        border_fraction: float = 0.15
         """Fraction of the image dimensions to crop from each border. Value clamped in [0.0, 0.49] 
         
         Behavior is the same as for the GelSightSDK (https://github.com/gelsightinc/gsrobotics/blob/321d6a22da64529138ff10237335038fd8c5189f/utilities/image_processing.py#L108)
