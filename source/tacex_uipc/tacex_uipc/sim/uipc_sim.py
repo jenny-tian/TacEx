@@ -178,13 +178,15 @@ class UipcSim:
             "solver": self.cfg.linear_system.solver,
             "tol_rate": self.cfg.linear_system.tol_rate,
         }
-        uipc_config["newton"] = {
-            "ccd_tol": self.cfg.newton.ccd_tol,
-            "max_iter": self.cfg.newton.max_iter,
-            "use_adaptive_tol": self.cfg.newton.use_adaptive_tol,
-            "velocity_tol": self.cfg.newton.velocity_tol,
-            "transrate_tol": self.cfg.newton.transrate_tol,
-        }
+
+        # FIXME: for some reason setting below parameters gives json error
+        # uipc_config["newton"] = {
+        #     "ccd_tol": self.cfg.newton.ccd_tol,
+        #     "max_iter": self.cfg.newton.max_iter,
+        #     "use_adaptive_tol": self.cfg.newton.use_adaptive_tol,
+        #     "velocity_tol": self.cfg.newton.velocity_tol,
+        #     "transrate_tol": self.cfg.newton.transrate_tol,
+        # }
 
         self.scene = Scene(uipc_config)
 
