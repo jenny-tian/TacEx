@@ -10,9 +10,9 @@ Otherwise the Isaac rendering is wrong.
 Reason:
 We map uipc vertex offsets to USD prims for the rendering.
 The "mapping" happens through a list: element 1 of the list = offset for prim with ID 1, element 2 = offset for prim with ID 2, etc.
-This is why the order has to equal.
+This is why the order has to be equal.
 
-e.g. if the original example does this:
+e.g. the original example does this:
 
 cube_obj = scene.objects().create('cubes')
 ball_obj = scene.objects().create('balls')

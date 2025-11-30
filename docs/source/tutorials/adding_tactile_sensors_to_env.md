@@ -139,7 +139,7 @@ Note: As you might have realized, the placement of the sensors here is very roug
 ## Adjusting the ManagerBased Environment
 The Taxim and FOTS simulation can be used inside the Manager-Based workflow.
 
-We copy the [inhand_manipulation environment](https://github.com/isaac-sim/IsaacLab/blob/main/source/isaaclab_tasks/isaaclab_tasks/manager_based/manipulation/inhand/inhand_env_cfg.py) of Isaac Lab and adjust it to include our tactile simulation.  
+We copy the [inhand_manipulation environment](https://github.com/isaac-sim/IsaacLab/blob/main/source/isaaclab_tasks/isaaclab_tasks/manager_based/manipulation/inhand/inhand_env_cfg.py) of Isaac Lab and adjust it to include our tactile simulation.
 > You can find the adjusted environment at `source/tacex_tasks/tacex_tasks/inhand`.
 
 First, we need to add the sensors to the `InHandObjectSceneCfg` class in the `inhand_env_cfg.py` file:

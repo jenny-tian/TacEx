@@ -248,6 +248,7 @@ class MeshGenerator:
         # #     draw.draw_lines([tri_points[0]]*2, tri_points[1:], [(255,255,255,0.5)]*2, [10]*2) # draw from point 0 to every other point (3 times 0, cause line from 0 to the other 3 points)
         # #     draw.draw_lines([tri_points[1]], [tri_points[2]], [(255,255,255,0.5)], [10])
 
+        # NOTE: Cannot mute prints of wildmeshing -> log_level=6 doesn't remove prints completely...
         self.tetrahedralizer.set_mesh(points, triangles)
         self.tetrahedralizer.tetrahedralize()
         tet_points, tet_indices, _ = self.tetrahedralizer.get_tet_mesh(

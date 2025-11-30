@@ -1,24 +1,24 @@
 If you have a working Isaac Lab environment, you can directly [install TacEx](Local-Installation#installing-tacex).\
-Otherwise, **you need to install Isaac Sim 4.5 and Isaac Lab 2.1.1**.
+Otherwise, **you need to install Isaac Sim 5.1 and Isaac Lab 2.3.0**.
 Below is a quick summary, but here is the [full installation guide](https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html).
 
 <details>
-<summary>Quick summary for Installing Isaac Sim and Isaac Lab for Ubuntu 22.04</summary>
+<summary>Quick summary for installing Isaac Sim 5.1.0 and Isaac Lab 2.3.0 for Ubuntu 24.04</summary>
 
 > [!note]
 > To install Isaac Sim for Ubuntu 20.04 follow the [binary installation guide](https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/binaries_installation.html).
 
-### Isaac Sim - Linux pip installation
+### Isaac Sim - Linux pip Installation
 
 ```bash
 # create virtual environment
-conda create -n env_isaaclab python=3.10
+conda create -n env_isaaclab python=3.11
 conda activate env_isaaclab
 # install cuda-enabled pytorch
-pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu118
+pip install -U torch==2.7.0 torchvision==0.22.0 --index-url https://download.pytorch.org/whl/cu128
 pip install --upgrade pip
 # install isaac sim packages
-pip install 'isaacsim[all,extscache]==4.5.0' --extra-index-url https://pypi.nvidia.com
+pip install "isaacsim[all,extscache]==5.1.0" --extra-index-url https://pypi.nvidia.com
 ```
 
 > verify that the Isaac Sim installation works by calling `isaacsim` in the terminal
@@ -30,15 +30,15 @@ pip install 'isaacsim[all,extscache]==4.5.0' --extra-index-url https://pypi.nvid
 sudo apt install cmake build-essential
 git clone https://github.com/isaac-sim/IsaacLab
 cd IsaacLab
-# use Isaac Lab version 2.1.1
-git checkout v2.1.1
+# use Isaac Lab version 2.3.0
+git checkout v2.3.0
 # activate the Isaac Sim python env
 conda activate env_isaaclab
 # install isaaclab extensions (with --editable flag)
 ./isaaclab.sh --install # or "./isaaclab.sh -i"
 ```
 
-To verify the Isaac Lab Installation:
+To verify the Isaac Lab installation run
 
 ```bash
 conda activate env_isaaclab
@@ -52,25 +52,21 @@ python scripts/reinforcement_learning/rsl_rl/train.py --task=Isaac-Ant-v0 --head
 **0.** If you haven't already done so, clone the repository and its submodules:
 
 ```bash
-# Need it for the USD assets
-git lfs install
 git clone --recurse-submodules https://github.com/DH-Ng/TacEx.git
 cd TacEx
 ```
-**1.** Activate the Isaac Env
-```bash
-conda activate env_isaaclab
-```
 
-**2.** Install the core packages of TacEx
+**1.** Install the core packages of TacEx
 ```bash
+# activate Isaac Env
+conda activate env_isaaclab
 # Script will pip install core TacEx packages with --editable flag)
 ./tacex.sh -i
 ```
 
 > You can install the extensions one by one via e.g. `python -m pip install -e source/tacex_uipc`
 
-**3.** Verify that TacEx works by running an example:
+**2.** Verify that TacEx works by running an example:
 
 ```bash
 python ./scripts/demos/tactile_sim_approaches/check_taxim_sim.py --debug_vis
@@ -85,7 +81,7 @@ python ./scripts/reinforcement_learning/skrl/train.py --task TacEx-Ball-Rolling-
 # Installing TacEx [UIPC]
 The `tacex_uipc` package is responsible for the [UIPC](https://spirimirror.github.io/libuipc-doc/) simulation in TacEx.
 
-**1.** Install the [libuipc dependencies](https://spirimirror.github.io/libuipc-doc/build_install/linux/):
+**0.** Install the [libuipc dependencies](https://spirimirror.github.io/libuipc-doc/build_install/linux/):
 * If not installed yet, install Vcpkg
 
 ```bash
@@ -103,16 +99,16 @@ cd vcpkg
 export CMAKE_TOOLCHAIN_FILE="$HOME/Toolchain/vcpkg/scripts/buildsystems/vcpkg.cmake"
 ```
 
-* We also need `CMake 3.26`, `GCC 11.4` and `Cuda 12.4` to build libuipc. Install this into the Isaac Sim python env:
+* We also need `CMake >= 3.26`, `GCC >= 11.4` and `Cuda >= 12.4` to build libuipc. Install this into the Isaac Sim python env:
 
 ```bash
 # Inside the root dir of TacEx repo
 conda activate env_isaaclab
 conda env update -n env_isaaclab --file ./source/tacex_uipc/libuipc/conda/env.yaml
 ```
-> If Cuda 12.4 does not work for, try updating your Nvidia drivers or try to use an older Cuda version by adjusting the env.yaml file (e.g. Cuda 12.2).
+<!-- > If Cuda 12.4 does not work for, try updating your Nvidia drivers or try to use an older Cuda version by adjusting the env.yaml file (e.g. Cuda 12.2). -->
 
-**2.** Install `tacex_uipc`
+**1.** Install `tacex_uipc`
 ```bash
 # This also builds `libuipc` and pip installs the python bindings.
 conda activate env_isaaclab
@@ -120,7 +116,7 @@ pip install -e source/tacex_uipc -v
 ```
 > You can also install all TacEx packages with `./tacex.sh -i all`.
 
-**3.** Verify that the `tacex_uipc` works by running an example:
+**2.** Verify that the `tacex_uipc` works by running an example:
 
 ```bash
 python ./scripts/benchmarking/tactile_sim_performance/run_ball_rolling_experiment.py --num_envs 1 --debug_vis --env uipc

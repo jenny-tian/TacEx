@@ -37,7 +37,8 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import AssetBaseCfg
 from isaaclab.utils.timer import Timer
 
-from tacex_uipc import UipcObject, UipcObjectCfg, UipcSim, UipcSimCfg
+from tacex_uipc import UipcSim, UipcSimCfg
+from tacex_uipc.objects import UipcConstraintCfg, UipcDeformableObject, UipcDeformableObjectCfg
 
 
 def main():
@@ -80,7 +81,7 @@ def main():
 
     # spawn uipc cube
     tet_cube_asset_path = pathlib.Path(__file__).parent.resolve() / "assets" / "cube.usd"
-    cube_cfg = UipcObjectCfg(
+    cube_cfg = UipcDeformableObjectCfg(
         prim_path="/World/Objects/Cube0",
         init_state=AssetBaseCfg.InitialStateCfg(pos=[0, 0, 2.25]),  # rot=(0.72,-0.3,0.42,-0.45)
         spawn=sim_utils.UsdFileCfg(
@@ -88,15 +89,10 @@ def main():
             # scale=(0.1, 0.1, 0.1)
         ),
         # mesh_cfg=mesh_cfg,
-        constitution_cfg=UipcObjectCfg.StableNeoHookeanCfg(),  # UipcObjectCfg.AffineBodyConstitutionCfg() #
+        constitution_cfg=UipcDeformableObjectCfg.StableNeoHookeanCfg(),  # UipcObjectCfg.AffineBodyConstitutionCfg() #
+        constraint_cfg=UipcConstraintCfg(constraint_type=SoftPositionConstraint),
     )
-    cube = UipcObject(cube_cfg, uipc_sim)
-
-    # For Animation
-    spc = SoftPositionConstraint()
-    # `apply` has to happen **before** the uipc_scene_object is created!
-    # i.e. before UipcObject._initialize_impl() is called
-    spc.apply_to(cube.uipc_meshes[0], 100)  # constraint strength ratio
+    cube = UipcDeformableObject(cube_cfg, uipc_sim)
 
     # tet_ball_asset_path = pathlib.Path(__file__).parent.resolve() / "assets" / "ball.usd"
     # ball_cfg = UipcObjectCfg(
@@ -111,14 +107,8 @@ def main():
     # )
     # ball = UipcObject(ball_cfg, uipc_sim)
 
-    # Play the simulator
-    sim.reset()
-
     # Create Animation -> has to happen after the objects were created in the
-    # uipc scene, i.e. after UipcObject._initialize_impl() is called.
-    # This is the case after sim.reset().
-    animator = uipc_sim.scene.animator()
-
+    # uipc scene, i.e. after UipcObject._initialize_impl() is called, but before world.init()
     def animate_tet(info: Animation.UpdateInfo):  # animation function
         geo_slots: list[GeometrySlot] = info.geo_slots()  # list of geo_slots -> multiple when uipc_object has instances
         geo: SimplicialComplex = geo_slots[0].geometry()
@@ -139,13 +129,17 @@ def main():
         z = -np.sin(theta)
 
         aim_position_view[0] = rest_position_view[0] + Vector3.UnitZ() * z
+        print("Aim pos ", aim_position_view[0])
 
-    animator.insert(cube.uipc_scene_objects[0], animate_tet)
+    cube.constraint.animate_func = animate_tet
+    # need to manually create the animation, since we use an external function
+    # and not one that is inside the UipcConstraint class
+    cube.constraint._create_animation()
 
-    # only after Isaac Sim got reset (= objects init), otherwise world init is false
-    # because _initialize_impl() of the object is called in the sim.reset() method
-    # and setup_scene() relies on objects being _initialize_impl()
     uipc_sim.setup_sim()
+
+    # Play the simulator
+    sim.reset()
 
     # Now we are ready!
     print("[INFO]: Setup complete...")

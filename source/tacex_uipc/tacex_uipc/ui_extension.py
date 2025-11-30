@@ -20,7 +20,7 @@ import numpy as np
 import pxr
 from pxr import Sdf, UsdGeom
 
-from tacex_uipc.sim import UipcIsaacAttachments
+from tacex_uipc.objects.constraints import UipcIsaacAttachments
 from tacex_uipc.utils import MeshGenerator, TetMeshCfg
 
 
