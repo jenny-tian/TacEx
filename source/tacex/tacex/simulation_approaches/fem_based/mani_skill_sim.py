@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import cv2
 import omni.usd
 
-from tacex_uipc import UipcObject
+from tacex_uipc.objects import UipcObject
 
 from ...gelsight_sensor import GelSightSensor
 from ..gelsight_simulator import GelSightSimulator
@@ -62,6 +62,7 @@ class ManiSkillSimulator(GelSightSimulator):
             tactile_img_width=self.cfg.tactile_img_res[0],
             tactile_img_height=self.cfg.tactile_img_res[1],
             marker_interval_range=self.cfg.marker_interval_range,
+            # normalize=True,
         )
 
         self.marker_motion_sim._gen_marker_grid()
@@ -139,13 +140,13 @@ class ManiSkillSimulator(GelSightSimulator):
 
                     marker_flow_i = self.sensor.data.output["marker_motion"][i]
 
-                    frame = self._create_marker_img(marker_flow_i)
+                    # frame = self._create_marker_img(marker_flow_i)
                     # draw current marker positions like ManiSkill-ViTac does
-                    # frame = self.draw_markers(
-                    #     marker_flow_i[1].cpu().numpy(),
-                    #     img_w=self.cfg.tactile_img_res[0],
-                    #     img_h=self.cfg.tactile_img_res[1],
-                    # )
+                    frame = self.draw_markers(
+                        marker_flow_i[1].cpu().numpy(),
+                        img_w=self.cfg.tactile_img_res[0],
+                        img_h=self.cfg.tactile_img_res[1],
+                    )
 
                     # create tactile rgb img with markers
                     if "tactile_rgb" in self.sensor.cfg.data_types:
@@ -207,7 +208,7 @@ class ManiSkillSimulator(GelSightSimulator):
             # cv2.circle(frame,(column,row), 6, (255,255,255), 1, lineType=8)
 
             pt1 = (init_x_pos, init_y_pos)
-            pt2 = (x_pos + arrow_scale * int(x_pos - init_x_pos), y_pos + arrow_scale * int(y_pos - init_y_pos))
+            pt2 = (int(x_pos + arrow_scale * (x_pos - init_x_pos)), int(y_pos + arrow_scale * (y_pos - init_y_pos)))
 
             cv2.arrowedLine(frame, pt1, pt2, color, 2, tipLength=0.2)
 

@@ -4,8 +4,8 @@ import torch
 import weakref
 from typing import TYPE_CHECKING
 
-from isaaclab.utils.buffers import TimestampedBuffer
 import isaaclab.utils.math as math_utils
+from isaaclab.utils.buffers import TimestampedBuffer
 
 try:
     from isaacsim.util.debug_draw import _debug_draw
@@ -17,21 +17,10 @@ except ImportError:
     warnings.warn("_debug_draw failed to import", ImportWarning)
     draw = None
 
-from uipc import (
-    Logger,
-    Timer,
-    Transform,
-    Quaternion,
-    Vector3,
-    Vector2,
-    view,
-    builtin,
-    Matrix4x4,
-)
-
 
 if TYPE_CHECKING:
     from tacex_uipc.sim import UipcSim
+
     from .uipc_rigid_object import UipcRigidObject
 
 

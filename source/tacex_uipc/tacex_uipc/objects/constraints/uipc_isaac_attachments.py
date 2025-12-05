@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
 import inspect
 import numpy as np
 import torch
 import weakref
+from typing import TYPE_CHECKING
 
 import omni
 from omni.physx import get_physx_interface, get_physx_scene_query_interface
@@ -144,7 +144,7 @@ class UipcIsaacAttachments(UipcConstraint):
 
         # note: Use weakref on all callbacks to ensure that this object can be deleted when its destructor is called.
         # add callbacks for stage play/stop
-        # The order is set to 10 which is arbitrary but should be lower priority than the default order of 0
+        # The order is set to 10 which is the same as the IsaacLab AssetBase _initialize_callback
         timeline_event_stream = omni.timeline.get_timeline_interface().get_timeline_event_stream()
         self._initialize_handle = timeline_event_stream.create_subscription_to_pop_by_type(
             int(omni.timeline.TimelineEventType.PLAY),
@@ -361,31 +361,35 @@ class UipcIsaacAttachments(UipcConstraint):
         if self.cfg.body_name is not None:
             self.rigid_body_id, found_body_name = self.isaaclab_rigid_object.find_bodies(self.cfg.body_name)
 
-        sim: sim_utils.SimulationContext = sim_utils.SimulationContext.instance()
-        sim.add_physics_callback(
-            f"{self.uipc_object.cfg.prim_path}_X_{self.isaaclab_rigid_object.cfg.prim_path}_attachment_update",
-            self._compute_aim_positions,
-        )
         if type(self.isaaclab_rigid_object) is Articulation:
             # this only works when rigid body is an articulation
             # self.isaaclab_rigid_object._physics_sim_view.update_articulations_kinematic()
             # read data from simulation
-            poses = self.isaaclab_rigid_object._root_physx_view.get_link_transforms().clone()
+            poses = self.isaaclab_rigid_object.root_physx_view.get_link_transforms().clone()
             poses[..., 3:7] = math_utils.convert_quat(poses[..., 3:7], to="wxyz")
             pose = poses[:, self.rigid_body_id, 0:7].clone()
         elif type(self.isaaclab_rigid_object) is RigidObject:
             # only works with rigid body
-            pose = self.isaaclab_rigid_object._root_physx_view.root_state_w.view(-1, 1, 13)
+            pose = self.isaaclab_rigid_object.root_physx_view.root_state_w.view(-1, 1, 13)
             pose = pose[:, self.rigid_body_id, 0:7].clone()
         else:
             raise RuntimeError("Need an Articulation or a RigidBody object for the Isaac X UIPC attachment.")
 
         self.obj_pose = pose
 
+        sim: sim_utils.SimulationContext = sim_utils.SimulationContext.instance()
+        sim.add_physics_callback(
+            f"{self.uipc_object.cfg.prim_path}_X_{self.isaaclab_rigid_object.cfg.prim_path}_attachment_update",
+            self._compute_aim_positions,
+        )
+
     def _create_animation(self):
         animator = self.uipc_object._uipc_sim.scene.animator()
 
         def animate_tet(info: Animation.UpdateInfo):  # animation function
+            if not self._is_initialized:
+                return
+
             geo_slots: list[GeometrySlot] = info.geo_slots()
             geo: SimplicialComplex = geo_slots[0].geometry()
             # rest_geo_slots: list[GeometrySlot] = info.rest_geo_slots()
@@ -409,17 +413,16 @@ class UipcIsaacAttachments(UipcConstraint):
 
     def _compute_aim_positions(self, dt=0):
         # make sure we have the newest data
-
         if type(self.isaaclab_rigid_object) is Articulation:
             # this only works when rigid body is an articulation
             # self.isaaclab_rigid_object._physics_sim_view.update_articulations_kinematic()
             # read data from simulation
-            poses = self.isaaclab_rigid_object._root_physx_view.get_link_transforms().clone()
+            poses = self.isaaclab_rigid_object.root_physx_view.get_link_transforms().clone()
             poses[..., 3:7] = math_utils.convert_quat(poses[..., 3:7], to="wxyz")
             pose = poses[:, self.rigid_body_id, 0:7].clone()
         elif type(self.isaaclab_rigid_object) is RigidObject:
             # only works with rigid body
-            pose = self.isaaclab_rigid_object._root_physx_view.root_state_w.view(-1, 1, 13)
+            pose = self.isaaclab_rigid_object.root_physx_view.root_state_w.view(-1, 1, 13)
             pose = pose[:, self.rigid_body_id, 0:7].clone()
 
         # - doing this is undesirable -> need to update the scene to get newest data

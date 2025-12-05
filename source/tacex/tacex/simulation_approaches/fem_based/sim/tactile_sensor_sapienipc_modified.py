@@ -80,6 +80,9 @@ class VisionTactileSensorUIPC:
         self.scene = self.uipc_sim.scene
 
         self.camera = camera
+        # overwrite config so that pose is always updated,
+        # which is needed for projection of markers from gelpad frame into img frame
+        self.camera.cfg.update_latest_camera_pose = True
 
         self.init_surface_vertices = self.get_surface_vertices_world()
 
@@ -125,15 +128,15 @@ class VisionTactileSensorUIPC:
 
     # todo find out what's wrong with this method -> frame coor. sys. seems to be wrong
     def transform_camera_to_world_frame(self, input_vertices):
-        self.camera._update_poses(self.camera._ALL_INDICES)
+        # self.camera._update_poses(self.camera._ALL_INDICES)
         # math_utils.convert_camera_frame_orientation_convention
         cam_pos_w = self.camera._data.pos_w
-        cam_quat_w = self.camera._data.quat_w_ros  # quat_w_opengl#quat_w_world
+        cam_quat_w = self.camera._data.quat_w_ros  # quat_w_opengl quat_w_ros #quat_w_world
         v_cv = math_utils.transform_points(input_vertices, pos=cam_pos_w, quat=cam_quat_w)
         return v_cv
 
     def transform_world_to_camera_frame(self, input_vertices):
-        self.camera._update_poses(self.camera._ALL_INDICES)
+        # self.camera._update_poses(self.camera._ALL_INDICES)
         # math_utils.convert_camera_frame_orientation_convention
         cam_pos_w = self.camera._data.pos_w
         cam_quat_w = self.camera._data.quat_w_ros
@@ -200,10 +203,10 @@ class VisionTactileSensorUIPC:
 
         marker_x_start = (
             -math.ceil((8 + marker_translation_x) / marker_interval) * marker_interval + marker_translation_x  # 16.5
-        )
+        )  # 8
         marker_x_end = (
-            math.ceil((16.5 - marker_translation_x) / marker_interval) * marker_interval + marker_translation_x
-        )
+            math.ceil((8 - marker_translation_x) / marker_interval) * marker_interval + marker_translation_x
+        )  # 16.5
         marker_y_start = (
             -math.ceil((6 + marker_translation_y) / marker_interval) * marker_interval + marker_translation_y
         )
@@ -412,11 +415,11 @@ class VisionTactileSensorUIPC:
         self.curr_marker_uv = curr_marker_uv
         return ret
 
-    def get_marker_img(self):
-        curr_marker_uv = self.curr_marker_uv
-        curr_marker_img = self.draw_markers(curr_marker_uv)
-        # cv2.imwrite("curr_marker_img.png", curr_marker_img)
-        return curr_marker_img
+    # def get_marker_img(self):
+    #     curr_marker_uv = self.curr_marker_uv
+    #     curr_marker_img = self.draw_markers(curr_marker_uv)
+    #     # cv2.imwrite("curr_marker_img.png", curr_marker_img)
+    #     return curr_marker_img
 
     # def gen_rgb_image(self):
     #     # generate RGB image from depth

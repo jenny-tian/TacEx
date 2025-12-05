@@ -5,12 +5,8 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import omni.log
-import omni.physics.tensors.impl.api as physx
 import omni.usd
-import usdrt
-import usdrt.UsdGeom
-from isaacsim.core.prims import XFormPrim
-from pxr import UsdGeom, Gf
+from pxr import Gf, UsdGeom
 
 try:
     from isaacsim.util.debug_draw import _debug_draw
@@ -25,32 +21,20 @@ except ImportError:
 import numpy as np
 
 import warp as wp
-from uipc.core import (
-    Engine,
-    World,
-    Scene,
-    AffineBodyStateAccessorFeature,
-    FiniteElementStateAccessorFeature,
-    SanityCheckResult,
-)
 from uipc import (
-    Logger,
-    Timer,
-    Transform,
-    Quaternion,
-    Vector3,
-    Vector2,
-    view,
-    builtin,
     Matrix4x4,
+    Quaternion,
+    Transform,
+    builtin,
+    view,
 )
-from uipc.constitution import AffineBodyConstitution, ElasticModuli, StableNeoHookean
-from uipc.geometry import extract_surface, flip_inward_triangles, label_surface, label_triangle_orient, tetmesh
+from uipc.constitution import AffineBodyConstitution
+from uipc.core import (
+    AffineBodyStateAccessorFeature,
+)
+from uipc.geometry import flip_inward_triangles, label_surface, label_triangle_orient, tetmesh
 from uipc.unit import MPa
 
-import isaaclab.utils.string as string_utils
-from isaaclab.assets import AssetBase, AssetBaseCfg
-from isaaclab.utils import configclass
 import isaaclab.utils.math as math_utils
 
 wp.init()
@@ -61,9 +45,9 @@ from tacex_uipc.utils import MeshGenerator, TetMeshCfg
 from ..uipc_object import UipcObject
 from .uipc_rigid_object_data import UipcRigidObjectData
 
-
 if TYPE_CHECKING:
     from tacex_uipc.sim import UipcSim
+
     from .uipc_rigid_object_cfg import UipcRigidObjectCfg
 
 
@@ -158,7 +142,9 @@ class UipcRigidObject(UipcObject):
     """
 
     def _setup_uipc_mesh(self):
-        for prim in (
+        for (
+            prim
+        ) in (
             self._prim_view.prims
         ):  # todo dont loop over all prims of the view -> just take one base prim. Rather loop over the prim children?
             # need to access the mesh data of the usd prim
@@ -189,13 +175,11 @@ class UipcRigidObject(UipcObject):
             translation = np.array(tf_world.ExtractTranslation())
             rotation = math_utils.quat_from_matrix(torch.tensor(np.array(tf_world.ExtractRotationMatrix())))
             scale = np.array(Gf.Vec3d(*(v.GetLength() for v in tf_world.ExtractRotationMatrix())))
-            scale_mat = np.array(
-                [
-                    [scale[0], 0, 0],
-                    [0, scale[1], 0],
-                    [0, 0, scale[2]],
-                ]
-            )
+            scale_mat = np.array([
+                [scale[0], 0, 0],
+                [0, scale[1], 0],
+                [0, 0, scale[2]],
+            ])
             # scale the local mesh points
             tet_points = tet_points @ scale_mat
 
@@ -285,7 +269,8 @@ class UipcRigidObject(UipcObject):
 
         # note: we cast to tuple to avoid torch/numpy type mismatch.
         default_root_state = (
-            tuple(self.cfg.init_state.pos) + tuple(self.cfg.init_state.rot)
+            tuple(self.cfg.init_state.pos)
+            + tuple(self.cfg.init_state.rot)
             # + tuple(self.cfg.init_state.lin_vel)
             # + tuple(self.cfg.init_state.ang_vel)
         )

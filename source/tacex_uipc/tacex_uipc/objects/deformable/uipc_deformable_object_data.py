@@ -18,6 +18,7 @@ except ImportError:
 
 if TYPE_CHECKING:
     from tacex_uipc.sim import UipcSim
+
     from .uipc_deformable_object import UipcDeformableObject
 
 

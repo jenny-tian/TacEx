@@ -219,13 +219,13 @@ def run_simulator(env):
         env.sim.step(render=False)
         physics_end = time.time()
 
+        # update scene buffers (i.e. data from rigid bodies, uipc bodies, sensors...)
+        env.scene.update(dt=env.physics_dt)
+
         # render scene for cameras
         if env.uipc_sim is not None:
             env.uipc_sim.update_render_meshes()
         env.sim.render()
-
-        # update scene buffers (i.e. data from rigid bodies, uipc bodies, sensors...)
-        env.scene.update(dt=env.physics_dt)
 
         # update sensors again to measure tactile sim time separately
         tactile_sim_start = time.time()

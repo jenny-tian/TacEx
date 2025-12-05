@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable
 import inspect
-import numpy as np
-import torch
 import weakref
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import omni
-from omni.physx import get_physx_interface, get_physx_scene_query_interface
-from pxr import UsdGeom, UsdPhysics
 
 import isaaclab.sim as sim_utils
 
@@ -22,18 +19,11 @@ except ImportError:
     warnings.warn("_debug_draw failed to import", ImportWarning)
     draw = None
 
-from uipc import Animation, builtin, view
-from uipc.constitution import SoftPositionConstraint, SoftTransformConstraint
-from uipc.geometry import GeometrySlot, SimplicialComplex
+from uipc import Animation
 
-import isaaclab.utils.math as math_utils
-from isaaclab.assets import Articulation, RigidObject
 from isaaclab.utils import configclass
-from isaaclab.utils.math import transform_points
-
 
 if TYPE_CHECKING:
-    from tacex_uipc.sim import UipcSim
     from ..uipc_object import UipcObject
 
 
@@ -165,12 +155,12 @@ class UipcConstraint:
     Internal helper.
     """
 
-    def _initialize_impl(self):
-        sim: sim_utils.SimulationContext = sim_utils.SimulationContext.instance()
-        # sim.add_physics_callback(
-        #     f"{self.uipc_object.cfg.prim_path}_X_{self.isaaclab_rigid_object.cfg.prim_path}_attachment_update",
-        #     self._compute_aim_positions,
-        # )
+    # def _initialize_impl(self):
+    #     sim: sim_utils.SimulationContext = sim_utils.SimulationContext.instance()
+    #     # sim.add_physics_callback(
+    #     #     f"{self.uipc_object.cfg.prim_path}_X_{self.isaaclab_rigid_object.cfg.prim_path}_attachment_update",
+    #     #     self._compute_aim_positions,
+    #     # )
 
     def _create_animation(self):
         animator = self.uipc_object.uipc_sim.scene.animator()

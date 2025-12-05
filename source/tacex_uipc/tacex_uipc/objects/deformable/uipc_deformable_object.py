@@ -5,11 +5,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import omni.log
-import omni.physics.tensors.impl.api as physx
 import omni.usd
-import usdrt
-import usdrt.UsdGeom
-from isaacsim.core.prims import XFormPrim
 from pxr import UsdGeom
 
 try:
@@ -25,29 +21,19 @@ except ImportError:
 import numpy as np
 
 import warp as wp
-from uipc.core import (
-    Engine,
-    World,
-    Scene,
-    FiniteElementStateAccessorFeature,
-    SanityCheckResult,
-)
-from uipc import builtin, view, Vector3
+from uipc import Vector3, builtin, view
 from uipc.constitution import ElasticModuli, StableNeoHookean
+from uipc.core import (
+    FiniteElementStateAccessorFeature,
+)
 from uipc.geometry import (
     SimplicialComplex,
-    extract_surface,
     flip_inward_triangles,
     label_surface,
     label_triangle_orient,
     tetmesh,
 )
 from uipc.unit import MPa
-
-import isaaclab.utils.string as string_utils
-from isaaclab.assets import AssetBase, AssetBaseCfg
-from isaaclab.utils import configclass
-import isaaclab.utils.math as math_utils
 
 wp.init()
 
@@ -59,6 +45,7 @@ from .uipc_deformable_object_data import UipcDeformableObjectData
 
 if TYPE_CHECKING:
     from tacex_uipc.sim import UipcSim
+
     from .uipc_deformable_object_cfg import UipcDeformableObjectCfg
 
 
@@ -244,7 +231,9 @@ class UipcDeformableObject(UipcObject):
     """
 
     def _setup_uipc_mesh(self) -> SimplicialComplex:
-        for prim in (
+        for (
+            prim
+        ) in (
             self._prim_view.prims
         ):  # todo dont loop over all prims of the view -> just take one base prim. Rather loop over the prim children?
             # need to access the mesh data of the usd prim
@@ -369,7 +358,8 @@ class UipcDeformableObject(UipcObject):
         # -- root state
         # note: we cast to tuple to avoid torch/numpy type mismatch.
         default_root_state = (
-            tuple(self.cfg.init_state.pos) + tuple(self.cfg.init_state.rot)
+            tuple(self.cfg.init_state.pos)
+            + tuple(self.cfg.init_state.rot)
             # + tuple(self.cfg.init_state.lin_vel)
             # + tuple(self.cfg.init_state.ang_vel)
         )

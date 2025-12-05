@@ -31,6 +31,7 @@ INSTALL_REQUIRES = [
     "psutil",
     "nvidia-ml-py",
     "pre-commit",
+    "scikit-learn",  # for fem-based simulator
 ]
 
 # PYTORCH_INDEX_URL = ["https://download.pytorch.org/whl/cu121"]
