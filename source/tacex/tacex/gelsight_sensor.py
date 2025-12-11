@@ -600,6 +600,11 @@ class GelSightSensor(SensorBase):
         self.camera_cfg: TiledCameraCfg = TiledCameraCfg(
             prim_path=self.cfg.prim_path + self.cfg.sensor_camera_cfg.prim_path_appendix,
             update_period=self.cfg.sensor_camera_cfg.update_period,
+            offset=TiledCameraCfg.OffsetCfg(
+                pos=self.cfg.sensor_camera_cfg.camera_pos_offset,
+                rot=self.cfg.sensor_camera_cfg.camera_rot_offset,
+                convention="opengl",
+            ),  # need to use opengl convention, since IsaacLab converts it into the opengl convention for the camera -> x and y are switched
             width=self.cfg.sensor_camera_cfg.resolution[0],
             height=self.cfg.sensor_camera_cfg.resolution[1],
             data_types=self.cfg.sensor_camera_cfg.data_types,

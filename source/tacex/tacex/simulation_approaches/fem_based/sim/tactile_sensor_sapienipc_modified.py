@@ -237,10 +237,12 @@ class VisionTactileSensorUIPC:
         marker_xy[:, 0] += marker_pos_shift_x
         marker_xy[:, 1] += marker_pos_shift_y
 
-        rot_mat = np.array([
-            [math.cos(marker_rotation_angle), -math.sin(marker_rotation_angle)],
-            [math.sin(marker_rotation_angle), math.cos(marker_rotation_angle)],
-        ])
+        rot_mat = np.array(
+            [
+                [math.cos(marker_rotation_angle), -math.sin(marker_rotation_angle)],
+                [math.sin(marker_rotation_angle), math.cos(marker_rotation_angle)],
+            ]
+        )
 
         marker_rotated_xy = marker_xy @ rot_mat.T
 
@@ -379,12 +381,14 @@ class VisionTactileSensorUIPC:
 
         init_marker_uv = self.gen_marker_uv(init_marker_pts)
         curr_marker_uv = self.gen_marker_uv(curr_marker_pts)
-        marker_mask = np.logical_and.reduce([
-            init_marker_uv[:, 0] > 5,
-            init_marker_uv[:, 0] < self.tactile_img_height,
-            init_marker_uv[:, 1] > 5,
-            init_marker_uv[:, 1] < self.tactile_img_width,
-        ])
+        marker_mask = np.logical_and.reduce(
+            [
+                init_marker_uv[:, 0] > 5,
+                init_marker_uv[:, 0] < self.tactile_img_height,
+                init_marker_uv[:, 1] > 5,
+                init_marker_uv[:, 1] < self.tactile_img_width,
+            ]
+        )
         marker_flow = np.stack([init_marker_uv, curr_marker_uv], axis=0)
         marker_flow = marker_flow[:, marker_mask]
 

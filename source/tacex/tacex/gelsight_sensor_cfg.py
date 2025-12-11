@@ -35,6 +35,16 @@ class GelSightSensorCfg(SensorBaseCfg):
         clipping_range: tuple[float, float] = (0.024, 0.028)
         update_latest_camera_pose: bool = False
 
+        camera_pos_offset: tuple[float, float, float] = (0.0001, 0.0008, 0.0)
+        """Translation of camera w.r.t to sensor frame. 
+        
+        Defaults to (-0.0001, 0.0008, 0.0) for the GelSight Mini. This offset places the camera in the center of the gelpad frame.
+        Even very small changes can lead to relativly big differences in the indentation location.
+        """
+
+        camera_rot_offset: tuple[float, float, float, float] = (0.0, 1.0, 0.0, 0.0)
+        """Quaternion rotation (w, x, y, z) w.r.t. the parent frame. Defaults to (0.0, 1.0, 0.0, 0.0)."""
+
         focal_length: float = 20
         """Focal length of the sensor camera (in [cm])."""
 
@@ -44,7 +54,7 @@ class GelSightSensorCfg(SensorBaseCfg):
         border_fraction: float = 0.15
         """Fraction of the image dimensions to crop from each border. Value clamped in [0.0, 0.49] 
         
-        Behavior is the same as for the GelSightSDK (https://github.com/gelsightinc/gsrobotics/blob/321d6a22da64529138ff10237335038fd8c5189f/utilities/image_processing.py#L108)
+        Behavior is the same as in the GelSightSDK (https://github.com/gelsightinc/gsrobotics/blob/321d6a22da64529138ff10237335038fd8c5189f/utilities/image_processing.py#L108)
         """
 
         fov_width = 0.00186  # 0.002525

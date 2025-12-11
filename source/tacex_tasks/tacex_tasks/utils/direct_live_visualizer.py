@@ -257,7 +257,7 @@ class DirectLiveVisualizer(ManagerLiveVisualizer):
     def _debug_vis_callback(self, event):
         """Callback for the debug visualization event."""
 
-        if not SimulationContext.instance().is_playing():
+        if SimulationContext.instance() is None or not SimulationContext.instance().is_playing():
             # Visualizers have not been created yet.
             return
 
