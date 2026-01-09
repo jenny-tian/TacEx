@@ -260,7 +260,7 @@ class DirectLiveVisualizer(ManagerLiveVisualizer):
         if SimulationContext.instance() is None or not SimulationContext.instance().is_playing():
             # Visualizers have not been created yet.
             return
-
+        self._env_idx = self._vis_window._env_idx
         # get updated data and update visualization
         for name, values in self.terms.items():
             # E.g. terms = actions: Actions values have the shape (num_envs, num_actions).

@@ -8,11 +8,11 @@ from tacex.simulation_approaches.gpu_taxim import TaximSimulatorCfg
 
 from tacex_assets import TACEX_ASSETS_DATA_DIR
 
-"""Configuration class for the Gelsight Mini sensor."""
-
 
 @configclass
 class GelSightMiniCfg(GelSightSensorCfg):
+    """Configuration class for the Gelsight Mini sensor."""
+
     class_type: type = GelSightSensor
 
     case_dimensions: GelSightSensorCfg.Dimensions = GelSightSensorCfg.Dimensions(
