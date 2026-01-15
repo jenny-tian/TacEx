@@ -59,10 +59,8 @@ from isaaclab.assets import (
     RigidObject,
     RigidObjectCfg,
 )
-from isaaclab.controllers.differential_ik import DifferentialIKController
-from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
+from isaaclab.controllers import DifferentialIKController, DifferentialIKControllerCfg
 from isaaclab.envs import DirectRLEnv, DirectRLEnvCfg, ViewerCfg
-from isaaclab.envs.ui import BaseEnvWindow
 from isaaclab.markers.config import FRAME_MARKER_CFG
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import FrameTransformer, FrameTransformerCfg
@@ -138,13 +136,17 @@ class TaximParameterWindow:
         self.ui_window = ui.Window(
             window_name, width=500, height=800, visible=True, dock_preference=ui.DockPreference.LEFT_BOTTOM
         )
-        with self.ui_window.frame:
-            self.build_fn()
 
         self.taxim_params = None
         self.new_params = False
 
         self.sensor = sensor
+
+        self.num_calib_point: int | None = None
+        self.current_calib_point_idx = 11
+
+        with self.ui_window.frame:
+            self.build_fn()
 
     def _build_initial_frame_processing_params_frame(self):
         """Build the frame for the parameters which control the initial frame processing"""
@@ -469,17 +471,39 @@ class TaximParameterWindow:
 
     def build_fn(self):
         """
-        The method that is called to build all the UI once the window is visible.
+        The method that is called to build all of the UI once the window is visible.
         """
         with ui.VStack(height=0):
             ui.Spacer(height=3)
+            self.calib_point_label = ui.Label(f"Current calib_point_idx: {self.current_calib_point_idx}")
+            with ui.HStack():
+                ui.Button(
+                    "Prev Calib point",
+                    name="tool_button",
+                    clicked_fn=lambda: self.prev_calib_point(),
+                )
+                ui.Button(
+                    "Next Calib point",
+                    name="tool_button",
+                    clicked_fn=lambda: self.next_calib_point(),
+                )
+
+            self.indentation_depth_widget = float_builder(
+                default_val=0.001,
+                min=0.0001,
+                max=0.002,
+                step=0.00001,
+                format="%.5f",
+                label="indentation_depth",
+            )
+
+            ui.Spacer(height=6)
+            self._build_initial_frame_processing_params_frame()
             ui.Button(
-                "Create new Taxim Sim ",
+                "Create new Taxim Sim",
                 name="tool_button",
                 clicked_fn=lambda: self.create_new_taxim_sim(self.sensor),
             )
-            ui.Spacer(height=6)
-            self._build_initial_frame_processing_params_frame()
             ui.Spacer(height=3)
             self._build_deformation_params_frame()
             ui.Spacer(height=3)
@@ -596,6 +620,18 @@ class TaximParameterWindow:
             f"shadow_attachment_kernel_size_rel : {taxim.sim_params.shadow_attachment_kernel_size_rel}  \n"
         )
 
+    def prev_calib_point(self):
+        self.current_calib_point_idx -= 1
+        if self.current_calib_point_idx < 0:
+            self.current_calib_point_idx = self.num_calib_point - 1
+        self.calib_point_label.text = f"Current calib_point_idx: {self.current_calib_point_idx}"
+
+    def next_calib_point(self):
+        self.current_calib_point_idx += 1
+        if self.current_calib_point_idx == self.num_calib_point:
+            self.current_calib_point_idx = 0
+        self.calib_point_label.text = f"Current calib_point_idx: {self.current_calib_point_idx}"
+
 
 def create_indenters_cfg(base_center_x, base_center_y, base_center_z) -> RigidObjectCfg:
     """Creates RigidObjectCfg's for each usd file in the `{TACEX_ASSETS_DATA_DIR}/Props/tactile_test_shapes/` directory.
@@ -608,7 +644,7 @@ def create_indenters_cfg(base_center_x, base_center_y, base_center_z) -> RigidOb
     usd_files_path = sorted(list(Path(f"{TACEX_ASSETS_DATA_DIR}/Props/tactile_test_shapes/").glob("*.usd")))
     usd_files_path = [str(path) for path in usd_files_path]
     pos = [base_center_x, base_center_y, base_center_z]
-
+    usd_files_path = [usd_files_path[0]]  # todo rmv
     spawn_cfgs = sim_utils.MultiUsdFileCfg(
         usd_path=usd_files_path,
         random_choice=False,
@@ -919,22 +955,19 @@ class ShapeTouchEnv(DirectRLEnv):
             cfg=self.cfg.ik_controller_cfg, num_envs=self.num_envs, device=self.device
         )
         # Obtain the frame index of the end-effector
-        body_ids, body_names = self._robot.find_bodies("panda_hand")
+        body_ids, body_names = self._robot.find_bodies("TCP")
         # save only the first body index
-        self._body_idx = body_ids[0]
-        self._body_name = body_names[0]
+        self._body_tcp_idx = body_ids[0]
 
         # For a fixed base robot, the frame index is one less than the body index.
         # This is because the root body is not included in the returned Jacobians.
-        self._jacobi_body_idx = self._body_idx - 1
-
-        # ee offset w.r.t panda hand
-        self._offset_pos = torch.tensor([0.0, 0.0, 0.11765], device=self.device).repeat(self.num_envs, 1)
-        self._offset_rot = torch.tensor([0.0, 0, 1.0, 0.0], device=self.device).repeat(self.num_envs, 1)
-        # ---
+        self._jacobi_body_idx = self._body_tcp_idx - 1
 
         # create buffer to store actions (= ik_commands)
         self.ik_commands = torch.zeros((self.num_envs, self._ik_controller.action_dim), device=self.device)
+        self.ik_commands[:, 3:] = torch.tensor([1, 0, 0, 0], device=self.device)
+
+        # ---
 
         self.step_count = 0
 
@@ -961,6 +994,14 @@ class ShapeTouchEnv(DirectRLEnv):
                     self.gsmini.tactile_image_shape[2],
                 )
             )
+            self.visualizers["Images"].terms["calib_points"] = torch.zeros(
+                (
+                    self.num_envs,
+                    self.gsmini.tactile_image_shape[0],
+                    self.gsmini.tactile_image_shape[1],
+                    self.gsmini.tactile_image_shape[2],
+                )
+            )
             # self.visualizers["Metrics"].terms["SSIM"] = torch.zeros((self.num_envs, 1))
 
             for vis in self.visualizers.values():
@@ -978,7 +1019,7 @@ class ShapeTouchEnv(DirectRLEnv):
             orientation=indenter_holder_plate.init_state.rot,
         )
         # clone, filter, and replicate
-        self.scene.clone_environments(copy_from_source=True)
+        self.scene.clone_environments(copy_from_source=False)
 
         self.scene.rigid_objects["indenters"] = RigidObject(self.cfg.indenters)
 
@@ -990,11 +1031,7 @@ class ShapeTouchEnv(DirectRLEnv):
             debug_vis=False,
             visualizer_cfg=marker_cfg,
             target_frames=[
-                FrameTransformerCfg.FrameCfg(
-                    prim_path="/World/envs/env_.*/Robot/panda_hand",
-                    name="end_effector",
-                    offset=OffsetCfg(pos=(0.0, 0.0, 0.11765), rot=(0.0, 0.0, 1.0, 0.0)),
-                ),
+                FrameTransformerCfg.FrameCfg(prim_path="/World/envs/env_.*/Robot/TCP", name="end_effector"),
             ],
         )
 
@@ -1033,9 +1070,10 @@ class ShapeTouchEnv(DirectRLEnv):
     def _apply_action(self):
         # obtain quantities from simulation
         jacobian = self._robot.root_physx_view.get_jacobians()[:, self._jacobi_body_idx, :, :]
-        ee_pose_w = self._robot.data.body_pose_w[:, self._body_idx]
+        ee_pose_w = self._robot.data.body_pose_w[:, self._body_tcp_idx]
         root_pose_w = self._robot.data.root_pose_w
         joint_pos = self._robot.data.joint_pos[:, :]
+
         # compute ee frame in root frame
         ee_pos_b, ee_quat_b = math_utils.subtract_frame_transforms(
             root_pose_w[:, 0:3],
@@ -1044,10 +1082,6 @@ class ShapeTouchEnv(DirectRLEnv):
             ee_pose_w[:, 3:7],
         )
 
-        # apply ee offset
-        ee_pos_b, ee_quat_b = math_utils.combine_frame_transforms(
-            ee_pos_b, ee_quat_b, self._offset_pos, self._offset_rot
-        )
         # compute the joint commands
         joint_pos_des = self._ik_controller.compute(ee_pos_b, ee_quat_b, jacobian, joint_pos)
 
@@ -1072,7 +1106,6 @@ class ShapeTouchEnv(DirectRLEnv):
 
         # reset robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids]
-
         joint_vel = torch.zeros_like(joint_pos)
         self._robot.set_joint_position_target(joint_pos, env_ids=env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
@@ -1090,11 +1123,7 @@ def step_env(env: ShapeTouchEnv):
 
     env.param_window.collect_taxim_parameters()
 
-    # env.gsmini.update(dt=env.physics_dt)
-
-    # update isaac buffers() -> also updates sensors
     env.scene.update(dt=env.physics_dt)
-    # render scene for cameras (used by sensor)
     env.sim.render()
 
 
@@ -1130,13 +1159,11 @@ def run_data_collection(env: ShapeTouchEnv):
     calib_points_filtered[:, 1] += base_center_y
     calib_pattern = torch.tensor(calib_points_filtered, device=env.device)
 
-    indentation_depths = np.linspace(0.0001, 0.002, 5)
+    env.param_window.num_calib_point = calib_pattern.shape[0]
 
     print(f"Starting simulation with {env.num_envs} envs")
 
     env.reset()
-
-    calib_point_idx = 1
 
     # move to ee initial position
     for _ in range(50):
@@ -1145,45 +1172,50 @@ def run_data_collection(env: ShapeTouchEnv):
 
     # Data collection loop
     while simulation_app.is_running():
+        calib_point_idx = env.param_window.current_calib_point_idx
         # -- move ee to calib point
-        env.ik_commands[:, :2] = calib_pattern[calib_point_idx - 1]
-        env.ik_commands[:, 2] = 0.020  # above the indentation point
-        env.ik_commands[:, 3:] = torch.tensor([1.0, 0, 0.0, 0.0], device=env.device).repeat(env.num_envs, 1)
+        env.ik_commands[:, :2] = calib_pattern[calib_point_idx]
+        depth = env.param_window.indentation_depth_widget.as_float
+        env.ik_commands[:, 2] = 0.02 - depth
+        env.ik_commands[:, 3:] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=env.device).repeat(env.num_envs, 1)
 
-        for _ in range(30):
+        env.ik_commands[:, 0] = 0.5
+        env.ik_commands[:, 1] = 0.0
+        env.ik_commands[:, 2] = 0.5
+
+        for _ in range(35):
             step_env(env)
+            # update data visualization
+            env.visualizers["Images"].terms["tactile_rgb"] = env.gsmini.data.output["tactile_rgb"]
 
-        # print("test: \n")
-        # print("current calib point: ", calib_pattern[data_point_idx - 1])
-        # # get ee pose
-        # ee_pose_w = env._robot.data.body_pose_w[:, env._body_idx]
-        # print("ee pos w: ", ee_pose_w[:, :3])
+            # draw all calib points of the calibration pattern for debug purposes for all envs
+            for i in range(env.num_envs):
+                tactile_rgb = env.gsmini.data.output["tactile_rgb"][i].cpu().numpy()
+                for j in range(calib_points_pix.shape[0]):
+                    # mark the current goal pos with blue circle
+                    if calib_point_idx == j:
+                        color = (0, 0, 255)
+                    else:
+                        color = (50, 50, 50)
 
-        # # get camera pose for comparision
-        # env.gsmini.camera._update_poses(env.gsmini.camera._ALL_INDICES)
-        # print("camera pos w ", env.gsmini.camera._data.pos_w)
-
-        for indentation_idx in range(indentation_depths.shape[0]):
-            # -- move ee down and press on indenter shape
-            depth = np.round(indentation_depths[indentation_idx], 4)
-            env.ik_commands[:, 2] = 0.02 - depth
-            env.ik_commands[:, 3:] = torch.tensor([1.0, 0, 0.0, 0.0], device=env.device).repeat(env.num_envs, 1)
-
-            for _ in range(20):
-                step_env(env)
-                # update data visualization
-                env.visualizers["Images"].terms["tactile_rgb"] = env.gsmini.data.output["tactile_rgb"]
-
-        calib_point_idx += 1
-
-        # repeat pattern
-        if calib_point_idx > calib_pattern.shape[0]:
-            calib_point_idx = 1
+                    cv2.circle(
+                        tactile_rgb,
+                        (calib_points_pix[j, 0], calib_points_pix[j, 1]),
+                        int(cylinder_radius_mm / pixmm),
+                        color,
+                        1,
+                    )
+                    cv2.circle(
+                        tactile_rgb,
+                        (calib_points_pix[j, 0], calib_points_pix[j, 1]),
+                        1,
+                        color,
+                        1,
+                    )
+                # create image with the calib points positions drawn onto it
+                env.visualizers["Images"].terms["calib_points"][i] = torch.tensor(tactile_rgb)
 
     env.close()
-    print(f"Finished Data collection. Saved {(calib_point_idx - 1) * indentation_depths.shape[0]} frames per indenter.")
-    print(f"Frames saved in total: {(calib_point_idx - 1) * indentation_depths.shape[0] * env.cfg.scene.num_envs}.")
-    # pynvml.nvmlShutdown()
 
 
 def main():
@@ -1194,7 +1226,8 @@ def main():
 
     # override configurations with non-hydra CLI arguments
     env_cfg.scene.num_envs = (
-        len(INDENTER_FILE_PATHS)  # one env for each indenter shape
+        1
+        # len(INDENTER_FILE_PATHS)  # one env for each indenter shape
     )
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     env_cfg.gsmini.debug_vis = args_cli.debug_vis
