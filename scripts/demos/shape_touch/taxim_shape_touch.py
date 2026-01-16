@@ -254,7 +254,7 @@ class TaximParameterWindow:
                                     default_val=0.04765625,
                                     min=0.0001,
                                     max=0.1,
-                                    step=0.00002,
+                                    step=0.0001,
                                     format="%.5f",
                                     label="Kernel 0",
                                     label_width=60,
@@ -265,7 +265,7 @@ class TaximParameterWindow:
                                     default_val=0.06354166666666666,
                                     min=0.0001,
                                     max=0.1,
-                                    step=0.00002,
+                                    step=0.0001,
                                     format="%.5f",
                                     label_width=60,
                                 )
@@ -277,7 +277,7 @@ class TaximParameterWindow:
                                     default_val=0.02421875,
                                     min=0.0001,
                                     max=0.1,
-                                    step=0.00002,
+                                    step=0.0001,
                                     format="%.5f",
                                     label="Kernel 1",
                                     label_width=60,
@@ -288,7 +288,7 @@ class TaximParameterWindow:
                                     default_val=0.03229166666666667,
                                     min=0.0001,
                                     max=0.1,
-                                    step=0.00002,
+                                    step=0.0001,
                                     format="%.5f",
                                     label_width=60,
                                 )
@@ -300,7 +300,7 @@ class TaximParameterWindow:
                                     default_val=0.012499999999999999,
                                     min=0.0001,
                                     max=0.1,
-                                    step=0.00002,
+                                    step=0.0001,
                                     format="%.5f",
                                     label="Kernel 2",
                                     label_width=60,
@@ -311,7 +311,7 @@ class TaximParameterWindow:
                                     default_val=0.016666666666666666,
                                     min=0.0001,
                                     max=0.1,
-                                    step=0.00002,
+                                    step=0.0001,
                                     format="%.5f",
                                     label_width=60,
                                 )
@@ -323,7 +323,7 @@ class TaximParameterWindow:
                                     default_val=0.00546875,
                                     min=0.0001,
                                     max=0.1,
-                                    step=0.00002,
+                                    step=0.0001,
                                     format="%.5f",
                                     label="Kernel 3",
                                     label_width=60,
@@ -334,7 +334,7 @@ class TaximParameterWindow:
                                     default_val=0.007291666666666667,
                                     min=0.0001,
                                     max=0.1,
-                                    step=0.00002,
+                                    step=0.0001,
                                     format="%.5f",
                                     label_width=60,
                                 )
@@ -346,7 +346,7 @@ class TaximParameterWindow:
                                     default_val=0.003125,
                                     min=0.0001,
                                     max=0.1,
-                                    step=0.00002,
+                                    step=0.0001,
                                     format="%.5f",
                                     label="Kernel 4",
                                     label_width=60,
@@ -357,7 +357,7 @@ class TaximParameterWindow:
                                     default_val=0.004166666666666667,
                                     min=0.0001,
                                     max=0.1,
-                                    step=0.00002,
+                                    step=0.0001,
                                     format="%.5f",
                                     label_width=60,
                                 )
@@ -369,7 +369,7 @@ class TaximParameterWindow:
                                     default_val=0.0017187500000000002,
                                     min=0.0001,
                                     max=0.1,
-                                    step=0.00002,
+                                    step=0.0001,
                                     format="%.5f",
                                     label="Kernel 5",
                                     label_width=60,
@@ -380,7 +380,7 @@ class TaximParameterWindow:
                                     default_val=0.0022916666666666667,
                                     min=0.0001,
                                     max=0.1,
-                                    step=0.00002,
+                                    step=0.0001,
                                     format="%.5f",
                                     label_width=60,
                                 )
@@ -1178,10 +1178,6 @@ def run_data_collection(env: ShapeTouchEnv):
         depth = env.param_window.indentation_depth_widget.as_float
         env.ik_commands[:, 2] = 0.02 - depth
         env.ik_commands[:, 3:] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=env.device).repeat(env.num_envs, 1)
-
-        env.ik_commands[:, 0] = 0.5
-        env.ik_commands[:, 1] = 0.0
-        env.ik_commands[:, 2] = 0.5
 
         for _ in range(35):
             step_env(env)
