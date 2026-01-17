@@ -199,6 +199,8 @@ class PhysXRigidEnvCfg(DirectRLEnvCfg):
     )
 
     ik_controller_cfg = DifferentialIKControllerCfg(command_type="pose", use_relative_mode=False, ik_method="dls")
+    ee_pos_offset = [0.0, 0.0, 0.0]
+    ee_rot_offset = [0.0, 1.0, 0.0, 0.0]
 
     ball_radius = 0.005
 
@@ -221,7 +223,7 @@ class PhysXRigidEnv(UipcRLEnv):
             cfg=self.cfg.ik_controller_cfg, num_envs=self.num_envs, device=self.device
         )
         # Obtain the frame index of the end-effector
-        body_ids, body_names = self._robot.find_bodies("TCP")
+        body_ids, _ = self._robot.find_bodies("TCP")
         # save only the first body index
         self._body_tcp_idx = body_ids[0]
 
@@ -233,6 +235,9 @@ class PhysXRigidEnv(UipcRLEnv):
         self.ik_commands = torch.zeros((self.num_envs, self._ik_controller.action_dim), device=self.device)
         self.ik_commands[:, 3:] = torch.tensor([1, 0, 0, 0], device=self.device)
 
+        # ee offset w.r.t TCP -> TCP is defined so that z-axis shows down. In our case here we want z to show upwards
+        self._ee_pos_offset = torch.tensor(self.cfg.ee_pos_offset, device=self.device).repeat(self.num_envs, 1)
+        self._ee_rot_offset = torch.tensor(self.cfg.ee_rot_offset, device=self.device).repeat(self.num_envs, 1)
         # ---
 
         # --- for moving ee and ball in a specific pattern ---
@@ -312,11 +317,9 @@ class PhysXRigidEnv(UipcRLEnv):
             visualizer_cfg=marker_cfg,
             target_frames=[
                 FrameTransformerCfg.FrameCfg(
-                    prim_path="/World/envs/env_.*/Robot/panda_hand",
+                    prim_path="/World/envs/env_.*/Robot/TCP",
                     name="end_effector",
-                    offset=OffsetCfg(
-                        pos=(0.0, 0.0, 0.131),  # 0.1034
-                    ),
+                    offset=OffsetCfg(pos=self.cfg.ee_pos_offset, rot=self.cfg.ee_rot_offset),
                 ),
             ],
         )
@@ -367,6 +370,11 @@ class PhysXRigidEnv(UipcRLEnv):
             root_pose_w[:, 3:7],
             ee_pose_w[:, 0:3],
             ee_pose_w[:, 3:7],
+        )
+
+        # apply ee offset
+        ee_pos_b, ee_quat_b = math_utils.combine_frame_transforms(
+            ee_pos_b, ee_quat_b, self._ee_pos_offset, self._ee_rot_offset
         )
 
         # compute the joint commands

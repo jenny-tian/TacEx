@@ -644,7 +644,7 @@ def create_indenters_cfg(base_center_x, base_center_y, base_center_z) -> RigidOb
     usd_files_path = sorted(list(Path(f"{TACEX_ASSETS_DATA_DIR}/Props/tactile_test_shapes/").glob("*.usd")))
     usd_files_path = [str(path) for path in usd_files_path]
     pos = [base_center_x, base_center_y, base_center_z]
-    usd_files_path = [usd_files_path[0]]  # todo rmv
+
     spawn_cfgs = sim_utils.MultiUsdFileCfg(
         usd_path=usd_files_path,
         random_choice=False,
@@ -842,7 +842,7 @@ class ShapeTouchEnvCfg(DirectRLEnvCfg):
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
         num_envs=1,
-        env_spacing=1.5,
+        env_spacing=0.75,
         replicate_physics=False,
         lazy_sensor_update=True,  # only update sensors when they are accessed
     )
@@ -925,6 +925,8 @@ class ShapeTouchEnvCfg(DirectRLEnvCfg):
     )
 
     ik_controller_cfg = DifferentialIKControllerCfg(command_type="pose", use_relative_mode=False, ik_method="dls")
+    ee_pos_offset = [0.0, 0.0, 0.0]
+    ee_rot_offset = [0.0, 1.0, 0.0, 0.0]
 
     base_pose = [
         0.5,
@@ -955,7 +957,7 @@ class ShapeTouchEnv(DirectRLEnv):
             cfg=self.cfg.ik_controller_cfg, num_envs=self.num_envs, device=self.device
         )
         # Obtain the frame index of the end-effector
-        body_ids, body_names = self._robot.find_bodies("TCP")
+        body_ids, _ = self._robot.find_bodies("TCP")
         # save only the first body index
         self._body_tcp_idx = body_ids[0]
 
@@ -967,6 +969,9 @@ class ShapeTouchEnv(DirectRLEnv):
         self.ik_commands = torch.zeros((self.num_envs, self._ik_controller.action_dim), device=self.device)
         self.ik_commands[:, 3:] = torch.tensor([1, 0, 0, 0], device=self.device)
 
+        # ee offset w.r.t TCP -> TCP is defined so that z-axis shows down. In our case here we want z to show upwards
+        self._ee_pos_offset = torch.tensor(self.cfg.ee_pos_offset, device=self.device).repeat(self.num_envs, 1)
+        self._ee_rot_offset = torch.tensor(self.cfg.ee_rot_offset, device=self.device).repeat(self.num_envs, 1)
         # ---
 
         self.step_count = 0
@@ -1019,7 +1024,7 @@ class ShapeTouchEnv(DirectRLEnv):
             orientation=indenter_holder_plate.init_state.rot,
         )
         # clone, filter, and replicate
-        self.scene.clone_environments(copy_from_source=False)
+        self.scene.clone_environments(copy_from_source=True)
 
         self.scene.rigid_objects["indenters"] = RigidObject(self.cfg.indenters)
 
@@ -1031,7 +1036,11 @@ class ShapeTouchEnv(DirectRLEnv):
             debug_vis=False,
             visualizer_cfg=marker_cfg,
             target_frames=[
-                FrameTransformerCfg.FrameCfg(prim_path="/World/envs/env_.*/Robot/TCP", name="end_effector"),
+                FrameTransformerCfg.FrameCfg(
+                    prim_path="/World/envs/env_.*/Robot/TCP",
+                    name="end_effector",
+                    offset=OffsetCfg(pos=self.cfg.ee_pos_offset, rot=self.cfg.ee_rot_offset),
+                ),
             ],
         )
 
@@ -1080,6 +1089,11 @@ class ShapeTouchEnv(DirectRLEnv):
             root_pose_w[:, 3:7],
             ee_pose_w[:, 0:3],
             ee_pose_w[:, 3:7],
+        )
+
+        # apply ee offset
+        ee_pos_b, ee_quat_b = math_utils.combine_frame_transforms(
+            ee_pos_b, ee_quat_b, self._ee_pos_offset, self._ee_rot_offset
         )
 
         # compute the joint commands
@@ -1222,8 +1236,7 @@ def main():
 
     # override configurations with non-hydra CLI arguments
     env_cfg.scene.num_envs = (
-        1
-        # len(INDENTER_FILE_PATHS)  # one env for each indenter shape
+        len(INDENTER_FILE_PATHS)  # one env for each indenter shape
     )
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     env_cfg.gsmini.debug_vis = args_cli.debug_vis

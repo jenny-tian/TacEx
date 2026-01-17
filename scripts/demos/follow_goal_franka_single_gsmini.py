@@ -234,6 +234,8 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
     )
 
     ik_controller_cfg = DifferentialIKControllerCfg(command_type="pose", use_relative_mode=False, ik_method="dls")
+    ee_pos_offset = [0.0, 0.0, 0.0]
+    ee_rot_offset = [0.0, 1.0, 0.0, 0.0]
 
     ball_radius = 0.005
 
@@ -258,8 +260,7 @@ class BallRollingEnv(DirectRLEnv):
             cfg=self.cfg.ik_controller_cfg, num_envs=self.num_envs, device=self.device
         )
         # Obtain the frame index of the end-effector
-        body_ids, body_names = self._robot.find_bodies("TCP")
-
+        body_ids, _ = self._robot.find_bodies("TCP")
         # save only the first body index
         self._body_tcp_idx = body_ids[0]
 
@@ -271,6 +272,9 @@ class BallRollingEnv(DirectRLEnv):
         self.ik_commands = torch.zeros((self.num_envs, self._ik_controller.action_dim), device=self.device)
         self.ik_commands[:, 3:] = torch.tensor([1, 0, 0, 0], device=self.device)
 
+        # ee offset w.r.t TCP -> TCP is defined so that z-axis shows down. In our case here we want z to show upwards
+        self._ee_pos_offset = torch.tensor(self.cfg.ee_pos_offset, device=self.device).repeat(self.num_envs, 1)
+        self._ee_rot_offset = torch.tensor(self.cfg.ee_rot_offset, device=self.device).repeat(self.num_envs, 1)
         # ---
 
         self.step_count = 0
@@ -301,6 +305,7 @@ class BallRollingEnv(DirectRLEnv):
                 FrameTransformerCfg.FrameCfg(
                     prim_path="/World/envs/env_.*/Robot/TCP",
                     name="end_effector",
+                    offset=OffsetCfg(pos=self.cfg.ee_pos_offset, rot=self.cfg.ee_rot_offset),
                 ),
             ],
         )
@@ -324,7 +329,7 @@ class BallRollingEnv(DirectRLEnv):
             prim_path="/Goal",
             size=0.01,
             position=np.array([0.5, 0.0, 0.0155]),
-            orientation=np.array([1, 0.0, 0.0, 0.0]),
+            orientation=np.array([1.0, 0.0, 0.0, 0.0]),
             color=np.array([255.0, 0.0, 0.0]),
             visible=False,
         )
@@ -353,10 +358,10 @@ class BallRollingEnv(DirectRLEnv):
             ee_pose_w[:, 3:7],
         )
 
-        # # apply ee offset
-        # ee_pos_b, ee_quat_b = math_utils.combine_frame_transforms(
-        #     ee_pos_b, ee_quat_b, self._offset_pos, self._offset_rot
-        # )
+        # apply ee offset
+        ee_pos_b, ee_quat_b = math_utils.combine_frame_transforms(
+            ee_pos_b, ee_quat_b, self._ee_pos_offset, self._ee_rot_offset
+        )
 
         # compute the joint commands
         joint_pos_des = self._ik_controller.compute(ee_pos_b, ee_quat_b, jacobian, joint_pos)

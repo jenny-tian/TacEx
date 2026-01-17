@@ -324,6 +324,8 @@ class ShapeTouchEnvCfg(DirectRLEnvCfg):
     )
 
     ik_controller_cfg = DifferentialIKControllerCfg(command_type="pose", use_relative_mode=False, ik_method="dls")
+    ee_pos_offset = [0.0, 0.0, 0.0]
+    ee_rot_offset = [0.0, 1.0, 0.0, 0.0]
 
     main_pose = [0.5, 0.0, 0.02, 1, 0, 0, 0]
 
@@ -346,18 +348,17 @@ class ShapeTouchEnv(DirectRLEnv):
             cfg=self.cfg.ik_controller_cfg, num_envs=self.num_envs, device=self.device
         )
         # Obtain the frame index of the end-effector
-        body_ids, body_names = self._robot.find_bodies("panda_hand")
+        body_ids, _ = self._robot.find_bodies("TCP")
         # only save the first body index
-        self._body_idx = body_ids[0]
-        self._body_name = body_names[0]
+        self._body_tcp_idx = body_ids[0]
 
         # For a fixed base robot, the frame index is one less than the body index.
         # This is because the root body is not included in the returned Jacobians.
-        self._jacobi_body_idx = self._body_idx - 1
+        self._jacobi_body_idx = self._body_tcp_idx - 1
 
-        # ee offset w.r.t panda hand
-        self._offset_pos = torch.tensor([0.0, 0.0, 0.11765], device=self.device).repeat(self.num_envs, 1)
-        self._offset_rot = torch.tensor([0.0, 0, 1.0, 0.0], device=self.device).repeat(self.num_envs, 1)
+        # ee offset w.r.t TCP -> TCP is defined so that z-axis shows down. In our case here we want z to show upwards
+        self._ee_pos_offset = torch.tensor(self.cfg.ee_pos_offset, device=self.device).repeat(self.num_envs, 1)
+        self._ee_rot_offset = torch.tensor(self.cfg.ee_rot_offset, device=self.device).repeat(self.num_envs, 1)
         # ---
 
         # create buffer to store actions (= ik_commands)
@@ -393,9 +394,9 @@ class ShapeTouchEnv(DirectRLEnv):
             visualizer_cfg=marker_cfg,
             target_frames=[
                 FrameTransformerCfg.FrameCfg(
-                    prim_path="/World/envs/env_.*/Robot/panda_hand",
+                    prim_path="/World/envs/env_.*/Robot/TCP",
                     name="end_effector",
-                    offset=OffsetCfg(pos=(0.0, 0.0, 0.11765), rot=(0.0, 0, 1.0, 0.0)),
+                    offset=OffsetCfg(pos=self.cfg.ee_pos_offset, rot=self.cfg.ee_rot_offset),
                 ),
             ],
         )
@@ -445,17 +446,21 @@ class ShapeTouchEnv(DirectRLEnv):
     def _apply_action(self):
         # obtain quantities from simulation
         jacobian = self._robot.root_physx_view.get_jacobians()[:, self._jacobi_body_idx, :, :]
-        ee_pose_w = self._robot.data.body_pose_w[:, self._body_idx]
+        ee_pose_w = self._robot.data.body_pose_w[:, self._body_tcp_idx]
         root_pose_w = self._robot.data.root_pose_w
         joint_pos = self._robot.data.joint_pos[:, :]
+
         # compute ee frame in root frame
         ee_pos_b, ee_quat_b = math_utils.subtract_frame_transforms(
-            root_pose_w[:, 0:3], root_pose_w[:, 3:7], ee_pose_w[:, 0:3], ee_pose_w[:, 3:7]
+            root_pose_w[:, 0:3],
+            root_pose_w[:, 3:7],
+            ee_pose_w[:, 0:3],
+            ee_pose_w[:, 3:7],
         )
 
         # apply ee offset
         ee_pos_b, ee_quat_b = math_utils.combine_frame_transforms(
-            ee_pos_b, ee_quat_b, self._offset_pos, self._offset_rot
+            ee_pos_b, ee_quat_b, self._ee_pos_offset, self._ee_rot_offset
         )
 
         # compute the joint commands
