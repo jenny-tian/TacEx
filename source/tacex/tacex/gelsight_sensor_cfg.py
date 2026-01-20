@@ -35,7 +35,7 @@ class GelSightSensorCfg(SensorBaseCfg):
         clipping_range: tuple[float, float] = (0.024, 0.028)
         update_latest_camera_pose: bool = False
 
-        camera_pos_offset: tuple[float, float, float] = (0.0001, 0.0008, 0.0)
+        camera_pos_offset: tuple[float, float, float] = (0.0000, -0.0001, 0.0)
         """Translation of camera w.r.t to sensor frame. 
         
         Defaults to (-0.0001, 0.0008, 0.0) for the GelSight Mini. This offset places the camera in the center of the gelpad frame.
