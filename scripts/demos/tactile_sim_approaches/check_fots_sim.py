@@ -64,9 +64,6 @@ from tacex_assets.robots.franka.franka_gsmini_single_rigid import (
 )
 from tacex_assets.sensors.gelsight_mini.gsmini_cfg import GelSightMiniCfg
 
-#  from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
-# from isaaclab.envs.mdp.actions.actions_cfg import DifferentialInverseKinematicsActionCfg
-
 
 class CustomEnvWindow(BaseEnvWindow):
     """Window manager for the RL environment."""

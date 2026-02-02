@@ -33,9 +33,6 @@ from tacex_assets import TACEX_ASSETS_DATA_DIR
 
 from .reset_with_IK_solver import BallRollingIKResetEnvCfg
 
-#  from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
-# from isaaclab.envs.mdp.actions.actions_cfg import DifferentialInverseKinematicsActionCfg
-
 
 from isaaclab.markers import CUBOID_MARKER_CFG  # isort: skip
 

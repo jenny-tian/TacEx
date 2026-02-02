@@ -142,85 +142,76 @@ class UipcRigidObject(UipcObject):
     """
 
     def _setup_uipc_mesh(self):
-        for (
-            prim
-        ) in (
-            self._prim_view.prims
-        ):  # todo dont loop over all prims of the view -> just take one base prim. Rather loop over the prim children?
-            # need to access the mesh data of the usd prim
-            prim_children = prim.GetChildren()
-            usd_mesh = UsdGeom.Mesh(prim_children[0])
-            usd_mesh_path = str(usd_mesh.GetPath())
-            print("usd_mesh_path ", usd_mesh_path)
+        if self.cfg.mesh_cfg is None:
+            # Load precomputed mesh data from USD prim.
+            tet_points = np.array(self._usd_mesh_prim.GetAttribute("tet_points").Get())
+            tet_indices = self._usd_mesh_prim.GetAttribute("tet_indices").Get()
+            surf_points = np.array(self._usd_mesh_prim.GetAttribute("tet_surf_points").Get())
+            tet_surf_indices = self._usd_mesh_prim.GetAttribute("tet_surf_indices").Get()
 
-            if self.cfg.mesh_cfg is None:
-                # Load precomputed mesh data from USD prim.
-                tet_points = np.array(prim_children[0].GetAttribute("tet_points").Get())
-                tet_indices = prim_children[0].GetAttribute("tet_indices").Get()
-                surf_points = np.array(prim_children[0].GetAttribute("tet_surf_points").Get())
-                tet_surf_indices = prim_children[0].GetAttribute("tet_surf_indices").Get()
+            if tet_indices is None:
+                # cannot use default config, since we dont know what type of mesh it is (tet or tri mesh?) #todo should we create different object classes? One for tet meshes, one for cloth etc.
+                raise Exception(f"No precomputed tet mesh data found for prim at {usd_mesh_path}")
+        else:
+            mesh_gen = MeshGenerator(config=self.cfg.mesh_cfg)
+            if type(self.cfg.mesh_cfg) is TetMeshCfg:
+                tet_points, tet_indices, surf_points, tet_surf_indices = mesh_gen.generate_tet_mesh_for_prim(
+                    self._usd_geom_mesh
+                )
 
-                if tet_indices is None:
-                    # cannot use default config, since we dont know what type of mesh it is (tet or tri mesh?) #todo should we create different object classes? One for tet meshes, one for cloth etc.
-                    raise Exception(f"No precomputed tet mesh data found for prim at {usd_mesh_path}")
-            else:
-                mesh_gen = MeshGenerator(config=self.cfg.mesh_cfg)
-                if type(self.cfg.mesh_cfg) is TetMeshCfg:
-                    tet_points, tet_indices, surf_points, tet_surf_indices = mesh_gen.generate_tet_mesh_for_prim(
-                        usd_mesh
-                    )
+        tf_world = omni.usd.get_world_transform_matrix(self._usd_geom_mesh)
 
-            tf_world = omni.usd.get_world_transform_matrix(usd_mesh)
-
-            translation = np.array(tf_world.ExtractTranslation())
-            rotation = math_utils.quat_from_matrix(torch.tensor(np.array(tf_world.ExtractRotationMatrix())))
-            scale = np.array(Gf.Vec3d(*(v.GetLength() for v in tf_world.ExtractRotationMatrix())))
-            scale_mat = np.array([
+        translation = np.array(tf_world.ExtractTranslation())
+        rotation = math_utils.quat_from_matrix(torch.tensor(np.array(tf_world.ExtractRotationMatrix())))
+        scale = np.array(Gf.Vec3d(*(v.GetLength() for v in tf_world.ExtractRotationMatrix())))
+        scale_mat = np.array(
+            [
                 [scale[0], 0, 0],
                 [0, scale[1], 0],
                 [0, 0, scale[2]],
-            ])
-            # scale the local mesh points
-            tet_points = tet_points @ scale_mat
+            ]
+        )
+        # scale the local mesh points
+        tet_points = tet_points @ scale_mat
 
-            # uipc wants 2D array
-            tet_indices = np.array(tet_indices).reshape(-1, 4)
-            tet_surf_indices = np.array(tet_surf_indices).reshape(-1, 3)
+        # uipc wants 2D array
+        tet_indices = np.array(tet_indices).reshape(-1, 4)
+        tet_surf_indices = np.array(tet_surf_indices).reshape(-1, 3)
 
-            # create uipc mesh with scaled (local) let points
-            uipc_mesh = tetmesh(tet_points.copy(), tet_indices.copy())
+        # create uipc mesh with scaled (local) let points
+        uipc_mesh = tetmesh(tet_points.copy(), tet_indices.copy())
 
-            # enable contact for uipc meshes etc.
-            label_surface(uipc_mesh)
-            label_triangle_orient(uipc_mesh)
-            # flip the triangles inward for better rendering
-            uipc_mesh = flip_inward_triangles(uipc_mesh)  # NOTE idk if this makes a difference for us
+        # enable contact for uipc meshes etc.
+        label_surface(uipc_mesh)
+        label_triangle_orient(uipc_mesh)
+        # flip the triangles inward for better rendering
+        uipc_mesh = flip_inward_triangles(uipc_mesh)  # NOTE idk if this makes a difference for us
 
-            # set transform of uipc ABD body
-            trans_view = view(uipc_mesh.transforms())
-            t = Transform.Identity()
-            t.translate(translation)
-            t.rotate(Quaternion(np.array(rotation)))
+        # set transform of uipc ABD body
+        trans_view = view(uipc_mesh.transforms())
+        t = Transform.Identity()
+        t.translate(translation)
+        t.rotate(Quaternion(np.array(rotation)))
 
-            trans_view[0] = np.array(tf_world).T.copy()
+        trans_view[0] = np.array(tf_world).T.copy()
 
-            # uipc_mesh = self.uipc_meshes[0] #todo code properly cloned envs (i.e. for instanced objects?)
+        # uipc_mesh = self.uipc_meshes[0] #todo code properly cloned envs (i.e. for instanced objects?)
 
-            # create and apply the constitution for the affine body
-            stiffness = self.cfg.constitution_cfg.m_kappa
-            constitution = AffineBodyConstitution()
-            constitution.apply_to(uipc_mesh, stiffness * MPa, mass_density=self.cfg.mass_density)
+        # create and apply the constitution for the affine body
+        stiffness = self.cfg.constitution_cfg.m_kappa
+        constitution = AffineBodyConstitution()
+        constitution.apply_to(uipc_mesh, stiffness * MPa, mass_density=self.cfg.mass_density)
 
-            if self.cfg.constitution_cfg.kinematic:
-                # make ABD body kinematic
-                is_fixed_attr = uipc_mesh.instances().find(builtin.is_fixed)
-                view(is_fixed_attr)[0] = 1
+        if self.cfg.constitution_cfg.kinematic:
+            # make ABD body kinematic
+            is_fixed_attr = uipc_mesh.instances().find(builtin.is_fixed)
+            view(is_fixed_attr)[0] = 1
 
-            # apply the default contact model to the base mesh
-            default_element = self._uipc_sim.scene.contact_tabular().default_element()
-            default_element.apply_to(uipc_mesh)
+        # apply the default contact model to the base mesh
+        default_element = self._uipc_sim.scene.contact_tabular().default_element()
+        default_element.apply_to(uipc_mesh)
 
-            return uipc_mesh
+        return uipc_mesh
 
     def _initialize_impl(self):
         # log information the uipc body
@@ -269,8 +260,7 @@ class UipcRigidObject(UipcObject):
 
         # note: we cast to tuple to avoid torch/numpy type mismatch.
         default_root_state = (
-            tuple(self.cfg.init_state.pos)
-            + tuple(self.cfg.init_state.rot)
+            tuple(self.cfg.init_state.pos) + tuple(self.cfg.init_state.rot)
             # + tuple(self.cfg.init_state.lin_vel)
             # + tuple(self.cfg.init_state.ang_vel)
         )

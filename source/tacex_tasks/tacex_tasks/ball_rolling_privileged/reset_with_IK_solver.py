@@ -20,9 +20,6 @@ from tacex_assets import TACEX_ASSETS_DATA_DIR
 
 from .base_env import BallRollingEnv, BallRollingEnvCfg
 
-#  from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
-# from isaaclab.envs.mdp.actions.actions_cfg import DifferentialInverseKinematicsActionCfg
-
 
 @configclass
 class BallRollingIKResetEnvCfg(BallRollingEnvCfg):
@@ -137,9 +134,9 @@ class BallRollingIKResetEnv(BallRollingEnv):
         # make sure that ee pose is in robot frame
         self.des_reset_ee_pos[env_ids, :] = obj_pos[:, :3].clone() - self.scene.env_origins[env_ids]
         # add offset between gelsight mini case frame (which is at the bottom of the sensor) to the gelpad
-        self.des_reset_ee_pos[
-            env_ids, 2
-        ] += 0.131  # cannot set it too close to the ball, otherwise "teleporting" robot there is gonna kick ball away
+        self.des_reset_ee_pos[env_ids, 2] += (
+            0.131  # cannot set it too close to the ball, otherwise "teleporting" robot there is gonna kick ball away
+        )
 
         # convert desired pos into transformation matrix
         goal_poses = pk.Transform3d(

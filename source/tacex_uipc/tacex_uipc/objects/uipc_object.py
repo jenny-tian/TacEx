@@ -8,6 +8,7 @@ import omni.usd
 import usdrt
 import usdrt.UsdGeom
 from isaacsim.core.prims import XFormPrim
+import isaacsim.core.utils.prims as prims_utils
 from pxr import UsdGeom, UsdPhysics
 
 try:
@@ -46,11 +47,17 @@ if TYPE_CHECKING:
 
 @configclass
 class UipcObjectCfg(AssetBaseCfg):
-    mesh_cfg: TetMeshCfg = None  # TODO make more General MeshCfg -> want to have Tet and Tri (for cloth) Meshes
+    mesh_cfg: TetMeshCfg | None = None  # TODO make more General MeshCfg -> want to have Tet and Tri (for cloth) Meshes
 
     mass_density: float = 1e3
 
-    constraint_cfg: UipcConstraintCfg = None
+    constraint_cfg: UipcConstraintCfg | None = None
+
+    usd_mesh_prim_name: str | None = None
+    """The name of the usd mesh that should be used for the Tet Mesh.
+
+    If `None`, then the first child of the prim at the given prim path is used.
+    """
 
 
 class UipcObject(AssetBase):
@@ -60,15 +67,17 @@ class UipcObject(AssetBase):
     """Configuration instance for the rigid object."""
 
     def __init__(self, cfg: UipcObjectCfg, uipc_sim: UipcSim):
-        """Initialize the uipc object.
+        """Initialize the uipc object from an USD asset.
 
+        The USD asset should consist of a parent XForm, followed by an USD mesh.
+        If the USD mesh name is not given, then the first mesh under the XForm is used.
         Args:
             cfg: A configuration instance.
         """
         super().__init__(cfg)
         self._uipc_sim: UipcSim = uipc_sim
 
-        prim_paths_expr = self.cfg.prim_path  # + "/mesh"
+        prim_paths_expr = self.cfg.prim_path
         print(f"Initializing uipc objects {prim_paths_expr}...")
         self._prim_view = XFormPrim(prim_paths_expr=prim_paths_expr, name=f"{prim_paths_expr}", usd=False)
         self._prim_view.initialize()
@@ -82,6 +91,18 @@ class UipcObject(AssetBase):
             for prim_child in self._prim_view.prims[0].GetChildren():  # todo properly deal with multiple meshs
                 if UsdPhysics.CollisionAPI(prim_child):
                     UsdPhysics.CollisionAPI(prim_child).GetCollisionEnabledAttr().Set(False)
+
+        # the isaac mesh that should be used for creating the Tet mesh
+        if self.cfg.usd_mesh_prim_name is not None:
+            self._usd_mesh_prim = prims_utils.get_prim_at_path(
+                str(self._prim_view.prims[0].GetPath()) + f"/{self.cfg.usd_mesh_prim_name}"
+            )
+        else:
+            # Take first child prim
+            self._usd_mesh_prim = self._prim_view.prims[0].GetChildren()[0]
+
+        print("USD mesh that is used for creating the UIPC Mesh: ", self._usd_mesh_prim.GetPath())
+        self._usd_geom_mesh = UsdGeom.Mesh(self._usd_mesh_prim)
 
         self.stage = usdrt.Usd.Stage.Attach(omni.usd.get_context().get_stage_id())
 
@@ -118,9 +139,7 @@ class UipcObject(AssetBase):
         surf_tri = surf.triangles().topo().view().reshape(-1).tolist()
 
         # TODO handle multi env
-        prim_children = self._prim_view.prims[0].GetChildren()
-        usd_mesh = UsdGeom.Mesh(prim_children[0])
-        fabric_prim = self._setup_render_mesh(usd_mesh, surf_points_world, surf_tri)
+        fabric_prim = self._setup_render_mesh(self._usd_geom_mesh, surf_points_world, surf_tri)
         self.fabric_prim = fabric_prim
 
         # add fabric meshes to uipc sim class for updating the render meshes

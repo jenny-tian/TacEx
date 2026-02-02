@@ -63,9 +63,6 @@ from tacex_assets import TACEX_ASSETS_DATA_DIR
 from tacex_assets.robots.franka.franka_gsmini_gripper_rigid import FRANKA_PANDA_ARM_GSMINI_GRIPPER_HIGH_PD_RIGID_CFG
 from tacex_assets.sensors.gelsight_mini.gsmini_cfg import GelSightMiniCfg
 
-#  from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
-# from isaaclab.envs.mdp.actions.actions_cfg import DifferentialInverseKinematicsActionCfg
-
 
 class CustomEnvWindow(BaseEnvWindow):
     """Window manager for the RL environment."""
@@ -124,9 +121,7 @@ class CustomEnvWindow(BaseEnvWindow):
                     max=0.04,
                     step=0.001,
                     tooltip="Specifies the position of the left finger of the franka.",
-                )[
-                    0
-                ]  # we just want to access the value model and not the floatslider
+                )[0]  # we just want to access the value model and not the floatslider
                 self.ui_window_elements["right_finger_pos"] = ui_utils.combo_floatfield_slider_builder(
                     label="Right Finger Position",
                     default_val=0.0,

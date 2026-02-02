@@ -53,9 +53,6 @@ from tacex_assets.sensors.gelsight_mini.gsmini_cfg import GelSightMiniCfg
 
 from tacex_tasks.utils import DirectLiveVisualizer
 
-#  from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
-# from isaaclab.envs.mdp.actions.actions_cfg import DifferentialInverseKinematicsActionCfg
-
 
 class CustomEnvWindow(BaseEnvWindow):
     """Window manager for the RL environment."""
@@ -546,12 +543,14 @@ class BallRollingTactileRGBEnv(DirectRLEnv):
             self.visualizers["Observations"].terms["ee_pos"] = torch.zeros((self.num_envs, 3))
             self.visualizers["Observations"].terms["ee_rot"] = torch.zeros((self.num_envs, 3))
             self.visualizers["Observations"].terms["goal"] = torch.zeros((self.num_envs, 2))
-            self.visualizers["Observations"].terms["sensor_output"] = torch.zeros((
-                self.num_envs,
-                self.cfg.observation_space["vision_obs"][0],
-                self.cfg.observation_space["vision_obs"][1],
-                self.cfg.observation_space["vision_obs"][2],
-            ))
+            self.visualizers["Observations"].terms["sensor_output"] = torch.zeros(
+                (
+                    self.num_envs,
+                    self.cfg.observation_space["vision_obs"][0],
+                    self.cfg.observation_space["vision_obs"][1],
+                    self.cfg.observation_space["vision_obs"][2],
+                )
+            )
 
             self.visualizers["Rewards"].terms["rewards"] = torch.zeros((self.num_envs, 11))
             self.visualizers["Rewards"].terms_names["rewards"] = [
@@ -1159,8 +1158,7 @@ def _compute_rewards(
     # orient_reward *= orient_reward_cfg["weight"]
 
     ee_goal_tracking_reward = (
-        1
-        - torch.tanh((ee_goal_distance) / ee_goal_tracking_cfg["std"])
+        1 - torch.tanh((ee_goal_distance) / ee_goal_tracking_cfg["std"])
         # - torch.tanh(ee_goal_distance / ee_goal_tracking_cfg["std_fine"])
     )
     ee_goal_tracking_reward *= ee_goal_tracking_cfg["weight"]

@@ -263,6 +263,17 @@ class UipcSim:
             fabric_mesh_points = fabric_prim.GetAttribute("points")
             fabric_mesh_points.Set(usdrt.Vt.Vec3fArray(trimesh_points))
 
+            # if self.cfg.debug_vis:
+            #     # draw surface mesh
+            #     triangles = self.sio.simplicial_surface(2).triangles()
+            #     for i in range(0, len(trimesh_points), 3):
+            #         test = trimesh_points
+            #         # draw.draw_points(tet_points, [(255, 255, 255, 1)] * len(tet_points), [40] * len(tet_points))
+            #         # draw.draw_lines(
+            #         #     [tet_points[0]] * 2, tet_points[1:], color * 2, [10] * 2
+            #         # )  # draw from point 0 to every other point (3 times 0, cause line from 0 to the other 3 points)
+            #         # draw.draw_lines([tet_points[1]] * 1, tet_points[2:], color * 1, [10] * 1)
+
         if self.cfg.debug_vis:
             draw.clear_points()
             points = np.array(all_trimesh_points)
