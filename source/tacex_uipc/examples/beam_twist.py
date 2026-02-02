@@ -218,7 +218,7 @@ class BeamTwistEnvCfg(DirectRLEnvCfg):
     uipc_sim = UipcSimCfg(
         # logger_level="Info"
         ground_height=0.0025,
-        contact=UipcSimCfg.Contact(d_hat=0.0001, default_friction_ratio=2.5, default_contact_resistance=5.0),
+        contact=UipcSimCfg.Contact(d_hat=0.0001, default_friction_ratio=2.5, default_contact_resistance=25.0),
         debug_vis=False,
     )
 
