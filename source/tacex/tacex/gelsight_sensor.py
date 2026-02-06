@@ -371,6 +371,10 @@ class GelSightSensor(SensorBase):
                 if "camera_rgb" in self.cfg.data_types:
                     attr = prim.CreateAttribute("debug_camera_rgb", Sdf.ValueTypeNames.Bool)
                     attr.Set(False)
+                if "height_map" in self.cfg.data_types:
+                    attr = prim.CreateAttribute("debug_height_map", Sdf.ValueTypeNames.Bool)
+                    attr.Set(False)
+
                 if "tactile_rgb" in self.cfg.data_types:
                     attr = prim.CreateAttribute("debug_tactile_rgb", Sdf.ValueTypeNames.Bool)
                     attr.Set(False)
@@ -389,6 +393,9 @@ class GelSightSensor(SensorBase):
                 if "camera_rgb" in self.cfg.data_types:
                     self._windows["camera_rgb"] = {}
                     self._img_providers["camera_rgb"] = {}
+                if "height_map" in self.cfg.data_types:
+                    self._windows["height_map"] = {}
+                    self._img_providers["height_map"] = {}
 
             if "tactile_rgb" in self.cfg.data_types:
                 self.optical_simulator._set_debug_vis_impl(debug_vis)
@@ -480,6 +487,44 @@ class GelSightSensor(SensorBase):
                     # remove window/img_provider from dictionary and destroy them
                     self._windows["camera_depth"].pop(str(i)).destroy()
                     self._img_providers["camera_depth"].pop(str(i)).destroy()
+
+            if "height_map" in self.cfg.data_types:
+                show_img = prim.GetAttribute("debug_height_map").Get()
+                if show_img:
+                    if str(i) not in self._windows["height_map"]:
+                        # create a window
+                        window = omni.ui.Window(
+                            self._prim_view.prim_paths[i] + "/height_map",
+                            height=self.cfg.sensor_camera_cfg.resolution[1],
+                            width=self.cfg.sensor_camera_cfg.resolution[0],
+                        )
+                        self._windows["height_map"][str(i)] = window
+                        # create image provider
+                        self._img_providers["height_map"][str(i)] = (
+                            omni.ui.ByteImageProvider()
+                        )  # default format omni.ui.TextureFormat.RGBA8_UNORM
+
+                    frame = self._data.output["height_map"][i].cpu().numpy()
+                    # convert to 3 channel image, to later turn it into 4 channel RGBA for Isaac Widget
+                    frame = np.dstack((frame, frame, frame)).astype(np.uint8)
+                    frame = cv2.normalize(frame, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_32F)
+
+                    # update image of the window
+                    frame = frame.astype(np.uint8)
+                    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2RGBA)  # cv.COLOR_BGR2RGBA) COLOR_RGB2RGBA
+                    height, width, channels = frame.shape
+                    with self._windows["height_map"][str(i)].frame:
+                        # self._img_providers[str(i)].set_data_array(frame, [width, height, channels]) #method signature: (numpy.ndarray[numpy.uint8], (width, height))
+                        self._img_providers["height_map"][str(i)].set_bytes_data(
+                            frame.flatten().data, [width, height]
+                        )  # method signature: (numpy.ndarray[numpy.uint8], (width, height))
+                        omni.ui.ImageWithProvider(
+                            self._img_providers["height_map"][str(i)]
+                        )  # , fill_policy=omni.ui.IwpFillPolicy.IWP_PRESERVE_ASPECT_FIT -> fill_policy by default: specifying the width and height of the item causes the image to be scaled to that size
+                elif str(i) in self._windows["height_map"]:
+                    # remove window/img_provider from dictionary and destroy them
+                    self._windows["height_map"].pop(str(i)).destroy()
+                    self._img_providers["height_map"].pop(str(i)).destroy()
 
         if "tactile_rgb" in self.cfg.data_types:
             self.optical_simulator._debug_vis_callback(event)
