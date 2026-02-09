@@ -239,9 +239,12 @@ class UipcDeformableObject(UipcObject):
             tet_surf_indices = self._usd_mesh_prim.GetAttribute("tet_surf_indices").Get()
 
             if tet_indices is None:
-                # cannot use default config, since we dont know what type of mesh it is (tet or tri mesh?) #todo should we create different object classes? One for tet meshes, one for cloth etc.
-                raise Exception(
-                    f"No precomputed tet mesh data found for prim at {self._usd_mesh_prim.GetPath()}. Make sure that mesh_cfg of the UipcObjectCfg is not None."
+                print(
+                    f"No precomputed tet mesh data found for prim at {self._usd_mesh_prim.GetPath()}... Creating a tet mesh with default config..."
+                )
+                mesh_gen = MeshGenerator(config=TetMeshCfg())
+                tet_points, tet_indices, surf_points, tet_surf_indices = mesh_gen.generate_tet_mesh_for_prim(
+                    self._usd_geom_mesh
                 )
         else:
             mesh_gen = MeshGenerator(config=self.cfg.mesh_cfg)

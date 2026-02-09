@@ -17,14 +17,16 @@ To enable the extension, follow these steps:
 1. **Add the search path of the repository** to the extension manager:
     - Navigate to the extension manager using `Window` -> `Extensions`.
     - Click on the **Hamburger Icon** (☰), then go to `Settings`.
+    - If not already present, in the `Extension Search Paths`, press the plus symbol and enter the path that leads to Isaac Lab's extension directory (`IsaacLab/source`)
     - In the `Extension Search Paths`, press the plus symbol and enter the absolute path to the`source` directory (e.g. `/home/user/Projects/TacEx/source`)
-    - If not already present, in the `Extension Search Paths`, enter the path that leads to Isaac Lab's extension directory directory (`IsaacLab/source`)
-    - Click on the **Hamburger Icon** (☰), then click `Refresh`.
+    - Click on the **Hamburger Icon** (☰) again and click `Refresh`.
 
 2. **Search and enable your extension**:
-    - Find the `tacex_uipc` extension under the `Third Party` category.
+    - Find the `tacex_uipc` extension under the `Third Party/User` category.
     - Toggle it to enable your extension.
     - Now you should see the `tacex_uipc` UI
+
+> If you cannot activate the tacex_uipc extension, restart Isaac Sim and try it again.
 
 ![alt text](../_static/tutorials/tacex_uipc_extension/tacex_uipc_ui_extension.png)
 

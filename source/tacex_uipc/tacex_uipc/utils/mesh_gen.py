@@ -22,19 +22,19 @@ class TetMeshCfg:
 
     """
 
-    stop_quality: int = 10
+    stop_quality: int = 8
     """
     Max AMIPS energy for stopping mesh optimization.
 
     Larger means less optimization and sooner stopping.
     """
 
-    max_its: int = 80
+    max_its: int = 100
     """
     Max number of mesh optimization iterations.
     """
 
-    epsilon_r: float = 1e-2
+    epsilon_r: float = 0.01
     """ Relative envelope epsilon_r (definies the envelope size).
 
     -> Absolute epsilon = epsilon_r * diagonal_of_bbox.
@@ -43,7 +43,7 @@ class TetMeshCfg:
     Large Envelope + large edge_length = tetmesh with low res
     """
 
-    edge_length_r: float = 1 / 2
+    edge_length_r: float = 0.05
     """ Relative target edge length l_r.
 
     -> Absolute l = l_r * diagonal_of_bbox.
@@ -51,9 +51,11 @@ class TetMeshCfg:
     Smaller edge length gives denser mesh.
     """
 
-    skip_simplify: bool = False
+    skip_simplify: bool = True
+    """Simplify the input mesh"""
 
     coarsen: bool = True
+    """ Coarsen the output mesh as much as possible"""
 
     log_level: int = 6
     """
@@ -85,11 +87,11 @@ class TriMeshCfg:
     """ Relative envelope epsilon_r (definies the envelope size).
     -> Absolute epsilon = epsilon_r * diagonal_of_bbox.
 
-    Smaller envelope pereserves features better.
+    Smaller envelope preserves features better.
     Larger Envelope + larger edge_length = tetmesh with low res
     """
 
-    edge_length_r: float = 1 / 2
+    edge_length_r: float = 0.5
     """ Relative target edge length l_r.
     -> Absolute l = l_r * diagonal_of_bbox.
 
@@ -271,7 +273,7 @@ class MeshGenerator:
         prim.GetPointsAttr().Set(surf_points)
         prim.GetFaceVertexCountsAttr().Set(
             [3] * triangles.shape[0]
-        )  # how many vertices each face has (3, cause triangles)
+        )  # how many vertices each face has (-> 3, cause triangles)
         prim.GetFaceVertexIndicesAttr().Set(triangles)
         prim.GetNormalsAttr().Set([])  # set to be empty, cause we use catmullClark and this gives us normals
         prim.SetNormalsInterpolation(UsdGeom.Tokens.faceVarying)
@@ -279,7 +281,7 @@ class MeshGenerator:
 
         # set color with per face interpolation
         colors = [
-            (random.uniform(0.0, 0.0), random.uniform(0.0, 0.75), random.uniform(0.0, 0.75))
+            (random.uniform(0.0, 0.0), random.uniform(0.0, 1.0), random.uniform(0.0, 1.0))
             for _ in range(triangles.shape[0] * 3)
         ]
         prim.CreateDisplayColorPrimvar(UsdGeom.Tokens.faceVarying).Set(colors)  # num_surf_tri * 3

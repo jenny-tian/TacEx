@@ -74,10 +74,19 @@ from tacex import GelSightSensor
 from tacex.simulation_approaches.fots import FOTSMarkerSimulatorCfg
 
 from tacex_assets import TACEX_ASSETS_DATA_DIR
-from tacex_assets.robots.franka.franka_gsmini_single_rigid import (
-    FRANKA_PANDA_ARM_SINGLE_GSMINI_HIGH_PD_RIGID_CFG,
+from tacex_assets.robots.franka.franka_gsmini_single_uipc import (
+    FRANKA_PANDA_ARM_SINGLE_GSMINI_HIGH_PD_UIPC_CFG,
 )
 from tacex_assets.sensors.gelsight_mini.gsmini_cfg import GelSightMiniCfg
+
+from tacex_uipc import (
+    UipcIsaacAttachmentsCfg,
+    UipcRLEnv,
+    UipcSimCfg,
+)
+
+from tacex_uipc.objects import UipcDeformableObject, UipcDeformableObjectCfg, UipcRigidObject, UipcRigidObjectCfg
+from tacex_uipc.utils import TetMeshCfg
 
 
 class CustomEnvWindow(BaseEnvWindow):
@@ -164,33 +173,27 @@ class CustomEnvWindow(BaseEnvWindow):
 
 
 def create_shapes_cfg() -> dict[str, RigidObjectCfg]:
-    """Creates RigidObjectCfg's for each usd file in the `{TACEX_ASSETS_DATA_DIR}/Props/tactile_test_shapes/` directory.
+    """Creates UipcRigidObjectCfg's for each usd file in the `{TACEX_ASSETS_DATA_DIR}/Props/tactile_test_shapes/` directory.
 
     The objects are spawned on a line along the y axis.
     Returns:
-        shapes: dict of names and corresponding RigidObjectCfg's
+        shapes: dict of names and corresponding UipcRigidObjectCfg's
     """
     shapes = {}
     usd_files_path = list(Path(f"{TACEX_ASSETS_DATA_DIR}/Props/tactile_test_shapes/").glob("*.usd"))
 
     for i, file_path in enumerate(usd_files_path):
+        # cannot use all of them -> OutOfMemory
+        if i == 5:
+            break
         file_name = file_path.stem
 
-        shapes[file_name] = RigidObjectCfg(
+        shapes[file_name] = UipcRigidObjectCfg(
             prim_path=f"/World/envs/env_.*/{file_name}",
-            init_state=RigidObjectCfg.InitialStateCfg(pos=[0.5, 0.025 * i, 0.02]),
+            init_state=UipcRigidObjectCfg.InitialStateCfg(pos=[0.5, 0.025 * i, 0.02]),
             spawn=sim_utils.UsdFileCfg(
                 usd_path=str(file_path),
                 # scale=(0.8, 0.8, 0.8),
-                rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                    solver_position_iteration_count=16,
-                    solver_velocity_iteration_count=1,
-                    max_angular_velocity=1000.0,
-                    max_linear_velocity=1000.0,
-                    max_depenetration_velocity=5.0,
-                    kinematic_enabled=True,
-                    disable_gravity=False,
-                ),
             ),
         )
 
@@ -206,7 +209,7 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
     viewer.eye = (0.55, -0.06, 0.025)
     viewer.lookat = (-4.8, 6.0, -0.2)
 
-    debug_vis = True
+    debug_vis = False
 
     ui_window_class_type = CustomEnvWindow
 
@@ -258,7 +261,7 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
         spawn=sim_utils.DomeLightCfg(color=(0.75, 0.75, 0.75), intensity=3000.0),
     )
 
-    robot: ArticulationCfg = FRANKA_PANDA_ARM_SINGLE_GSMINI_HIGH_PD_RIGID_CFG.replace(
+    robot: ArticulationCfg = FRANKA_PANDA_ARM_SINGLE_GSMINI_HIGH_PD_UIPC_CFG.replace(
         prim_path="/World/envs/env_.*/Robot",
     )
 
@@ -297,19 +300,19 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
             ),
             tactile_img_res=(320, 240),
             device="cuda",
-            frame_transformer_cfg=FrameTransformerCfg(
-                prim_path="/World/envs/env_.*/Robot/gelsight_mini_gelpad",  # "/World/envs/env_.*/Robot/gelsight_mini_case",
-                # you have to make sure that the asset frame center is correct, otherwise wrong shear/twist motions
-                source_frame_offset=OffsetCfg(
-                    # rot=(0.0, 0.92388, -0.38268, 0.0) # values for the robot used here
-                ),
-                target_frames=[
-                    FrameTransformerCfg.FrameCfg(prim_path=f"/World/envs/env_.*/{obj_name}")
-                    for obj_name in list(shapes.keys())
-                ],
-                debug_vis=True,
-                visualizer_cfg=marker_cfg,
-            ),
+            # frame_transformer_cfg=FrameTransformerCfg(
+            #     prim_path="/World/envs/env_.*/Robot/gelsight_mini_case",
+            #     target_frames=[
+            #         FrameTransformerCfg.FrameCfg(prim_path=f"/World/envs/env_.*/{obj_name}")
+            #         for obj_name in list(shapes.keys())
+            #     ],
+            #     source_frame_offset=OffsetCfg(
+            #         pos=(0, 0, 0.131)
+            #         # rot=(0.0, 0.92388, -0.38268, 0.0) # values for the robot used here
+            #     ),
+            #     debug_vis=True,
+            #     visualizer_cfg=marker_cfg,
+            # ),
         ),
         data_types=["marker_motion", "tactile_rgb"],
     )
@@ -330,8 +333,36 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
     observation_space = 0
     state_space = 0
 
+    # -- Confgis for UIPC simulation
+    uipc_sim = UipcSimCfg(
+        debug_vis=debug_vis,
+        # logger_level="Info"
+        ground_height=-0.00015,
+        contact=UipcSimCfg.Contact(d_hat=0.0001, default_friction_ratio=2.5, default_contact_resistance=25.0),
+    )
 
-class BallRollingEnv(DirectRLEnv):
+    # simulate the gelpad as uipc mesh
+    mesh_cfg = TetMeshCfg(
+        stop_quality=8,
+        max_its=100,
+        edge_length_r=1 / 15,
+        # epsilon_r=0.01
+    )
+    gelpad_cfg = UipcDeformableObjectCfg(
+        prim_path="/World/envs/env_.*/Robot/gelsight_mini_gelpad",
+        mesh_cfg=mesh_cfg,
+        constitution_cfg=UipcDeformableObjectCfg.StableNeoHookeanCfg(),
+        constraint_cfg=UipcIsaacAttachmentsCfg(
+            constraint_strength_ratio=100.0,
+            body_name="gelsight_mini_case",
+            debug_vis=debug_vis,
+            compute_attachment_data=True,
+            isaaclab_rigid_body_prim_path="/World/envs/env_.*/Robot",
+        ),
+    )
+
+
+class BallRollingEnv(UipcRLEnv):
     cfg: BallRollingEnvCfg
 
     def __init__(self, cfg: BallRollingEnvCfg, render_mode: str | None = None, **kwargs):
@@ -374,11 +405,6 @@ class BallRollingEnv(DirectRLEnv):
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
         self.scene.articulations["robot"] = self._robot
-
-        for obj_name, cfg in self.cfg.shapes.items():
-            self.scene.rigid_objects[obj_name] = RigidObject(cfg)
-
-        self.object = list(self.scene.rigid_objects.values())[0]
 
         # clone, filter, and replicate
         self.scene.clone_environments(copy_from_source=False)
@@ -437,6 +463,20 @@ class BallRollingEnv(DirectRLEnv):
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
+
+        # --- UIPC simulation setup ---
+        self._uipc_gelpad = UipcDeformableObject(
+            self.cfg.gelpad_cfg,
+            self.uipc_sim,
+        )
+        # set rigid object for attachment-constraint
+        self._uipc_gelpad.constraint.isaaclab_rigid_object = self.scene.articulations["robot"]
+
+        for obj_name, cfg in self.cfg.shapes.items():
+            self.scene.uipc_objects[obj_name] = UipcRigidObject(cfg, self.uipc_sim)
+
+        # set the current obj for the shape touch
+        self.object = list(self.scene.uipc_objects.values())[0]
 
     # MARK: pre-physics step calls
 
