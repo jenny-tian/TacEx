@@ -9,7 +9,7 @@ import usdrt
 import usdrt.UsdGeom
 from isaacsim.core.prims import XFormPrim
 import isaacsim.core.utils.prims as prims_utils
-from pxr import UsdGeom, UsdPhysics
+from pxr import UsdGeom, UsdPhysics, Sdf
 
 try:
     from isaacsim.util.debug_draw import _debug_draw
@@ -137,9 +137,10 @@ class UipcObject(AssetBase):
         surf = extract_surface(uipc_mesh)
         surf_points_world = surf.positions().view().reshape(-1, 3)
         surf_tri = surf.triangles().topo().view().reshape(-1).tolist()
+        surf_tri_orient = surf.triangles().find(builtin.orient).view()
 
         # TODO handle multi env
-        fabric_prim = self._setup_render_mesh(self._usd_geom_mesh, surf_points_world, surf_tri)
+        fabric_prim = self._setup_render_mesh(self._usd_geom_mesh, surf_points_world, surf_tri, surf_tri_orient)
         self.fabric_prim = fabric_prim
 
         # add fabric meshes to uipc sim class for updating the render meshes
@@ -201,11 +202,12 @@ class UipcObject(AssetBase):
         return obj_geo_slot
 
     def _setup_render_mesh(
-        self, usd_mesh: usdrt.UsdGeom.Mesh, surf_points: np.array, surf_tri: np.array
+        self, gprim: UsdGeom.Mesh, surf_points: np.array, surf_tri: np.array, surf_tri_orient: np.array
     ) -> usdrt.Usd.Prim:
-        usd_mesh_path = str(usd_mesh.GetPath())
+        usd_mesh_path = str(gprim.GetPath())
+
         # update the isaac surface mesh with the new topology
-        MeshGenerator.update_usd_mesh(prim=usd_mesh, surf_points=surf_points, triangles=surf_tri)
+        MeshGenerator.update_usd_mesh(gprim=gprim, surf_points=surf_points, triangles=surf_tri)
 
         # setup mesh updates via Fabric
         fabric_prim = self.stage.GetPrimAtPath(usdrt.Sdf.Path(usd_mesh_path))
@@ -225,9 +227,16 @@ class UipcObject(AssetBase):
         hier.set_world_xform(usdrt.Sdf.Path(usd_mesh_path), usdrt.Gf.Matrix4d(1))
         hier.update_world_xforms()
 
-        # update fabric mesh with points defined in world frame from uipc
-        fabric_mesh_points_attr = fabric_prim.GetAttribute("points")
-        fabric_mesh_points_attr.Set(usdrt.Vt.Vec3fArray(surf_points))
+        # # update fabric mesh with points defined in world frame from uipc
+        # fabric_mesh_points_attr = fabric_prim.GetAttribute("points")
+        # fabric_mesh_points_attr.Set(usdrt.Vt.Vec3fArray(surf_points))
+
+        if self.cfg.debug_vis:
+            mat_path = "/World/Materials/TriangleOutlineMat"
+            MeshGenerator.create_surf_tri_vis_material(mat_path)
+            # bind material with fabric
+            rel = fabric_prim.GetRelationship(usdrt.UsdShade.Tokens.materialBinding)
+            rel.SetTargets([mat_path])
 
         return fabric_prim
 
@@ -239,3 +248,27 @@ class UipcObject(AssetBase):
         """Invalidates the scene elements."""
         # call parent
         super()._invalidate_initialize_callback(event)
+
+    def set_strain_vis_from_positions(self, usd_mesh: usdrt.UsdGeom.Mesh, normalize=True):
+        primvar_name = "strain"
+
+        points = usd_mesh.GetPointsAttr().Get()  # sequence of Gf.Vec3f
+        # use radial distance from origin
+        vals = [float(p.GetLength()) for p in points]
+        if normalize:
+            mn, mx = min(vals), max(vals)
+            if mx > mn:
+                vals = [(v - mn) / (mx - mn) for v in vals]
+            else:
+                vals = [0.0] * len(vals)
+        pv = usd_mesh.CreatePrimvar(primvar_name, Sdf.ValueTypeNames.Float, UsdGeom.Tokens.vertex)
+        pv.Set(vals)
+        print(
+            f"Set '{primvar_name}' from positions ({'normalized' if normalize else 'raw'}) on {str(usd_mesh.GetPath())}"
+        )
+
+    # def set_strain_vis_list(values):
+    #     if len(values) != num_verts:
+    #         raise ValueError(f"values length {len(values)} != vertex count {num_verts}")
+    #     pv = mesh.CreatePrimvar(primvar_name, Sdf.ValueTypeNames.Float, UsdGeom.Tokens.vertex)
+    #     pv.Set([float(v) for v in values])

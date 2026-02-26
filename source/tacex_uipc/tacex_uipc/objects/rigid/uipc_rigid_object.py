@@ -146,15 +146,14 @@ class UipcRigidObject(UipcObject):
             # Load precomputed mesh data from USD prim.
             tet_points = np.array(self._usd_mesh_prim.GetAttribute("tet_points").Get())
             tet_indices = self._usd_mesh_prim.GetAttribute("tet_indices").Get()
-            surf_points = np.array(self._usd_mesh_prim.GetAttribute("tet_surf_points").Get())
-            tet_surf_indices = self._usd_mesh_prim.GetAttribute("tet_surf_indices").Get()
+            surf_indices = self._usd_mesh_prim.GetAttribute("tet_surf_indices").Get()
 
             if tet_indices is None:
                 print(
                     f"No precomputed tet mesh data found for prim at {self._usd_mesh_prim.GetPath()}... Creating a tet mesh with default config..."
                 )
                 mesh_gen = MeshGenerator(config=TetMeshCfg())
-                tet_points, tet_indices, surf_points, tet_surf_indices = mesh_gen.generate_tet_mesh_for_prim(
+                tet_points, tet_indices, surf_points, surf_indices = mesh_gen.generate_tet_mesh_for_prim(
                     self._usd_geom_mesh
                 )
             else:
@@ -162,7 +161,7 @@ class UipcRigidObject(UipcObject):
         else:
             mesh_gen = MeshGenerator(config=self.cfg.mesh_cfg)
             if type(self.cfg.mesh_cfg) is TetMeshCfg:
-                tet_points, tet_indices, surf_points, tet_surf_indices = mesh_gen.generate_tet_mesh_for_prim(
+                tet_points, tet_indices, surf_points, surf_indices = mesh_gen.generate_tet_mesh_for_prim(
                     self._usd_geom_mesh
                 )
 
@@ -183,7 +182,7 @@ class UipcRigidObject(UipcObject):
 
         # uipc wants 2D array
         tet_indices = np.array(tet_indices).reshape(-1, 4)
-        tet_surf_indices = np.array(tet_surf_indices).reshape(-1, 3)
+        surf_indices = np.array(surf_indices).reshape(-1, 3)
 
         # create uipc mesh with scaled (local) let points
         uipc_mesh = tetmesh(tet_points.copy(), tet_indices.copy())

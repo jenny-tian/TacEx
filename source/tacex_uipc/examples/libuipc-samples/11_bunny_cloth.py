@@ -26,7 +26,13 @@ import pathlib
 import omni.usd
 from pxr import UsdGeom
 from uipc import Transform, Vector3, builtin, view
-from uipc.constitution import AffineBodyConstitution, DiscreteShellBending, ElasticModuli, NeoHookeanShell
+from uipc.constitution import (
+    AffineBodyConstitution,
+    DiscreteShellBending,
+    ElasticModuli,
+    NeoHookeanShell,
+    StrainLimitingBaraffWitkinShell,
+)
 from uipc.geometry import SimplicialComplexIO, flip_inward_triangles, label_surface, label_triangle_orient
 from uipc.unit import MPa, kPa
 
@@ -70,11 +76,12 @@ def setup_libuipc_scene(scene):
     io = SimplicialComplexIO(t)
     cloth_mesh = io.read(f"{trimesh_path}/grid20x20.obj")
     label_surface(cloth_mesh)
-    nks = NeoHookeanShell()
+    # nks = NeoHookeanShell()
+    slbws = StrainLimitingBaraffWitkinShell()
     dsb = DiscreteShellBending()
     moduli = ElasticModuli.youngs_poisson(10 * kPa, 0.499)
-    nks.apply_to(cloth_mesh, moduli=moduli, mass_density=200, thickness=0.001)
-    dsb.apply_to(cloth_mesh, E=10.0)
+    slbws.apply_to(cloth_mesh, moduli=moduli, mass_density=200, thickness=0.001)
+    dsb.apply_to(cloth_mesh, bending_stiffness=0.006)
     view(cloth_mesh.positions())[:] += 1.0
     cloth.geometries().create(cloth_mesh)
 
@@ -112,6 +119,7 @@ def main():
         ground_height=-1.0,
         # logger_level="Info",
         contact=UipcSimCfg.Contact(default_friction_ratio=0.5, default_contact_resistance=1.0, d_hat=0.01),
+        debug_vis=True,
     )
     uipc_sim = UipcSim(uipc_cfg)
 

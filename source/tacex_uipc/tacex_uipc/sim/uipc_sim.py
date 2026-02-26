@@ -354,7 +354,7 @@ class UipcSim:
                     surf_tri = surf.triangles().topo().view().reshape(-1).tolist()
                     surf_points_world = surf.positions().view().reshape(-1, 3)
 
-                    MeshGenerator.update_usd_mesh(prim=prim, surf_points=surf_points_world, triangles=surf_tri)
+                    MeshGenerator.update_usd_mesh(gprim=prim, surf_points=surf_points_world, triangles=surf_tri)
 
                     # setup mesh updates via Fabric
                     fabric_stage = usdrt.Usd.Stage.Attach(omni.usd.get_context().get_stage_id())
@@ -371,9 +371,12 @@ class UipcSim:
                     hier.set_world_xform(usdrt.Sdf.Path(prim_path), usdrt.Gf.Matrix4d(1))
                     hier.update_world_xforms()
 
-                    # update fabric mesh with world coor. points
-                    fabric_mesh_points_attr = fabric_prim.GetAttribute("points")
-                    fabric_mesh_points_attr.Set(usdrt.Vt.Vec3fArray(surf_points_world))
+                    if self.cfg.debug_vis:
+                        mat_path = "/World/Materials/TriangleOutlineMat"
+                        MeshGenerator.create_surf_tri_vis_material(mat_path)
+                        # bind material with fabric
+                        rel = fabric_prim.GetRelationship(usdrt.UsdShade.Tokens.materialBinding)
+                        rel.SetTargets([mat_path])
 
                     # add fabric meshes to uipc sim class for updating the render meshes
                     self._fabric_meshes.append(fabric_prim)

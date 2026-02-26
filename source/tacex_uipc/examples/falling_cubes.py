@@ -21,7 +21,7 @@ args_cli = parser.parse_args()
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
-# simulation_app.set_setting("/app/useFabricSceneDelegate", True)
+simulation_app.set_setting("/app/useFabricSceneDelegate", True)
 # simulation_app.set_setting("/app/usdrt/scene_delegate/enableProxyCubes", False)
 # simulation_app.set_setting("/app/usdrt/scene_delegate/geometryStreaming/enabled", False)
 # simulation_app.set_setting("/omnihydra/parallelHydraSprimSync", False)
@@ -116,32 +116,32 @@ def main():
 
     # spawn uipc cube
     tet_cube_asset_path = pathlib.Path(__file__).parent.resolve() / "assets" / "cube.usd"
-    soft_cfg = UipcDeformableObjectCfg(
-        prim_path="/World/Objects/Cube0",
-        init_state=AssetBaseCfg.InitialStateCfg(pos=[0, 0, 2.25]),  # rot=(0.72,-0.3,0.42,-0.45)
-        spawn=sim_utils.UsdFileCfg(
-            usd_path=str(tet_cube_asset_path),
-            # scale=(0.1, 0.1, 0.1)
-        ),
-        # mesh_cfg=mesh_cfg,
-        constitution_cfg=UipcDeformableObjectCfg.StableNeoHookeanCfg(),  # UipcRigidObjectCfg.AffineBodyConstitutionCfg(),  #
-    )
-    soft_obj = UipcDeformableObject(soft_cfg, uipc_sim)
-
-    # spawn a ball instead
-    # tet_ball_asset_path = pathlib.Path(__file__).parent.resolve() / "assets" / "ball.usd"
     # soft_cfg = UipcDeformableObjectCfg(
-    #     prim_path="/World/Objects/ball",
-    #     init_state=AssetBaseCfg.InitialStateCfg(pos=[0, 0, 1.0]),  # rot=(0.72,-0.3,0.42,-0.45)
-    #     spawn=sim_utils.UsdFileCfg(usd_path=str(tet_ball_asset_path), scale=(1.0, 1.0, 1.0)),
+    #     prim_path="/World/Objects/Cube0",
+    #     init_state=AssetBaseCfg.InitialStateCfg(pos=[0, 0, 2.25]),  # rot=(0.72,-0.3,0.42,-0.45)
+    #     spawn=sim_utils.UsdFileCfg(
+    #         usd_path=str(tet_cube_asset_path),
+    #         # scale=(0.1, 0.1, 0.1)
+    #     ),
     #     mesh_cfg=mesh_cfg,
+    #     # mesh_cfg=None,
     #     constitution_cfg=UipcDeformableObjectCfg.StableNeoHookeanCfg(),
+    #     debug_vis=True,
     # )
     # soft_obj = UipcDeformableObject(soft_cfg, uipc_sim)
 
-    tet_cube_asset_path = pathlib.Path(__file__).parent.resolve() / "assets" / "cube.usd"
+    # spawn a ball instead
+    tet_ball_asset_path = pathlib.Path(__file__).parent.resolve() / "assets" / "ball.usd"
+    soft_cfg = UipcDeformableObjectCfg(
+        prim_path="/World/Objects/ball",
+        init_state=AssetBaseCfg.InitialStateCfg(pos=[0, 0, 1.0]),  # rot=(0.72,-0.3,0.42,-0.45)
+        spawn=sim_utils.UsdFileCfg(usd_path=str(tet_ball_asset_path), scale=(1.0, 1.0, 1.0)),
+        mesh_cfg=mesh_cfg,
+        constitution_cfg=UipcDeformableObjectCfg.StableNeoHookeanCfg(),
+    )
+    soft_obj = UipcDeformableObject(soft_cfg, uipc_sim)
 
-    num_cubes = 5
+    num_cubes = 3
     cubes = []
     for i in range(num_cubes):
         # might lead to intersections due to random pos
@@ -169,6 +169,8 @@ def main():
             init_state=AssetBaseCfg.InitialStateCfg(pos=pos, rot=rot),  # rot=(0.72,-0.3,0.42,-0.45)
             spawn=sim_utils.UsdFileCfg(usd_path=str(tet_cube_asset_path), scale=(0.15, 0.15, 0.15)),
             constitution_cfg=constitution_cfg,
+            mesh_cfg=None,
+            debug_vis=True,
         )
         cubeX = uipc_obj_class(cube_cfg, uipc_sim)
         cubes.append(cubeX)
@@ -179,7 +181,8 @@ def main():
         prim_path="/World/Objects/CubeTop",
         init_state=AssetBaseCfg.InitialStateCfg(pos=[0, 0, 3.65 + 0.3 * num_cubes], rot=rot),
         spawn=sim_utils.UsdFileCfg(usd_path=str(tet_cube_asset_path), scale=(1.0, 1.0, 1.0)),
-        # mesh_cfg=mesh_cfg,
+        mesh_cfg=mesh_cfg,
+        debug_vis=True,
         constitution_cfg=UipcRigidObjectCfg.AffineBodyConstitutionCfg(),
     )
     rigid_cube = UipcRigidObject(rigid_cube_cfg, uipc_sim)

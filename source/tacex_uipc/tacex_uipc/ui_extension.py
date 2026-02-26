@@ -17,6 +17,7 @@ import omni.ui as ui
 
 from tacex_uipc.objects.constraints import UipcIsaacAttachments
 from tacex_uipc.utils import MeshGenerator, TetMeshCfg
+from tacex_uipc.utils.create_surf_triangle_vis_material import assign_material_to_mesh_with_usd
 
 from omni.physx.scripts import deformableUtils
 
@@ -142,7 +143,7 @@ class TacexIPCExtension(omni.ext.IExt):
                 self.coarsen = cb_builder(
                     type="checkbox",
                     label="coarsen",
-                    default_val=False,
+                    default_val=True,
                     tooltip="If the output mesh should be coarsend as much as possible.",
                     on_clicked_fn=None,
                 )
@@ -171,7 +172,7 @@ class TacexIPCExtension(omni.ext.IExt):
 
         stage = omni.usd.get_context().get_stage()
         geom_mesh = UsdGeom.Mesh.Get(stage, path)
-        tet_points, tet_indices, surf_points, tet_surf_indices = mesh_gen.generate_tet_mesh_for_prim(geom_mesh)
+        tet_points, tet_indices, surf_points, surf_indices = mesh_gen.generate_tet_mesh_for_prim(geom_mesh)
 
         tf_world = np.array(omni.usd.get_world_transform_matrix(geom_mesh))
         world_tet_points = tf_world.T @ np.vstack((tet_points.T, np.ones(tet_points.shape[0])))
@@ -183,19 +184,25 @@ class TacexIPCExtension(omni.ext.IExt):
         draw.clear_points()
         draw.clear_lines()
         _draw_tets(world_tet_points, tet_indices)
-        _draw_surface_trimesh(world_tet_surf_points, tet_surf_indices)
+        _draw_surface_trimesh(world_tet_surf_points, surf_indices)
+
+        # create our material that visualizes the tet mesh resolution
+        mat_path = "/Materials/TriangleOutlineMat"
+        mat = MeshGenerator.create_surf_tri_vis_material(mat_path)
+        # bind material with normal usd api
+        assign_material_to_mesh_with_usd(geom_mesh, mat)
 
         # Dont save the transformed points ->  we want to save the local points. Transformations happens during scene creation
+        # Otherwise we lose details of the original mesh and when we compute a new mesh out of the triangle mesh we lose even more details
         _create_tet_data_attributes(
             path,
             tet_points=tet_points,
             tet_indices=tet_indices,
-            tet_surf_points=surf_points,
-            tet_surf_indices=tet_surf_indices,
+            tet_surf_indices=surf_indices,
         )
         return (
             f"Amount of tet points {len(tet_points)},\nAmount of tetrahedra: {int(len(tet_indices) / 4)},\nAmount of"
-            f" surface points: {int(len(tet_surf_indices) / 3)}"
+            f" surface points: {int(len(surf_indices) / 3)}"
         )
 
 
@@ -261,7 +268,7 @@ def _draw_surface_trimesh(all_vertices, tet_surf_indices):
         draw.draw_points(tri_points, [(255, 255, 255, 1)] * len(tri_points), [point_size] * len(tri_points))
 
 
-def _create_tet_data_attributes(path, tet_points, tet_indices, tet_surf_points, tet_surf_indices):
+def _create_tet_data_attributes(path, tet_points, tet_indices, tet_surf_indices):
     """
     Creates an attribute for a prim that holds a boolean.
     See: https://graphics.pixar.com/usd/release/api/class_usd_prim.html.
@@ -282,9 +289,6 @@ def _create_tet_data_attributes(path, tet_points, tet_indices, tet_surf_points, 
     attr_tet_indices.Set(tet_indices)
     attr_tet_indices.SetCustom(True)
 
-    attr_tet_surf_points = prim.CreateAttribute("tet_surf_points", pxr.Sdf.ValueTypeNames.Vector3fArray)
-    attr_tet_surf_points.Set(tet_surf_points)
-
     attr_tet_surf_indices = prim.CreateAttribute("tet_surf_indices", pxr.Sdf.ValueTypeNames.UIntArray)
     attr_tet_surf_indices.Set(tet_surf_indices)
 
@@ -292,7 +296,6 @@ def _create_tet_data_attributes(path, tet_points, tet_indices, tet_surf_points, 
     print("Created tet data: ")
     print(f"tet_points (num {tet_points.shape[0]})")
     print(f"tet_indices (num {len(tet_indices)})")
-    print(f"tet_surf_points (num {tet_surf_points.shape[0]})")
     print(f"tet_surf_indices (num {len(tet_surf_indices)})")
     print("*" * 40)
 
