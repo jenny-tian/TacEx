@@ -46,8 +46,6 @@ from tacex_uipc import UipcSim, UipcSimCfg
 from tacex_uipc.objects import UipcDeformableObject, UipcDeformableObjectCfg, UipcRigidObject, UipcRigidObjectCfg
 from tacex_uipc.utils import TetMeshCfg
 
-# import vtk
-
 
 def design_scene():
     """Designs the scene by spawning ground plane, light, objects and meshes from usd files."""
@@ -116,30 +114,33 @@ def main():
 
     # spawn uipc cube
     tet_cube_asset_path = pathlib.Path(__file__).parent.resolve() / "assets" / "cube.usd"
+    soft_cfg = UipcDeformableObjectCfg(
+        prim_path="/World/Objects/Cube0",
+        init_state=AssetBaseCfg.InitialStateCfg(pos=[0, 0, 2.25]),  # rot=(0.72,-0.3,0.42,-0.45)
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=str(tet_cube_asset_path),
+            # scale=(0.1, 0.1, 0.1)
+        ),
+        mesh_cfg=mesh_cfg,
+        # mesh_cfg=None,
+        constitution_cfg=UipcDeformableObjectCfg.StableNeoHookeanCfg(),
+        debug_vis=True,
+        debug_deformation_vis=True,
+    )
+    soft_obj = UipcDeformableObject(soft_cfg, uipc_sim)
+
+    # spawn a ball instead
+    # tet_ball_asset_path = pathlib.Path(__file__).parent.resolve() / "assets" / "ball.usd"
     # soft_cfg = UipcDeformableObjectCfg(
-    #     prim_path="/World/Objects/Cube0",
-    #     init_state=AssetBaseCfg.InitialStateCfg(pos=[0, 0, 2.25]),  # rot=(0.72,-0.3,0.42,-0.45)
-    #     spawn=sim_utils.UsdFileCfg(
-    #         usd_path=str(tet_cube_asset_path),
-    #         # scale=(0.1, 0.1, 0.1)
-    #     ),
+    #     prim_path="/World/Objects/ball",
+    #     init_state=AssetBaseCfg.InitialStateCfg(pos=[0, 0, 1.0]),  # rot=(0.72,-0.3,0.42,-0.45)
+    #     spawn=sim_utils.UsdFileCfg(usd_path=str(tet_ball_asset_path), scale=(1.0, 1.0, 1.0)),
     #     mesh_cfg=mesh_cfg,
-    #     # mesh_cfg=None,
     #     constitution_cfg=UipcDeformableObjectCfg.StableNeoHookeanCfg(),
+    #     debug_deformation_vis=True,
     #     debug_vis=True,
     # )
     # soft_obj = UipcDeformableObject(soft_cfg, uipc_sim)
-
-    # spawn a ball instead
-    tet_ball_asset_path = pathlib.Path(__file__).parent.resolve() / "assets" / "ball.usd"
-    soft_cfg = UipcDeformableObjectCfg(
-        prim_path="/World/Objects/ball",
-        init_state=AssetBaseCfg.InitialStateCfg(pos=[0, 0, 1.0]),  # rot=(0.72,-0.3,0.42,-0.45)
-        spawn=sim_utils.UsdFileCfg(usd_path=str(tet_ball_asset_path), scale=(1.0, 1.0, 1.0)),
-        mesh_cfg=mesh_cfg,
-        constitution_cfg=UipcDeformableObjectCfg.StableNeoHookeanCfg(),
-    )
-    soft_obj = UipcDeformableObject(soft_cfg, uipc_sim)
 
     num_cubes = 3
     cubes = []

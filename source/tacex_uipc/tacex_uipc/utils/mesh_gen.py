@@ -16,7 +16,7 @@ from isaaclab.utils import configclass
 
 from .create_surf_triangle_vis_material import (
     add_barycentric_primvar,
-    create_triangle_outline_material,
+    create_surf_tri_vis_material,
     assign_material_to_mesh_with_usd,
 )
 
@@ -343,8 +343,6 @@ class MeshGenerator:
         #     t = pv_st.CreateIndicesAttr()
         pv_st.Set(uv_coor)
 
-        add_barycentric_primvar(gprim)
-
     @staticmethod
     def update_usd_mesh_with_uipc_surface(prim: Usd.Prim):
         """Method to update render mesh topology based on the surface of the mesh in UIPC.
@@ -410,26 +408,3 @@ class MeshGenerator:
                 "primvars:st", Sdf.ValueTypeNames.TexCoord2fArray, UsdGeom.Tokens.faceVarying, uv_coor.size
             )
         pv.Set(uv_coor)
-
-    @staticmethod
-    def create_surf_tri_vis_material(mat_path="/World/Materials/TriangleOutlineMat"):
-        stage = omni.usd.get_context().get_stage()
-        mat = stage.GetPrimAtPath(mat_path)
-        if not mat.IsValid():
-            mat = create_triangle_outline_material(
-                mat_path=mat_path,
-                primvar_name="baryCoord",
-                outline_color=Gf.Vec3f(0.8, 0.8, 0.8),
-                outline_width=0.05,
-                base_color=Gf.Vec3f(0.0, 0.0, 0.8),
-            )
-        # assign_material_to_mesh(gprim, material=mat) -> this will not work properly
-        # for assigning material we need to use usdrt api -> https://docs.omniverse.nvidia.com/kit/docs/usdrt/latest/docs/usd_fabric_usdrt.html#id12
-        # Reason: with standard usd-material binding the transformation of the xform will be set to be equal to the initial USD xform transformation
-        # its then overwriting the usdrt xform transformation
-        return mat
-
-    @staticmethod
-    def create_deformation_material(prim: Usd.Prim):
-        primvar_name = "strain"
-        mat_path = Sdf.Path("/World/StrainRamp_Mat")

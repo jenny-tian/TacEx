@@ -22,7 +22,6 @@ except ImportError:
     draw = None
 
 import numpy as np
-
 import warp as wp
 from uipc import builtin
 from uipc.geometry import (
@@ -37,7 +36,13 @@ from isaaclab.utils import configclass
 wp.init()
 
 
-from tacex_uipc.utils import MeshGenerator, TetMeshCfg
+from tacex_uipc.utils import (
+    MeshGenerator,
+    TetMeshCfg,
+    add_barycentric_primvar,
+    create_surf_tri_vis_material,
+)
+
 
 from .constraints import UipcConstraint, UipcConstraintCfg, UipcIsaacAttachments, UipcIsaacAttachmentsCfg
 
@@ -199,6 +204,7 @@ class UipcObject(AssetBase):
         obj_geo_slot, obj_rest_geo_slot = obj.geometries().create(uipc_mesh)
         self.obj_id = obj_geo_slot.id()
         print(f"obj id of {self.cfg.prim_path}: {self.obj_id} ")
+
         return obj_geo_slot
 
     def _setup_render_mesh(
@@ -232,8 +238,18 @@ class UipcObject(AssetBase):
         # fabric_mesh_points_attr.Set(usdrt.Vt.Vec3fArray(surf_points))
 
         if self.cfg.debug_vis:
+            add_barycentric_primvar(gprim)
             mat_path = "/World/Materials/TriangleOutlineMat"
-            MeshGenerator.create_surf_tri_vis_material(mat_path)
+            stage = omni.usd.get_context().get_stage()
+            mat = stage.GetPrimAtPath(mat_path)
+            if not mat.IsValid():
+                mat = create_surf_tri_vis_material(
+                    mat_path=mat_path,
+                    outline_color=(0.8, 0.8, 0.8),  # white outlines
+                    outline_width=0.05,
+                    base_color=(0.0, 0.0, 0.8),  # blue mesh
+                )
+
             # bind material with fabric
             rel = fabric_prim.GetRelationship(usdrt.UsdShade.Tokens.materialBinding)
             rel.SetTargets([mat_path])
@@ -248,27 +264,3 @@ class UipcObject(AssetBase):
         """Invalidates the scene elements."""
         # call parent
         super()._invalidate_initialize_callback(event)
-
-    def set_strain_vis_from_positions(self, usd_mesh: usdrt.UsdGeom.Mesh, normalize=True):
-        primvar_name = "strain"
-
-        points = usd_mesh.GetPointsAttr().Get()  # sequence of Gf.Vec3f
-        # use radial distance from origin
-        vals = [float(p.GetLength()) for p in points]
-        if normalize:
-            mn, mx = min(vals), max(vals)
-            if mx > mn:
-                vals = [(v - mn) / (mx - mn) for v in vals]
-            else:
-                vals = [0.0] * len(vals)
-        pv = usd_mesh.CreatePrimvar(primvar_name, Sdf.ValueTypeNames.Float, UsdGeom.Tokens.vertex)
-        pv.Set(vals)
-        print(
-            f"Set '{primvar_name}' from positions ({'normalized' if normalize else 'raw'}) on {str(usd_mesh.GetPath())}"
-        )
-
-    # def set_strain_vis_list(values):
-    #     if len(values) != num_verts:
-    #         raise ValueError(f"values length {len(values)} != vertex count {num_verts}")
-    #     pv = mesh.CreatePrimvar(primvar_name, Sdf.ValueTypeNames.Float, UsdGeom.Tokens.vertex)
-    #     pv.Set([float(v) for v in values])

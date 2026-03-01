@@ -1,4 +1,5 @@
-# Tip: Node id names can differe depending on your application.
+# Tip: Node id names can differ depending on your application.
+#
 # To find out what node id's you have, use this:
 # from pxr import Sdr
 # reg = Sdr.Registry()
@@ -16,22 +17,22 @@ OUTLINE_WIDTH = 0.05
 BASE_COLOR = Gf.Vec3f(0.0, 0.0, 0.8)  # underlying fill color
 
 
-# Helper: create barycentric primvar on mesh (vertex interpolation)
-def add_barycentric_primvar(mesh_prim: UsdGeom.Mesh, primvar_name="baryCoord"):
-    """
+def add_barycentric_primvar(gprim: UsdGeom.Mesh, primvar_name="baryCoord"):
+    """Create barycentric primvar on mesh (vertex interpolation)
+
     Adds a vec3f primvar per-vertex storing barycentric coordinates for each triangle.
     Works for triangle-only topologies.
     """
     # Get indices and points
-    points_attr = mesh_prim.GetPointsAttr()
+    points_attr = gprim.GetPointsAttr()
     points = points_attr.Get()
     if points is None:
         print("Mesh has no points; cannot add barycentric primvar.")
         return None
 
     # Get face vertex counts and indices
-    fv_counts = mesh_prim.GetFaceVertexCountsAttr().Get()
-    fv_indices = mesh_prim.GetFaceVertexIndicesAttr().Get()
+    fv_counts = gprim.GetFaceVertexCountsAttr().Get()
+    fv_indices = gprim.GetFaceVertexIndicesAttr().Get()
     if fv_counts is None or fv_indices is None:
         print("Mesh missing face vertex counts/indices.")
         return None
@@ -39,17 +40,9 @@ def add_barycentric_primvar(mesh_prim: UsdGeom.Mesh, primvar_name="baryCoord"):
     # Ensure triangles only
     if any(c != 3 for c in fv_counts):
         print("Mesh contains non-triangle faces; barycentric generation expects triangles.")
-        # We can triangulate externally; here we bail.
         return None
 
-    # Build per-vertex barycentric list length = num points
-    # For meshes with shared vertices across triangles we must create per-vertex-per-face mapping (non-indexed)
-    # USD supports "primvar interpolation='fvar' or 'vertex'". To avoid complications, we'll create a primvar with
-    # interpolation='vertex' and set a value for each vertex index. However if a vertex is shared between triangles
-    # its barycentric value must be consistent; that would not show triangle outlines correctly. Therefore the robust method
-    # is to split vertices so each triangle has unique vertices. But modifying topology is intrusive.
-    # Alternative: store barycentrics as "faceVarying" primvar where value per face-vertex is supported.
-    primvarsAPI = UsdGeom.PrimvarsAPI(mesh_prim)
+    primvarsAPI = UsdGeom.PrimvarsAPI(gprim)
     primvar = primvarsAPI.CreatePrimvar(primvar_name, Sdf.ValueTypeNames.Float3Array, UsdGeom.Tokens.faceVarying)
     # Build face-varying array: one vec3 per face-vertex entry
     bary_vals = []
@@ -64,7 +57,7 @@ def add_barycentric_primvar(mesh_prim: UsdGeom.Mesh, primvar_name="baryCoord"):
         for _ in range(count):
             next(idx_iter, None)
     primvar.Set(bary_vals)
-    print(f"Added face-varying barycentric primvar '{primvar_name}' to {mesh_prim.GetPath()}")
+    print(f"Added face-varying barycentric primvar '{primvar_name}' to {gprim.GetPath()}")
 
     # print("MESH Debug")
     # mesh = mesh_prim.GetPrim()
@@ -75,7 +68,7 @@ def add_barycentric_primvar(mesh_prim: UsdGeom.Mesh, primvar_name="baryCoord"):
     return primvar
 
 
-def create_triangle_outline_material(
+def create_surf_tri_vis_material(
     mat_path="/Materials/TriangleOutlineMat",
     primvar_name="baryCoord",
     outline_color=OUTLINE_COLOR,
@@ -193,7 +186,7 @@ def create_triangle_outline_material(
     # pbr.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.6)
     # pbr.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
 
-    # PBR surface - preview surface won't work with standalone IsaacLab script
+    # PBR surface -> USD preview surface won't work with standalone IsaacLab script
     pbr = UsdShade.Shader.Define(stage, mat_path + "/SurfaceShader")
     pbr.CreateIdAttr("ND_open_pbr_surface_surfaceshader")
     # connect with color from Mix node
@@ -204,6 +197,30 @@ def create_triangle_outline_material(
     # Bind shading outputs
     material.CreateSurfaceOutput().ConnectToSource(pbr.ConnectableAPI(), "out")
     return material
+
+
+# Apply to a selected mesh or example mesh
+def assign_material_to_mesh_with_usd(gprim: UsdGeom.Mesh, material=None):
+    """Binds the given material to the mesh via the IsaacLab MaterialBind API.
+    If materials is None, then a surface triangle vis material will be created
+    and then attached to the mesh.
+
+    Note:
+    The USD/IsaacLab API will not work properly with usdrt.
+    To assign material we need to use usdrt api -> https://docs.omniverse.nvidia.com/kit/docs/usdrt/latest/docs/usd_fabric_usdrt.html#id12
+
+    Reason:
+    With standard usd-material binding the transformation of the xform will be set to be equal
+    to the initial USD xform transformation and then its overwriting the usdrt xform transformation
+    """
+    # Create material if not provided
+    if material is None:
+        material = create_surf_tri_vis_material()
+
+    # UsdShade.MaterialBindingAPI(gprim).Bind(material)
+    bind_visual_material(gprim.GetPath(), material.GetPath(), omni.usd.get_context().get_stage())
+
+    print(f"Assigned material to {gprim.GetPath()}")
 
 
 def create_cube(mesh_path="/World/CubeSurface"):
@@ -258,36 +275,13 @@ def create_cube(mesh_path="/World/CubeSurface"):
     # Build face topology (triangles)
     faceVertexCounts = [3] * len(boundary_faces)
     faceVertexIndices = []
-    # We'll create a primvar "edgeFactor" per-face-vertex that encodes distance-to-edge mask.
-    # For simplicity, we set equal barycentric coordinates for vertices, but to get crisp lines
-    # we encode a per-vertex attribute that the shader can use to detect edges: set:
-    #   for each triangle vertex, set value 1.0 at the vertex and 0.0 at the opposite edge midpoint — the shader will use barycentric interpolation.
-    # A compact approach: provide a "edgeAnchor" vec3 per face-vertex that is (1,0,0), (0,1,0), (0,0,1).
-    # The interpolated value near an edge will have a small component; shader computes min(component) to get distance to nearest edge.
-    edge_anchor_vals = []
-
     for tri in boundary_faces:
         for vi in tri:
             faceVertexIndices.append(int(vi))
-        # append anchors for the 3 face-vertices
-        edge_anchor_vals.extend([Gf.Vec3f(1.0, 0.0, 0.0), Gf.Vec3f(0.0, 1.0, 0.0), Gf.Vec3f(0.0, 0.0, 1.0)])
 
     mesh.GetFaceVertexCountsAttr().Set(faceVertexCounts)
     mesh.GetFaceVertexIndicesAttr().Set(faceVertexIndices)
     return mesh
-
-
-# Apply to a selected mesh or example mesh
-def assign_material_to_mesh_with_usd(gprim: UsdGeom.Mesh, material=None):
-    # Create material if not provided
-    if material is None:
-        material = create_triangle_outline_material()
-
-    # Create material binding
-    # UsdShade.MaterialBindingAPI(gprim).Bind(material)
-    bind_visual_material(gprim.GetPath(), material.GetPath(), omni.usd.get_context().get_stage())
-
-    print(f"Assigned material to {gprim.GetPath()}")
 
 
 if __name__ == "__main__":
@@ -308,7 +302,7 @@ if __name__ == "__main__":
     if primvar is None:
         print("Primvar creation failed.")
 
-    mat = create_triangle_outline_material(
+    mat = create_surf_tri_vis_material(
         mat_path="/World/Materials/TriangleOutlineMat",
         primvar_name="baryCoord",
         outline_color=OUTLINE_COLOR,

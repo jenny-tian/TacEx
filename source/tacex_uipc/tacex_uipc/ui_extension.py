@@ -17,7 +17,11 @@ import omni.ui as ui
 
 from tacex_uipc.objects.constraints import UipcIsaacAttachments
 from tacex_uipc.utils import MeshGenerator, TetMeshCfg
-from tacex_uipc.utils.create_surf_triangle_vis_material import assign_material_to_mesh_with_usd
+from tacex_uipc.utils.create_surf_triangle_vis_material import (
+    assign_material_to_mesh_with_usd,
+    create_surf_tri_vis_material,
+    add_barycentric_primvar,
+)
 
 from omni.physx.scripts import deformableUtils
 
@@ -188,7 +192,7 @@ class TacexIPCExtension(omni.ext.IExt):
 
         # create our material that visualizes the tet mesh resolution
         mat_path = "/Materials/TriangleOutlineMat"
-        mat = MeshGenerator.create_surf_tri_vis_material(mat_path)
+        mat = create_surf_tri_vis_material(mat_path)
         # bind material with normal usd api
         assign_material_to_mesh_with_usd(geom_mesh, mat)
 
@@ -315,6 +319,7 @@ def _update_surf_mesh(path):
 
     # update surface based on uipc_mesh surface
     MeshGenerator.update_usd_mesh_with_uipc_surface(prim)
+    add_barycentric_primvar(UsdGeom.Mesh.Get(stage, path))
     print("Update of surface Mesh via UIPC: ", path)
 
 

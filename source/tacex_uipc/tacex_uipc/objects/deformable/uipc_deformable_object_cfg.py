@@ -48,3 +48,5 @@ class UipcDeformableObjectCfg(UipcObjectCfg):
         """
 
     constitution_cfg: StableNeoHookeanCfg = StableNeoHookeanCfg()
+
+    debug_deformation_vis = False

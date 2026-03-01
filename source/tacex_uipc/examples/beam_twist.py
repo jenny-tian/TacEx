@@ -274,6 +274,8 @@ class BeamTwistEnvCfg(DirectRLEnvCfg):
             compute_attachment_data=True,
             isaaclab_rigid_body_prim_path="/World/envs/env_.*/ground_plate",
         ),
+        debug_vis=True,
+        debug_deformation_vis=True,
     )
 
 

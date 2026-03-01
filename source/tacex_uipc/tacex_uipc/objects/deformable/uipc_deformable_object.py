@@ -3,10 +3,13 @@ from __future__ import annotations
 import torch
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
+import weakref
 
 import omni.log
 import omni.usd
-from pxr import UsdGeom
+import usdrt
+import usdrt.UsdGeom
+from pxr import UsdGeom, Sdf
 
 try:
     from isaacsim.util.debug_draw import _debug_draw
@@ -23,11 +26,10 @@ import numpy as np
 import warp as wp
 from uipc import Vector3, builtin, view
 from uipc.constitution import ElasticModuli, StableNeoHookean
-from uipc.core import (
-    FiniteElementStateAccessorFeature,
-)
+from uipc.core import FiniteElementStateAccessorFeature, ContactSystemFeature
 from uipc.geometry import (
     SimplicialComplex,
+    Geometry,
     flip_inward_triangles,
     label_surface,
     label_triangle_orient,
@@ -38,7 +40,13 @@ from uipc.unit import MPa
 wp.init()
 
 
-from tacex_uipc.utils import MeshGenerator, TetMeshCfg
+from tacex_uipc.utils import MeshGenerator, TetMeshCfg, ContactInfo
+from tacex_uipc.utils.create_deformation_vis_material import (
+    create_deform_vis_material,
+    add_deform_primvar,
+    compute_residuals_and_magnitudes,
+)
+from tacex_assets import TACEX_ASSETS_DATA_DIR
 
 from ..uipc_object import UipcObject
 from .uipc_deformable_object_data import UipcDeformableObjectData
@@ -67,6 +75,17 @@ class UipcDeformableObject(UipcObject):
         """
         super().__init__(cfg, uipc_sim)
 
+        if self.cfg.debug_deformation_vis:
+            add_deform_primvar(self._usd_geom_mesh)
+            usd_mesh_path = str(self._usd_geom_mesh.GetPath())
+            fabric_prim = self.stage.GetPrimAtPath(usdrt.Sdf.Path(usd_mesh_path))
+            mat_path = "/World/Materials/DeformationVisMat"
+            create_deform_vis_material(mat_path, ramp_img_path=f"{TACEX_ASSETS_DATA_DIR}/Materials/color_ramp.png")
+
+            # bind material with fabric
+            rel = fabric_prim.GetRelationship(usdrt.UsdShade.Tokens.materialBinding)
+            rel.SetTargets([mat_path])
+
     """
     Properties
     """
@@ -88,31 +107,45 @@ class UipcDeformableObject(UipcObject):
 
         return fem_vertex_offset.view()
 
+    @property
+    def default_nodal_state_w(self) -> torch.Tensor:
+        """Default nodal state ``[nodal_pos, nodal_vel]`` in simulation world frame.
+
+        Shape is (num_instances, max_sim_vertices_per_body, 6).
+        """
+
+        return self._data.default_nodal_state_w
+
     """
     Operations.
     """
 
     def reset(self, env_ids: Sequence[int] | None = None):
         # TODO implement this
-        pass
+
         # # resolve all indices
         # if env_ids is None:
         #     env_ids = slice(None)
+
+        # take current pos for rest_points_pos for debug vis:
+        if self.cfg.debug_deformation_vis:
+            fabric_prim = self.stage.GetPrimAtPath(usdrt.Sdf.Path(str(self._usd_geom_mesh.GetPath())))
+            self.rest_points = np.array(fabric_prim.GetAttribute("points").Get())
+
+            # make sure that primvar interpolation is vertex - need to set it explicitly for the usdrt prim!
+            usdrt.UsdGeom.PrimvarsAPI(fabric_prim).GetPrimvar("deformValue").SetInterpolation(
+                usdrt.UsdGeom.Tokens.vertex
+            )
+
+            # # for exporting energy of normal contact
+            # self._csf: ContactSystemFeature = self._uipc_sim.world.features().find(ContactSystemFeature)
+            # self._normal_energy = Geometry()
 
     def write_data_to_sim(self):
         pass
 
     def update(self, dt: float):
         self._data.update(dt)
-
-    ##
-    # Defaults.
-    ##
-
-    default_nodal_state_w: torch.Tensor = None
-    """Default nodal state ``[nodal_pos, nodal_vel]`` in simulation world frame.
-    Shape is (num_instances, max_sim_vertices_per_body, 6).
-    """
 
     """
     Operations - Write to simulation.
@@ -262,7 +295,7 @@ class UipcDeformableObject(UipcObject):
 
         # uipc wants 2D array
         tet_indices = np.array(tet_indices).reshape(-1, 4)
-        surf_indices = np.array(surf_indices).reshape(-1, 3)
+        # surf_indices = np.array(surf_indices).reshape(-1, 3)
 
         # create uipc mesh
         uipc_mesh = tetmesh(tet_points_world.copy(), tet_indices.copy())
@@ -291,12 +324,6 @@ class UipcDeformableObject(UipcObject):
         return uipc_mesh
 
     def _initialize_impl(self):
-        # save initial world vertex positions
-        obj_geo_slot = self.geo_slot_list[0]
-        self.init_vertex_pos = torch.tensor(
-            np.moveaxis(obj_geo_slot.geometry().positions().view().copy(), 2, 0), device=self.device
-        )
-
         # log information the uipc body
         omni.log.info(f"UIPC Deformable Body initialized at: {self.cfg.prim_path}.")
         omni.log.info(f"Number of instances: {self.num_instances}")
@@ -313,6 +340,9 @@ class UipcDeformableObject(UipcObject):
 
         # update the uipc_object data
         self.update(0.0)
+
+        # reset internal buffers
+        self.reset()
 
         # add our uipc object to the list of all uipc objects of our uipc simulation
         self._uipc_sim.uipc_objects.append(self)
@@ -370,3 +400,82 @@ class UipcDeformableObject(UipcObject):
         # set all existing views to None to invalidate them
         self._physics_sim_view = None
         self._root_physx_view = None
+
+    # for debug vis of deformation
+    def _update_deformValue_with_position_displacement(self, normalize=True):
+        """Updates the "deformValue" primvar with the displacements of the nodal positions from the object center.
+
+        Object center is computed by taking the mean of all nodal positions.
+
+        -> Does not work, since our object moves and method here is not rotation invariant
+        Args:
+            normalize: Defaults to True.
+        """
+        # points_pos = self.geo_slot_list[0].geometry().positions().view()[self.surface_points_idx, :, 0]
+        # points_pos = points_pos - np.mean(points_pos, axis=0)
+
+        fabric_prim = self.stage.GetPrimAtPath(usdrt.Sdf.Path(str(self._usd_geom_mesh.GetPath())))
+        points_pos = np.array(fabric_prim.GetAttribute("points").Get())
+
+        # compute displacement delta
+        residuals, mags, rest_points_aligned = compute_residuals_and_magnitudes(self.rest_points, points_pos)
+
+        # # draw current points vs. aligned rest points for debugging purposes
+        # draw.clear_points()
+        # # draw current mesh points
+        # draw.draw_points(points_pos, [(0, 255, 0, 0.5)] * points_pos.shape[0], [50] * points_pos.shape[0])
+        # draw.draw_points([np.mean(points_pos, axis=0)], [(0, 255, 0, 1.0)], [50])
+        # # draw the transformed rest point pos
+        # draw.draw_points(
+        #     rest_points_aligned,
+        #     [(255, 0, 255, 0.5)] * rest_points_aligned.shape[0],
+        #     [30] * rest_points_aligned.shape[0],
+        # )
+        # draw.draw_points([np.mean(rest_points_aligned, axis=0)], [(255, 0, 255, 1.0, 0)], [30])
+
+        # scale magnitudes for better vis
+        mags *= 5
+
+        # normalize = True
+        # if normalize:  # TODO improve normalization and make max/min user configurable
+        #     # normalize to [0,1]
+        #     mags_min = np.min(mags)
+        #     mags_max = np.max(mags)
+        #     if mags_max == mags_min:
+        #         mags = np.zeros_like(mags)
+        #     else:
+        #         mags = (mags - mags_min) / (mags_max - mags_min)
+        # write into primvar
+        UsdGeom.PrimvarsAPI(self._usd_geom_mesh).GetPrimvar("deformValue").Set(mags)
+
+    def _update_deformValue_with_normal_energy(self, normalize=True):
+        # retrieve normal energy from simulation via ContactSystemFeature
+        self._csf.contact_energy("PP+N", self._normal_energy)  # point-point
+        energy = self._normal_energy.instances().find("energy").view()
+
+        if energy.shape[0] != 0:
+            if normalize:
+                # normalize to [0,1]
+                rng = np.max(energy) - np.min(energy)
+                if rng != 0:
+                    mags = (energy - np.min(energy)) / rng
+        else:
+            mags = np.zeros_like(np.array(self._usd_geom_mesh.GetPrim().GetAttribute("points").Get()))
+
+        # write into primvar
+        self._usd_geom_mesh.GetPrim().GetAttribute("primvars:deformValue").Set(mags)
+
+    def _set_debug_vis_impl(self, debug_vis: bool):
+        pass
+
+        # # if debug_vis is false, we need to create a subscriber for the post update event here
+        # if self._debug_vis_handle is None:
+        #     app_interface = omni.kit.app.get_app_interface()
+        #     self._debug_vis_handle = app_interface.get_post_update_event_stream().create_subscription_to_pop(
+        #         lambda event, obj=weakref.proxy(self): obj._debug_vis_callback(event)
+        #     )
+
+    def _debug_vis_callback(self, event):
+        if self.cfg.debug_deformation_vis and self._data.surf_nodal_pos_w is not None:
+            self._update_deformValue_with_position_displacement(normalize=False)
+            # self._update_deformValue_with_normal_energy(normalize=False)

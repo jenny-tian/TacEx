@@ -28,7 +28,7 @@ from uipc.geometry import extract_surface, ground
 from uipc.unit import GPa
 
 from tacex_uipc.objects import UipcObject
-from tacex_uipc.utils import MeshGenerator
+from tacex_uipc.utils import MeshGenerator, add_barycentric_primvar, create_surf_tri_vis_material
 
 
 @configclass
@@ -372,8 +372,19 @@ class UipcSim:
                     hier.update_world_xforms()
 
                     if self.cfg.debug_vis:
+                        add_barycentric_primvar(prim)
                         mat_path = "/World/Materials/TriangleOutlineMat"
-                        MeshGenerator.create_surf_tri_vis_material(mat_path)
+                        stage = omni.usd.get_context().get_stage()
+                        mat = stage.GetPrimAtPath(mat_path)
+                        if not mat.IsValid():
+                            mat = create_surf_tri_vis_material(
+                                mat_path=mat_path,
+                                primvar_name="baryCoord",
+                                outline_color=(0.8, 0.8, 0.8),
+                                outline_width=0.05,
+                                base_color=(0.0, 0.0, 0.8),
+                            )
+
                         # bind material with fabric
                         rel = fabric_prim.GetRelationship(usdrt.UsdShade.Tokens.materialBinding)
                         rel.SetTargets([mat_path])

@@ -184,7 +184,7 @@ class UipcRigidObject(UipcObject):
         tet_indices = np.array(tet_indices).reshape(-1, 4)
         surf_indices = np.array(surf_indices).reshape(-1, 3)
 
-        # create uipc mesh with scaled (local) let points
+        # create uipc mesh with scaled (local) tet points
         uipc_mesh = tetmesh(tet_points.copy(), tet_indices.copy())
 
         # enable contact for uipc meshes etc.
