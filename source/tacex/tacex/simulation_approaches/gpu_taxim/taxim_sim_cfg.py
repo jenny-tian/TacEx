@@ -27,7 +27,7 @@ class TaximSimulatorCfg(GelSightSimulatorCfg):
     If this is the case, then height map from camera is up/down sampled.
     """
 
-    gelpad_height: float = 0.005
+    gelpad_height: float = 0.0045
     """Used for computing indentation depth from height map"""
 
     # Asset Data

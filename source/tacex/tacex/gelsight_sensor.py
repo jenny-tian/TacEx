@@ -3,7 +3,6 @@ from __future__ import annotations
 import numpy as np
 import torch
 from collections.abc import Sequence
-from matplotlib import pyplot as plt
 from typing import TYPE_CHECKING
 
 import cv2
@@ -469,10 +468,7 @@ class GelSightSensor(SensorBase):
                     # frame = np.moveaxis(frame, 0, -1)
                     # convert to 3 channel image, to later turn it into 4 channel RGBA for Isaac Widget
                     frame = np.dstack((frame, frame, frame)).astype(np.uint8)
-                    frame = cv2.normalize(frame, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_32F)
-
                     # update image of the window
-                    frame = frame.astype(np.uint8)
                     frame = cv2.cvtColor(frame, cv2.COLOR_RGB2RGBA)  # cv.COLOR_BGR2RGBA) COLOR_RGB2RGBA
                     height, width, channels = frame.shape
                     with self._windows["camera_depth"][str(i)].frame:
@@ -505,12 +501,19 @@ class GelSightSensor(SensorBase):
                         )  # default format omni.ui.TextureFormat.RGBA8_UNORM
 
                     frame = self._data.output["height_map"][i].cpu().numpy()
+                    # map [-gelpad_height, 0] to [0,255] for proper depth image of height_map
+                    frame = (
+                        (
+                            np.clip(frame, -self.cfg.gelpad_dimensions.height * 1000, 0)
+                            + self.cfg.gelpad_dimensions.height * 1000
+                        )
+                        / (self.cfg.gelpad_dimensions.height * 1000)
+                        * 255
+                    ).astype(np.uint8)
                     # convert to 3 channel image, to later turn it into 4 channel RGBA for Isaac Widget
                     frame = np.dstack((frame, frame, frame)).astype(np.uint8)
-                    frame = cv2.normalize(frame, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_32F)
 
                     # update image of the window
-                    frame = frame.astype(np.uint8)
                     frame = cv2.cvtColor(frame, cv2.COLOR_RGB2RGBA)  # cv.COLOR_BGR2RGBA) COLOR_RGB2RGBA
                     height, width, channels = frame.shape
                     with self._windows["height_map"][str(i)].frame:
@@ -579,19 +582,19 @@ class GelSightSensor(SensorBase):
             # clip camera values that are = inf
             depth_output[torch.isinf(depth_output)] = self.cfg.sensor_camera_cfg.clipping_range[1]
 
+            # add a channel to the depth image for debug_vis
             self._data.output["camera_depth"] = depth_output.reshape(
-                (self._num_envs, 1, self.camera_resolution[1], self.camera_resolution[0])
-            )  # add a channel to the depth image for debug_vis
-            self._data.output["camera_depth"] *= 1000.0
-
-            # normalize the depth image
-            normalized = self._data.output["camera_depth"].view(self._data.output["camera_depth"].size(0), -1)
-            normalized -= self.cfg.sensor_camera_cfg.clipping_range[0] * 1000
-            normalized /= self.cfg.sensor_camera_cfg.clipping_range[1] * 1000
-            normalized = (normalized * 255).type(dtype=torch.uint8)
-            self._data.output["camera_depth"] = normalized.reshape(
                 (self._num_envs, self.camera_resolution[1], self.camera_resolution[0], 1)
-            )  # add a channel to the depth image for debug_vis
+            )
+
+            # normalize the depth image in clipping range
+            normalized = (self._data.output["camera_depth"] - self.cfg.sensor_camera_cfg.clipping_range[0]) / (
+                self.cfg.sensor_camera_cfg.clipping_range[1] - self.cfg.sensor_camera_cfg.clipping_range[0]
+            )
+            normalized = (normalized * 255).type(dtype=torch.uint8)
+            self._data.output["camera_depth"] = normalized
+
+            # self._data.output["camera_depth"] *= 1000.0
 
         return self._data.output["camera_depth"]
 
@@ -604,6 +607,15 @@ class GelSightSensor(SensorBase):
             self._data.output["height_map"][torch.isinf(self._data.output["height_map"])] = (
                 self.cfg.sensor_camera_cfg.clipping_range[1]
             )
+            # transform camera depth values to values in gelpad range, i.e. [0, gelpad_height]
+            self._data.output["height_map"] -= self.cfg.sensor_camera_cfg.clipping_range[0]
+            # height_map == 0 should mean that no indentation, min(height_map) == biggest indentation
+            self._data.output["height_map"] -= self.cfg.gelpad_dimensions.height
+
+            self._data.output["height_map"] = self._data.output["height_map"].clamp(
+                -self.cfg.gelpad_dimensions.height, 0
+            )
+
             # default unit is meter -> convert to mm for optical sim
             self._data.output["height_map"] *= 1000
 
@@ -613,21 +625,6 @@ class GelSightSensor(SensorBase):
             # e.g. use soft body deformation as height map? -> not implemented yet
             # or that we dont need a height map in general
             pass
-
-    # def _show_height_map_inside_gui(self, index):
-    #     plt.close()
-    #     height_map = self._data.output["height_map"][index].cpu().numpy()
-    #     np.save("height_map.npy", height_map)
-
-    #     X = np.arange(0, height_map.shape[0])
-    #     Y = np.arange(0, height_map.shape[1])
-    #     X, Y = np.meshgrid(X, Y)
-    #     Z = height_map
-    #     fig, ax = plt.subplots(subplot_kw={"projection": "3d"})
-    #     ax.plot_surface(X, Y, Z.T)
-    #     # plt.show()
-    #     print("saving height_map img")
-    #     plt.savefig(f"height_map{index}.png")
 
     def _create_tiled_camera(self) -> TiledCamera:
         # compute camera parameters for desired field-of-view

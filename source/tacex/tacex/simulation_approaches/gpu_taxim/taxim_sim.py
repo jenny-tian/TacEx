@@ -107,16 +107,18 @@ class TaximSimulator(GelSightSimulator):
         return self.tactile_rgb_img
 
     def compute_indentation_depth(self):
-        height_map = self.sensor._data.output["height_map"] / 1000  # convert height map from mm to meter
-        min_distance_obj = height_map.amin((1, 2))
-        # smallest distance between object and sensor case
-        dist_obj_sensor_case = min_distance_obj - self.cfg.gelpad_to_camera_min_distance
-        dist_obj_sensor_case = torch.where(dist_obj_sensor_case < 0, 0, dist_obj_sensor_case)
+        height_map = self.sensor._data.output["height_map"]
+        # for old height map
+        # min_distance_obj = height_map.amin((1, 2))
+        # # smallest distance between object and sensor case
+        # dist_obj_sensor_case = min_distance_obj - self.cfg.gelpad_to_camera_min_distance * 1000
+        # dist_obj_sensor_case = torch.where(dist_obj_sensor_case < 0, 0, dist_obj_sensor_case)
 
-        self._indentation_depth[:] = torch.where(
-            dist_obj_sensor_case <= self.cfg.gelpad_height, (self.cfg.gelpad_height - dist_obj_sensor_case) * 1000, 0
-        )
+        # self._indentation_depth[:] = torch.where(
+        #     dist_obj_sensor_case <= self.cfg.gelpad_height, (self.cfg.gelpad_height * 1000 - dist_obj_sensor_case), 0
+        # )
 
+        self._indentation_depth[:] = -height_map.amin((1, 2))
         return self._indentation_depth
 
     def reset(self):

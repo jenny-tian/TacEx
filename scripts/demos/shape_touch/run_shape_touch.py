@@ -287,7 +287,7 @@ class ShapeTouchEnvCfg(DirectRLEnvCfg):
         debug_vis=True,  # for being able to see sensor output in the gui
         # update FOTS cfg
         marker_motion_sim_cfg=FOTSMarkerSimulatorCfg(
-            lamb=[0.00125, 0.00021, 0.00038],
+            lamb=[0, 0.00021, 0.00038],
             # mm_to_pixel=10.0,
             pyramid_kernel_size=[51, 21, 11, 5],  # [11, 11, 11, 11, 11, 5],
             kernel_size=5,
@@ -314,7 +314,7 @@ class ShapeTouchEnvCfg(DirectRLEnvCfg):
                 visualizer_cfg=marker_cfg,
             ),
         ),
-        data_types=["marker_motion", "tactile_rgb"],
+        data_types=["marker_motion", "tactile_rgb", "height_map", "camera_depth"],
     )
     # change settings for optical sim
     gsmini.optical_sim_cfg = gsmini.optical_sim_cfg.replace(
