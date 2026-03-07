@@ -62,4 +62,5 @@ tests/
 # Docker history
 .isaac-lab-docker-history
 
-real_data/
+# 
+source/tacex_assets/tacex_assets/data/Sensors/GelSight_Mini/calibs/pix2pix/checkpoints/
