@@ -24,11 +24,17 @@ class GelSightSensorCfg(SensorBaseCfg):
     case_dimensions: Dimensions = Dimensions()
     gelpad_dimensions: Dimensions = Dimensions()
 
+    max_indentation_depth: float = 0.0
+    """The maximum indentation depth in [m].
+    
+    Used e.g. for normalizing height map w.r.t to possible indentation depth range.
+    """
+
     @configclass
     class SensorCameraCfg:
         """Configs for the Camera of the GelSight sensor."""
 
-        prim_path_appendix: str = "/Camera"
+        prim_name: str = "Camera"
         update_period: float = 0
         resolution: tuple[int, int] = (32, 24)
         data_types: list[str] = ["depth"]
@@ -84,10 +90,11 @@ class GelSightSensorCfg(SensorBaseCfg):
     marker_motion_sim_cfg: GelSightSimulatorCfg = None
     """Cfg class of the marker motion simulator you want to use."""
 
-    compute_indentation_depth_class: Literal["optical_sim", "marker_motion_sim"] = "optical_sim"
+    compute_indentation_depth_class: Literal["optical_sim", "marker_motion_sim", "default"] = "default"
     """Defines which approach is used for computing the indentation depth.
 
     You can use the method from your optical simulation (e.g. Taxim), or the one from your marker motion simulation (e.g. if its FEM based).
+    By default the minimum value of the height map is used as indentation depth.
     """
 
     device: str = "cuda"

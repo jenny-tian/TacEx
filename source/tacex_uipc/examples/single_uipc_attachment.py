@@ -55,7 +55,7 @@ from tacex_assets import TACEX_ASSETS_DATA_DIR
 from tacex_assets.robots.franka.franka_gsmini_single_uipc import (
     FRANKA_PANDA_ARM_SINGLE_GSMINI_HIGH_PD_UIPC_CFG,
 )
-from tacex_assets.sensors.gelsight_mini.gsmini_cfg import GelSightMiniCfg
+from tacex_assets.sensors.gelsight_mini import GELSIGHT_MINI_TAXIM_CFG
 
 from tacex_uipc import (
     UipcIsaacAttachments,
@@ -208,10 +208,10 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
         constraint_strength_ratio=100.0, body_name="gelsight_mini_case", debug_vis=True, compute_attachment_data=True
     )
 
-    gsmini = GelSightMiniCfg(
+    gsmini = GELSIGHT_MINI_TAXIM_CFG.replace(
         prim_path="/World/envs/env_.*/Robot/gelsight_mini_case",
-        sensor_camera_cfg=GelSightMiniCfg.SensorCameraCfg(
-            prim_path_appendix="/Camera",
+        sensor_camera_cfg=GELSIGHT_MINI_TAXIM_CFG.SensorCameraCfg(
+            prim_name="Camera",
             update_period=0,
             resolution=(32, 32),
             data_types=["depth"],
@@ -222,7 +222,7 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
         marker_motion_sim_cfg=None,
         data_types=["tactile_rgb"],  # marker_motion
     )
-    # settings for optical sim
+    # update settings for optical sim
     gsmini.optical_sim_cfg = gsmini.optical_sim_cfg.replace(
         with_shadow=False,
         device="cuda",

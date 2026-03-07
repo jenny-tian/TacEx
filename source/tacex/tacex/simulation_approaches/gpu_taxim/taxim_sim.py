@@ -26,8 +26,6 @@ class TaximSimulator(GelSightSimulator):
     cfg: TaximSimulatorCfg
 
     def __init__(self, sensor: GelSightSensor, cfg: TaximSimulatorCfg):
-        self.sensor = sensor
-
         super().__init__(sensor=sensor, cfg=cfg)
 
     def _initialize_impl(self):

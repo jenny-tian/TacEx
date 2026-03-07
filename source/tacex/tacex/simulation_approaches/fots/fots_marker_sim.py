@@ -32,8 +32,6 @@ class FOTSMarkerSimulator(GelSightSimulator):
     cfg: FOTSMarkerSimulatorCfg
 
     def __init__(self, sensor: GelSightSensor, cfg: FOTSMarkerSimulatorCfg):
-        self.sensor: GelSightSensor = sensor
-
         super().__init__(sensor=sensor, cfg=cfg)
 
         # use IsaacLab FrameTransformer for keeping track of relative position/rotation

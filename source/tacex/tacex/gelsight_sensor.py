@@ -78,8 +78,26 @@ class GelSightSensor(SensorBase):
                     sensor=self, cfg=self.cfg.marker_motion_sim_cfg
                 )
 
+        # set how the indentation depth should be computed
+        if (self.cfg.compute_indentation_depth_class) == "optical_sim" and (self.optical_simulator is not None):
+            self.compute_indentation_depth_func = self.optical_simulator.compute_indentation_depth
+        elif (self.cfg.compute_indentation_depth_class == "marker_motion_sim") and (
+            self.marker_motion_simulator is not None
+        ):
+            self.compute_indentation_depth_func = self.marker_motion_simulator.compute_indentation_depth
+        else:
+            # use default implementation
+            self.compute_indentation_depth_func = self.compute_indentation_depth
+
         self._set_debug_vis_flag = False
         self._debug_vis_is_initialized = False
+
+        # check if desired output is possible with given config:
+        if "tactile_rgb" in self._data.output and self.cfg.optical_sim_cfg is None:
+            raise RuntimeError("Output [tactile_rgb] not possible with given config: optical_sim_cfg = None]")
+
+        if "marker_motion" in self._data.output and self.cfg.marker_motion_sim_cfg is None:
+            raise RuntimeError("Output [marker_motion] not possible with given config: marker_motion = None")
 
     def __del__(self):
         """Unsubscribes from callbacks."""
@@ -194,6 +212,17 @@ class GelSightSensor(SensorBase):
         # Reset the frame count
         self._frame[env_ids] = 0
 
+    def compute_indentation_depth(self):
+        """Computes the indentation depth by takin the minimum value of the height map.
+
+        The height map format is as follow:
+        - value 0 is at the gelpad's highest point (= no indentation)
+        - value min(height_map) is the point closest to sensor camera, i.e. the point with the biggest indentation depth
+        """
+        height_map = self._data.output["height_map"]
+        self._indentation_depth[:] = -height_map.amin((1, 2))
+        return self._indentation_depth
+
     ####
     # Implementation of abstract methods of base sensor class
     ####
@@ -276,16 +305,6 @@ class GelSightSensor(SensorBase):
                 ),
                 device=self.cfg.device,
             )
-
-        # set how the indentation depth should be computed
-        if (self.cfg.compute_indentation_depth_class) == "optical_sim" and (self.optical_simulator is not None):
-            self.compute_indentation_depth_func = self.optical_simulator.compute_indentation_depth
-        elif (self.cfg.compute_indentation_depth_class == "marker_motion_sim") and (
-            self.marker_motion_simulator is not None
-        ):
-            self.compute_indentation_depth_func = self.marker_motion_simulator.compute_indentation_depth
-        else:
-            self.compute_indentation_depth_func = None
 
         # Create all env_ids buffer
         self._ALL_INDICES = torch.arange(self._num_envs, device=self._device, dtype=torch.long)
@@ -504,10 +523,10 @@ class GelSightSensor(SensorBase):
                     # map [-gelpad_height, 0] to [0,255] for proper depth image of height_map
                     frame = (
                         (
-                            np.clip(frame, -self.cfg.gelpad_dimensions.height * 1000, 0)
-                            + self.cfg.gelpad_dimensions.height * 1000
+                            np.clip(frame, -self.cfg.max_indentation_depth * 1000, 0)
+                            + self.cfg.max_indentation_depth * 1000
                         )
-                        / (self.cfg.gelpad_dimensions.height * 1000)
+                        / (self.cfg.max_indentation_depth * 1000)
                         * 255
                     ).astype(np.uint8)
                     # convert to 3 channel image, to later turn it into 4 channel RGBA for Isaac Widget
@@ -583,9 +602,7 @@ class GelSightSensor(SensorBase):
             depth_output[torch.isinf(depth_output)] = self.cfg.sensor_camera_cfg.clipping_range[1]
 
             # add a channel to the depth image for debug_vis
-            self._data.output["camera_depth"] = depth_output.reshape(
-                (self._num_envs, self.camera_resolution[1], self.camera_resolution[0], 1)
-            )
+            self._data.output["camera_depth"] = depth_output[:, :, :, None]
 
             # normalize the depth image in clipping range
             normalized = (self._data.output["camera_depth"] - self.cfg.sensor_camera_cfg.clipping_range[0]) / (
@@ -627,6 +644,10 @@ class GelSightSensor(SensorBase):
             pass
 
     def _create_tiled_camera(self) -> TiledCamera:
+        # delete existing camera prim
+        prim_path = self.cfg.prim_path + f"/{self.cfg.sensor_camera_cfg.prim_name}"
+        # sim_utils.delete_prim(prim_path)
+
         # compute camera parameters for desired field-of-view
         border_fraction = min(max(0, self.cfg.sensor_camera_cfg.border_fraction), 0.49)
 
@@ -640,7 +661,7 @@ class GelSightSensor(SensorBase):
             fov_height * self.cfg.sensor_camera_cfg.focal_length * 10 / self.cfg.sensor_camera_cfg.focus_distance
         )
         self.camera_cfg: TiledCameraCfg = TiledCameraCfg(
-            prim_path=self.cfg.prim_path + self.cfg.sensor_camera_cfg.prim_path_appendix,
+            prim_path=prim_path,
             update_period=self.cfg.sensor_camera_cfg.update_period,
             offset=TiledCameraCfg.OffsetCfg(
                 pos=self.cfg.sensor_camera_cfg.camera_pos_offset,
