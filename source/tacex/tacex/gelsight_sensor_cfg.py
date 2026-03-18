@@ -54,8 +54,10 @@ class GelSightSensorCfg(SensorBaseCfg):
         focal_length: float = 20
         """Focal length of the sensor camera (in [cm])."""
 
-        focus_distance: float = 0.025
-        """Distance from camera to focus plane (in [m])."""
+        focus_distance: float = 0.025 + 0.004
+        """Distance from camera to focus plane (in [m]). 
+        
+        Should be at highest point of the gelpad (e.g. for GsMini thats 2.5cm due to sensor case height + gelpad height 4mm)"""
 
         border_fraction: float = 0.15
         """Fraction of the image dimensions to crop from each border. Value clamped in [0.0, 0.49] 
@@ -63,10 +65,10 @@ class GelSightSensorCfg(SensorBaseCfg):
         Behavior is the same as in the GelSightSDK (https://github.com/gelsightinc/gsrobotics/blob/321d6a22da64529138ff10237335038fd8c5189f/utilities/image_processing.py#L108)
         """
 
-        fov_width = 0.00186  # 0.002525
+        fov_width = 0.0186  # 0.02525
         """Field of view width (in [m])."""
 
-        fov_height = 0.00143  # 0.002075
+        fov_height = 0.0143  # 0.02075
         """Field of view height (in [m])."""
 
     sensor_camera_cfg: SensorCameraCfg = SensorCameraCfg()

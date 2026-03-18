@@ -655,10 +655,10 @@ class GelSightSensor(SensorBase):
         fov_height = self.cfg.sensor_camera_cfg.fov_height * (1 - border_fraction)
 
         horizontal_aperture = (
-            fov_width * self.cfg.sensor_camera_cfg.focal_length * 10 / self.cfg.sensor_camera_cfg.focus_distance
+            fov_width * self.cfg.sensor_camera_cfg.focal_length / self.cfg.sensor_camera_cfg.focus_distance
         )
         vertical_aperture = (
-            fov_height * self.cfg.sensor_camera_cfg.focal_length * 10 / self.cfg.sensor_camera_cfg.focus_distance
+            fov_height * self.cfg.sensor_camera_cfg.focal_length / self.cfg.sensor_camera_cfg.focus_distance
         )
         self.camera_cfg: TiledCameraCfg = TiledCameraCfg(
             prim_path=prim_path,

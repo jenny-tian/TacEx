@@ -191,7 +191,7 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
         sensor_camera_cfg=GELSIGHT_MINI_TAXIM_FOTS_CFG.SensorCameraCfg(
             prim_name="Camera",
             update_period=0,
-            resolution=(32, 24),
+            resolution=(320, 240),
             data_types=["depth"],
             clipping_range=(0.024, 0.034),
         ),
