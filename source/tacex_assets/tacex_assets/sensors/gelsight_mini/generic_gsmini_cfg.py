@@ -22,7 +22,7 @@ class GeneralGelSightMiniCfg(GelSightSensorCfg):
     )
 
     gelpad_dimensions: GelSightSensorCfg.Dimensions = GelSightSensorCfg.Dimensions(
-        width=20.75 / 1000, length=25.25 / 1000, height=4.5 / 1000
+        width=20.75 / 1000, length=25.25 / 1000, height=4 / 1000
     )
 
     max_indentation_depth: float = 0.002

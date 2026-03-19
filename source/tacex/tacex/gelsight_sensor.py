@@ -649,17 +649,18 @@ class GelSightSensor(SensorBase):
         # sim_utils.delete_prim(prim_path)
 
         # compute camera parameters for desired field-of-view
-        border_fraction = min(max(0, self.cfg.sensor_camera_cfg.border_fraction), 0.49)
+        fov_width = self.cfg.sensor_camera_cfg.fov_width
+        fov_height = self.cfg.sensor_camera_cfg.fov_height
+        # convert into cm
+        fov_width *= 100.0
+        fov_height *= 100.0
 
-        fov_width = self.cfg.sensor_camera_cfg.fov_width * (1 - border_fraction)
-        fov_height = self.cfg.sensor_camera_cfg.fov_height * (1 - border_fraction)
+        # use a fixed focal_length value to compute horizontal and vertical aperture
+        # this way we can easily try out different focal length values to adjust the zoom.
+        focal_length = 1
+        horizontal_aperture = fov_width * focal_length / (self.cfg.sensor_camera_cfg.focus_distance * 100)
+        vertical_aperture = fov_height * focal_length / (self.cfg.sensor_camera_cfg.focus_distance * 100)
 
-        horizontal_aperture = (
-            fov_width * self.cfg.sensor_camera_cfg.focal_length / self.cfg.sensor_camera_cfg.focus_distance
-        )
-        vertical_aperture = (
-            fov_height * self.cfg.sensor_camera_cfg.focal_length / self.cfg.sensor_camera_cfg.focus_distance
-        )
         self.camera_cfg: TiledCameraCfg = TiledCameraCfg(
             prim_path=prim_path,
             update_period=self.cfg.sensor_camera_cfg.update_period,
@@ -673,8 +674,8 @@ class GelSightSensor(SensorBase):
             data_types=self.cfg.sensor_camera_cfg.data_types,
             update_latest_camera_pose=self.cfg.sensor_camera_cfg.update_latest_camera_pose,  # needed for FEM based marker sim
             spawn=sim_utils.PinholeCameraCfg(
-                focal_length=self.cfg.sensor_camera_cfg.focal_length
-                * (1 - border_fraction),  # adjust focal length for same zoom-factor
+                # use user-defined focal length to set proper zoom factor
+                focal_length=self.cfg.sensor_camera_cfg.focal_length,
                 focus_distance=self.cfg.sensor_camera_cfg.focus_distance,
                 horizontal_aperture=horizontal_aperture,
                 vertical_aperture=vertical_aperture,

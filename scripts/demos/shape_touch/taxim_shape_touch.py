@@ -490,7 +490,7 @@ class TaximParameterWindow:
 
             self.indentation_depth_widget = float_builder(
                 default_val=0.001,
-                min=0.0001,
+                min=0.000,
                 max=0.002,
                 step=0.00001,
                 format="%.5f",
@@ -674,6 +674,7 @@ def create_calib_points_in_gelpad_frame(
     calib_area_width: float = 0.02525,
     num_points_x=3,
     num_points_y=4,
+    border_fraction=0.15,
 ):
     """Creates (x,y) positions for the data collection.
 
@@ -685,13 +686,16 @@ def create_calib_points_in_gelpad_frame(
 
     Regarding the gelpad frame: x axis of the gelpad frame shows up and the y axis shows to the left.
     Args:
-        gelpad_height: _description_. Defaults to 0.02075.
-        gelpad_width: _description_. Defaults to 0.02525.
+        gelpad_height: _description_. Defaults to 0.02075. Units [m]
+        gelpad_width: _description_. Defaults to 0.02525. Units [m]
 
     Returns:
         calib_points: (x,y) positions in the gelad frame of the sensor (Units: [m]). Shape (num_calib_points, 2).
                     Amount of calib points = num_points_x * num_points_y + (num_points_x - 1)*(num_points_y - 1)
     """
+    calib_area_height = calib_area_height * (1 - border_fraction)
+    calib_area_width = calib_area_width * (1 - border_fraction)
+
     # grid pattern
     cylinder_radius = cylinder_radius_mm / 1000
     x_coor = np.linspace(
@@ -759,19 +763,30 @@ def create_calib_points_in_image_frame(calib_points: np.array, imgw=320, imgh=24
     """Transforms calib points defined in the gelpad frame to the image frame and filters out points that are not inside the image.
 
     Args:
-        calib_points (_type_): _description_
+        calib_points (_type_): Units are [m].
         imgw (_type_, optional): _description_. Defaults to 320.
         imgh (_type_, optional): _description_. Defaults to 240.
         pixmm (_type_, optional): _description_. Defaults to 0.0634.
     """
     # convert to mm
-    calib_points *= 1000
+    calib_points = calib_points * 1000
     calib_points_pix = calib_points.copy()
 
     # calib_points[:, 1] = y-coor. in gelpad frame (left/right direction), this corresponds to x coor. in img-frame (i.e. in left/right direction of img)
     calib_points_pix[:, 0] = calib_points[:, 1] / pixmm + imgw / 2
     calib_points_pix[:, 1] = calib_points[:, 0] / pixmm + imgh / 2
     calib_points_pix = calib_points_pix.astype(int)
+
+    # import matplotlib.pyplot as plt
+    # for i in range(calib_points_pix.shape[0]):
+    #     plt.plot(
+    #         calib_points_pix[i, 0],
+    #         calib_points_pix[i, 1],
+    #         marker="o",
+    #         color="red",
+    #         linestyle="none",
+    #     )
+    # plt.show()
 
     # filter out points that are outside the image
     calib_points_pix_filtered = calib_points_pix[(calib_points_pix >= 0).all(axis=1)]
@@ -794,6 +809,7 @@ def create_calib_points_in_image_frame(calib_points: np.array, imgw=320, imgh=24
     subarrays.append(subarray)
     calib_points_pix_filtered = np.vstack(subarrays)
 
+    # import matplotlib.pyplot as plt
     # for i in range(calib_points_pix_filtered.shape[0]):
     #     plt.plot(
     #         calib_points_pix_filtered[i, 0],
@@ -809,6 +825,7 @@ def create_calib_points_in_image_frame(calib_points: np.array, imgw=320, imgh=24
     calib_points_filtered = calib_points_filtered[calib_points_filtered[:, 0] <= imgw]
     calib_points_filtered = calib_points_filtered[calib_points_filtered[:, 1] <= imgh]
 
+    calib_points_filtered /= 1000
     return calib_points_filtered, calib_points_pix_filtered
 
 
@@ -816,7 +833,7 @@ def create_calib_points_in_image_frame(calib_points: np.array, imgw=320, imgh=24
 class ShapeTouchEnvCfg(DirectRLEnvCfg):
     # viewer settings
     viewer: ViewerCfg = ViewerCfg()
-    viewer.eye = (4.28725, -2.3, 0.01869)
+    viewer.eye = (2.45, -1.2, 0.01869)
     viewer.lookat = (-4.8, 6.0, -0.2)
 
     debug_vis = True
@@ -1150,8 +1167,10 @@ def run_data_collection(env: ShapeTouchEnv):
             env.gsmini._prim_view.prims[0].GetAttribute(f"debug_{data_type}").Set(True)
 
     # compute calibration pattern
-    calib_area_height = 0.0143  # 0.02075 # we use camera fov instead of gelpad area
-    calib_area_width = 0.0186  # 0.02525
+    calib_area_height = 0.02075  # 0.0143  # # we use camera fov instead of gelpad area
+    calib_area_width = 0.02525  # 0.0186
+    # calib_area_height = 0.0143  # # we use camera fov instead of gelpad area
+    # calib_area_width = 0.0186
     pixmm = 0.0634
 
     cylinder_radius_mm = 2.0
@@ -1166,12 +1185,29 @@ def run_data_collection(env: ShapeTouchEnv):
     calib_points_filtered, calib_points_pix = create_calib_points_in_image_frame(
         calib_points, imgw=320, imgh=240, pixmm=0.0634
     )
-    calib_points_filtered /= 1000  # convert to m
+
     base_center_x = 0.5
     base_center_y = 0
     calib_points_filtered[:, 0] += base_center_x
     calib_points_filtered[:, 1] += base_center_y
     calib_pattern = torch.tensor(calib_points_filtered, device=env.device)
+
+    # draw the calib points
+    calib_points_filtered = calib_points
+    calib_points_filtered[:, 0] += base_center_x
+    calib_points_filtered[:, 1] += base_center_y
+    calib_points_filtered = np.concatenate(
+        [calib_points_filtered, np.full((calib_points_filtered.shape[0], 1), 0.02)], axis=1
+    )
+    calib_points_3d = []
+    for i in range(env.num_envs):
+        points_3d = calib_points_filtered.copy()
+        points_3d[:, :2] += env.scene.env_origins[i, :2].cpu().numpy()
+        calib_points_3d.append(points_3d)
+
+    draw.clear_points()
+    points = np.array(calib_points_3d).flatten().reshape((-1, 3))
+    draw.draw_points(points, [(255, 0, 255, 0.5)] * points.shape[0], [30] * points.shape[0])
 
     env.param_window.num_calib_point = calib_pattern.shape[0]
 
@@ -1183,47 +1219,60 @@ def run_data_collection(env: ShapeTouchEnv):
     for _ in range(50):
         env.ik_commands[:] = env.base_pose[:]
         step_env(env)
-
+    prev_calib_point_idx = None
     # Data collection loop
     while simulation_app.is_running():
         calib_point_idx = env.param_window.current_calib_point_idx
-        # -- move ee to calib point
-        env.ik_commands[:, :2] = calib_pattern[calib_point_idx]
+        if prev_calib_point_idx is None:
+            prev_calib_point_idx = calib_point_idx
+        elif prev_calib_point_idx != calib_point_idx:
+            print("Moving to calib point ", calib_point_idx)
+            # move ee up first
+            for _ in range(15):
+                env.ik_commands[:] = env.base_pose[:]
+                env.ik_commands[:, 2] += 0.005
+                step_env(env)
+            # then move ee to calib point
+            for _ in range(20):
+                env.ik_commands[:, :2] = calib_pattern[calib_point_idx]
+                step_env(env)
+            prev_calib_point_idx = calib_point_idx
+
+        # -- move ee down
         depth = env.param_window.indentation_depth_widget.as_float
         env.ik_commands[:, 2] = 0.02 - depth
         env.ik_commands[:, 3:] = torch.tensor([1.0, 0.0, 0.0, 0.0], device=env.device).repeat(env.num_envs, 1)
 
-        for _ in range(35):
-            step_env(env)
-            # update data visualization
-            env.visualizers["Images"].terms["tactile_rgb"] = env.gsmini.data.output["tactile_rgb"]
+        step_env(env)
+        # update data visualization
+        env.visualizers["Images"].terms["tactile_rgb"] = env.gsmini.data.output["tactile_rgb"]
 
-            # draw all calib points of the calibration pattern for debug purposes for all envs
-            for i in range(env.num_envs):
-                tactile_rgb = env.gsmini.data.output["tactile_rgb"][i].cpu().numpy()
-                for j in range(calib_points_pix.shape[0]):
-                    # mark the current goal pos with blue circle
-                    if calib_point_idx == j:
-                        color = (0, 0, 255)
-                    else:
-                        color = (50, 50, 50)
+        # draw all calib points of the calibration pattern for debug purposes for all envs
+        for i in range(env.num_envs):
+            tactile_rgb = env.gsmini.data.output["tactile_rgb"][i].cpu().numpy()
+            for j in range(calib_points_pix.shape[0]):
+                # mark the current goal pos with blue circle
+                if calib_point_idx == j:
+                    color = (0, 0, 255)
+                else:
+                    color = (50, 50, 50)
 
-                    cv2.circle(
-                        tactile_rgb,
-                        (calib_points_pix[j, 0], calib_points_pix[j, 1]),
-                        int(cylinder_radius_mm / pixmm),
-                        color,
-                        1,
-                    )
-                    cv2.circle(
-                        tactile_rgb,
-                        (calib_points_pix[j, 0], calib_points_pix[j, 1]),
-                        1,
-                        color,
-                        1,
-                    )
-                # create image with the calib points positions drawn onto it
-                env.visualizers["Images"].terms["calib_points"][i] = torch.tensor(tactile_rgb)
+                cv2.circle(
+                    tactile_rgb,
+                    (calib_points_pix[j, 0], calib_points_pix[j, 1]),
+                    int(cylinder_radius_mm / pixmm),
+                    color,
+                    1,
+                )
+                cv2.circle(
+                    tactile_rgb,
+                    (calib_points_pix[j, 0], calib_points_pix[j, 1]),
+                    1,
+                    color,
+                    1,
+                )
+            # create image with the calib points positions drawn onto it
+            env.visualizers["Images"].terms["calib_points"][i] = torch.tensor(tactile_rgb)
 
     env.close()
 
