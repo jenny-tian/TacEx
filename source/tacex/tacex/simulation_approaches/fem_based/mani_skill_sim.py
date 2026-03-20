@@ -29,11 +29,9 @@ class ManiSkillSimulator(GelSightSimulator):
     cfg: ManiSkillSimulatorCfg
 
     def __init__(self, sensor: GelSightSensor, cfg: ManiSkillSimulatorCfg):
-        self.sensor: GelSightSensor = sensor
-
         # needed for VisionTactileSensorUIPC class
         self.camera = None
-        self.gelpad_uipc: UipcObject = self.sensor.gelpad_obj
+        self.gelpad_uipc: UipcObject = sensor.gelpad_obj
 
         super().__init__(sensor=sensor, cfg=cfg)
 

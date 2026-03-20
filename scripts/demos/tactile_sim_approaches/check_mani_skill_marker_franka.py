@@ -213,7 +213,7 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
     gsmini = GELSIGHT_MINI_TAXIM_FEM_CFG.replace(
         prim_path="/World/envs/env_.*/Robot/gelsight_mini_case",
         sensor_camera_cfg=GELSIGHT_MINI_TAXIM_FEM_CFG.SensorCameraCfg(
-            prim_path_appendix="/Camera",
+            prim_name="Camera",
             update_period=0,
             resolution=(32, 24),
             data_types=["depth"],
@@ -279,7 +279,6 @@ class BallRollingEnv(UipcRLEnv):
         # ee offset w.r.t panda hand -> based on the asset
         self._offset_pos = torch.tensor([0.0, 0.0, 0.131], device=self.device).repeat(self.num_envs, 1)
         self._offset_rot = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).repeat(self.num_envs, 1)
-        # self._offset_rot = torch.tensor([0.0, 0.0, 1.0, 0.0], device=self.device).repeat(self.num_envs, 1)  -> tried to set this, but IK did not work properly then, not sure what the problem here is (might be due to bad panda_hand placement?)
         # ---
 
         # create buffer to store actions (= ik_commands)

@@ -52,7 +52,7 @@ from tacex_assets import TACEX_ASSETS_DATA_DIR
 from tacex_assets.robots.franka.franka_gsmini_single_rigid import (
     FRANKA_PANDA_ARM_SINGLE_GSMINI_HIGH_PD_RIGID_CFG,
 )
-from tacex_assets.sensors.gelsight_mini.gsmini_cfg import GelSightMiniCfg
+from tacex_assets.sensors.gelsight_mini.generic_gsmini_cfg import GeneralGelSightMiniCfg
 
 from tacex_tasks.utils import DirectLiveVisualizer
 
@@ -298,10 +298,10 @@ class BallRollingTaximFotsCfg(DirectRLEnvCfg):
     )
 
     # sensors
-    gsmini = GelSightMiniCfg(
+    gsmini = GeneralGelSightMiniCfg(
         prim_path="/World/envs/env_.*/Robot/gelsight_mini_case",
-        sensor_camera_cfg=GelSightMiniCfg.SensorCameraCfg(
-            prim_path_appendix="/Camera",
+        sensor_camera_cfg=GeneralGelSightMiniCfg.SensorCameraCfg(
+            prim_name="Camera",
             update_period=0,
             resolution=(32, 24),  # (48, 64),
             data_types=["depth"],
@@ -314,8 +314,8 @@ class BallRollingTaximFotsCfg(DirectRLEnvCfg):
         debug_vis=True,  # for being able to see sensor output in the gui
         # update Taxim cfg
         optical_sim_cfg=TaximSimulatorCfg(
-            calib_folder_path=f"{TACEX_ASSETS_DATA_DIR}/Sensors/GelSight_Mini/calibs/640x480",
-            gelpad_height=GelSightMiniCfg().gelpad_dimensions.height,
+            calib_folder_path=f"{TACEX_ASSETS_DATA_DIR}/Sensors/GelSight_Mini/calibs/taxim/640x480",
+            gelpad_height=GeneralGelSightMiniCfg().gelpad_dimensions.height,
             gelpad_to_camera_min_distance=0.024,
             with_shadow=False,
             tactile_img_res=(32, 24),
@@ -540,12 +540,14 @@ class BallRollingTaximFotsEnv(DirectRLEnv):
             self.visualizers["Observations"].terms["ee_pos"] = torch.zeros((self.num_envs, 3))
             self.visualizers["Observations"].terms["ee_rot"] = torch.zeros((self.num_envs, 3))
             self.visualizers["Observations"].terms["goal"] = torch.zeros((self.num_envs, 2))
-            self.visualizers["Observations"].terms["sensor_output"] = torch.zeros((
-                self.num_envs,
-                self.cfg.observation_space["vision_obs"][0],
-                self.cfg.observation_space["vision_obs"][1],
-                self.cfg.observation_space["vision_obs"][2],
-            ))
+            self.visualizers["Observations"].terms["sensor_output"] = torch.zeros(
+                (
+                    self.num_envs,
+                    self.cfg.observation_space["vision_obs"][0],
+                    self.cfg.observation_space["vision_obs"][1],
+                    self.cfg.observation_space["vision_obs"][2],
+                )
+            )
 
             self.visualizers["Rewards"].terms["rewards"] = torch.zeros((self.num_envs, 11))
             self.visualizers["Rewards"].terms_names["rewards"] = [
@@ -1172,8 +1174,7 @@ def _compute_rewards(
     # orient_reward *= orient_reward_cfg["weight"]
 
     ee_goal_tracking_reward = (
-        1
-        - torch.tanh((ee_goal_distance) / ee_goal_tracking_cfg["std"])
+        1 - torch.tanh((ee_goal_distance) / ee_goal_tracking_cfg["std"])
         # - torch.tanh(ee_goal_distance / ee_goal_tracking_cfg["std_fine"])
     )
     ee_goal_tracking_reward *= ee_goal_tracking_cfg["weight"]
