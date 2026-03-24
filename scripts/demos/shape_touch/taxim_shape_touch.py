@@ -1002,7 +1002,9 @@ class ShapeTouchEnv(DirectRLEnv):
         if self.cfg.debug_vis:
             # add plots
             self.visualizers = {
-                "Images": DirectLiveVisualizer(self.cfg.debug_vis, self.num_envs, None, visualizer_name="Images"),
+                "Images": DirectLiveVisualizer(
+                    self.cfg.debug_vis, self.num_envs, self._window, visualizer_name="Images"
+                ),
                 # "Metrics": DirectLiveVisualizer(
                 #     self.cfg.debug_vis, self.num_envs, None, visualizer_name="Metrics"
                 # ),

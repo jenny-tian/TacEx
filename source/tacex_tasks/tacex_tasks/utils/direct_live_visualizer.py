@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import torch
+import logging
 import weakref
 from typing import TYPE_CHECKING
 
@@ -11,11 +11,16 @@ from isaacsim.core.api.simulation_context import SimulationContext
 
 from isaaclab.ui.widgets import ManagerLiveVisualizer
 
+import torch
+
 from .image_plot import ImagePlot
 from .line_plot import LiveLinePlot
 
 if TYPE_CHECKING:
     import omni.ui
+
+# import logger
+logger = logging.getLogger(__name__)
 
 
 class ExtraVisualizerWindow:
@@ -178,6 +183,17 @@ class DirectLiveVisualizer(ManagerLiveVisualizer):
             with self._vis_window.ui_window_elements["debug_vstack"]:
                 self._vis_window._create_debug_vis_ui_element(self.visualizer_name, self)
 
+    def _set_env_selection_impl(self, env_idx: int):
+        """Update the index of the selected environment to display.
+
+        Args:
+            env_idx: The index of the selected environment.
+        """
+        if env_idx > 0 and env_idx < self.num_envs:
+            self._env_idx = env_idx
+        else:
+            logger.warning(f"Environment index is out of range (0, {self.num_envs - 1})")
+
     #
     # Implementations
     #
@@ -260,7 +276,7 @@ class DirectLiveVisualizer(ManagerLiveVisualizer):
         if SimulationContext.instance() is None or not SimulationContext.instance().is_playing():
             # Visualizers have not been created yet.
             return
-        self._env_idx = self._vis_window._env_idx
+        self._env_idx = self._vis_window.ui_window_elements["viewer_env_index"].as_int - 1
         # get updated data and update visualization
         for name, values in self.terms.items():
             # E.g. terms = actions: Actions values have the shape (num_envs, num_actions).
