@@ -12,7 +12,7 @@ from tacex_assets import TACEX_ASSETS_DATA_DIR
 from tacex_assets.robots.franka.franka_gsmini_single_uipc_textured import (
     FRANKA_PANDA_ARM_SINGLE_GSMINI_TEXTURED_HIGH_PD_UIPC_CFG,
 )
-from tacex_assets.sensors.gelsight_mini.gsmini_cfg import GelSightMiniCfg
+from tacex_assets.sensors.gelsight_mini import GELSIGHT_MINI_TAXIM_FOTS_CFG
 
 from tacex_uipc import (
     UipcIsaacAttachmentsCfg,
@@ -120,10 +120,10 @@ class UipcTexturedEnvCfg(PhysXRigidEnvCfg):
         ),
     )
 
-    gsmini = GelSightMiniCfg(
+    gsmini = GELSIGHT_MINI_TAXIM_FOTS_CFG.replace(
         prim_path="/World/envs/env_.*/Robot/gelsight_mini_case",
-        sensor_camera_cfg=GelSightMiniCfg.SensorCameraCfg(
-            prim_path_appendix="/Camera",
+        sensor_camera_cfg=GELSIGHT_MINI_TAXIM_FOTS_CFG.SensorCameraCfg(
+            prim_name="Camera",
             update_period=0,
             resolution=(640, 480),
             data_types=["depth", "rgb"],

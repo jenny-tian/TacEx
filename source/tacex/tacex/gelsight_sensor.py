@@ -3,16 +3,17 @@ from __future__ import annotations
 import numpy as np
 import torch
 from collections.abc import Sequence
-from matplotlib import pyplot as plt
 from typing import TYPE_CHECKING
 
 import cv2
 import omni.kit.commands
 import omni.usd
 from isaacsim.core.prims import XFormPrim
+import isaacsim.core.utils.prims as prims_utils
 from pxr import Sdf
 
 from isaaclab.sensors import SensorBase, TiledCamera, TiledCameraCfg
+import isaaclab.sim as sim_utils
 
 from .gelsight_sensor_data import GelSightSensorData
 from .simulation_approaches.gelsight_simulator import GelSightSimulator
@@ -77,8 +78,26 @@ class GelSightSensor(SensorBase):
                     sensor=self, cfg=self.cfg.marker_motion_sim_cfg
                 )
 
+        # set how the indentation depth should be computed
+        if (self.cfg.compute_indentation_depth_class) == "optical_sim" and (self.optical_simulator is not None):
+            self.compute_indentation_depth_func = self.optical_simulator.compute_indentation_depth
+        elif (self.cfg.compute_indentation_depth_class == "marker_motion_sim") and (
+            self.marker_motion_simulator is not None
+        ):
+            self.compute_indentation_depth_func = self.marker_motion_simulator.compute_indentation_depth
+        else:
+            # use default implementation
+            self.compute_indentation_depth_func = self.compute_indentation_depth
+
         self._set_debug_vis_flag = False
         self._debug_vis_is_initialized = False
+
+        # check if desired output is possible with given config:
+        if "tactile_rgb" in self._data.output and self.cfg.optical_sim_cfg is None:
+            raise RuntimeError("Output [tactile_rgb] not possible with given config: optical_sim_cfg = None]")
+
+        if "marker_motion" in self._data.output and self.cfg.marker_motion_sim_cfg is None:
+            raise RuntimeError("Output [marker_motion] not possible with given config: marker_motion = None")
 
     def __del__(self):
         """Unsubscribes from callbacks."""
@@ -118,7 +137,7 @@ class GelSightSensor(SensorBase):
 
     @property
     def tactile_image_shape(self) -> tuple[int, int, int]:
-        """Shape of the simulated tactile RGB image, i.e. (channels, height, width)."""
+        """Shape of the simulated tactile RGB image, i.e. (height, width, channels)."""
         return (self.cfg.optical_sim_cfg.tactile_img_res[1], self.cfg.optical_sim_cfg.tactile_img_res[0], 3)
 
     @property
@@ -193,6 +212,17 @@ class GelSightSensor(SensorBase):
         # Reset the frame count
         self._frame[env_ids] = 0
 
+    def compute_indentation_depth(self):
+        """Computes the indentation depth by takin the minimum value of the height map.
+
+        The height map format is as follow:
+        - value 0 is at the gelpad's highest point (= no indentation)
+        - value min(height_map) is the point closest to sensor camera, i.e. the point with the biggest indentation depth
+        """
+        height_map = self._data.output["height_map"]
+        self._indentation_depth[:] = -height_map.amin((1, 2))
+        return self._indentation_depth
+
     ####
     # Implementation of abstract methods of base sensor class
     ####
@@ -224,41 +254,10 @@ class GelSightSensor(SensorBase):
 
         self._indentation_depth = torch.zeros((self._num_envs), device=self._device)
 
-        if self.cfg.sensor_camera_cfg is not None:
-            self.camera_cfg: TiledCameraCfg = TiledCameraCfg(
-                prim_path=self.cfg.prim_path + self.cfg.sensor_camera_cfg.prim_path_appendix,
-                update_period=self.cfg.sensor_camera_cfg.update_period,
-                height=self.cfg.sensor_camera_cfg.resolution[1],
-                width=self.cfg.sensor_camera_cfg.resolution[0],
-                data_types=self.cfg.sensor_camera_cfg.data_types,
-                update_latest_camera_pose=False,  # needed for FEM based marker sim
-                spawn=None,  # use camera which is part of the GelSight Mini Asset
-                # note: clipping range doesn't matter for existing camera prim -> only applied when camera is spawned # TODO fix?
-                # spawn=sim_utils.PinholeCameraCfg(
-                #    focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 1.0e5)
-                # ),
-                # depth_clipping_behavior="max", # doesn't work, cause "max" value is taking from spawn config, which we dont have
-            )
-            self.camera = TiledCamera(cfg=self.camera_cfg)
-
-            # use normal camera
-            # self.camera_cfg: CameraCfg = CameraCfg(
-            #         prim_path= self.cfg.prim_path + self.cfg.sensor_camera_cfg.prim_path_appendix,
-            #         update_period= self.cfg.sensor_camera_cfg.update_period,
-            #         height= self.cfg.sensor_camera_cfg.resolution[1],
-            #         width= self.cfg.sensor_camera_cfg.resolution[0],
-            #         data_types= self.cfg.sensor_camera_cfg.data_types,
-            #         spawn= None, # use camera which is part of the GelSight Mini Asset
-            #         # spawn=sim_utils.PinholeCameraCfg(
-            #         #    focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 1.0e5)
-            #         # ),
-            #         #depth_clipping_behavior="max", # doesn't work, cause "max" value is taking from spawn config, which we dont have
-            # )
-            # self.camera = Camera(cfg=self.camera_cfg)
-
-            # need to initialize the camera manually, since its not part of the scene cfg
-            self.camera._initialize_impl()
-            self.camera._is_initialized = True
+        # need to initialize the camera manually, since its not part of the scene cfg
+        self.camera = self._create_tiled_camera()
+        self.camera._initialize_impl()
+        self.camera._is_initialized = True
 
         self._data.output["height_map"] = torch.zeros(
             (self._num_envs, self.camera_cfg.height, self.camera_cfg.width), device=self.cfg.device
@@ -297,15 +296,6 @@ class GelSightSensor(SensorBase):
                 device=self.cfg.device,
             )
         if "marker_motion" in self.cfg.data_types:
-            # self._data.output["marker_motion"]= torch.zeros(
-            #     (
-            #         self._num_envs,
-            #         self.cfg.marker_motion_sim_cfg.marker_params.num_markers_row,
-            #         self.cfg.marker_motion_sim_cfg.marker_params.num_markers_col,
-            #         2 # two, because each marker at (row,col) has position value (y,x)
-            #     ),
-            #     device=self.cfg.device
-            # )
             self._data.output["marker_motion"] = torch.zeros(
                 (
                     self._num_envs,
@@ -315,16 +305,6 @@ class GelSightSensor(SensorBase):
                 ),
                 device=self.cfg.device,
             )
-
-        # set how the indentation depth should be computed
-        if (self.cfg.compute_indentation_depth_class) == "optical_sim" and (self.optical_simulator is not None):
-            self.compute_indentation_depth_func = self.optical_simulator.compute_indentation_depth
-        elif (self.cfg.compute_indentation_depth_class == "marker_motion_sim") and (
-            self.marker_motion_simulator is not None
-        ):
-            self.compute_indentation_depth_func = self.marker_motion_simulator.compute_indentation_depth
-        else:
-            self.compute_indentation_depth_func = None
 
         # Create all env_ids buffer
         self._ALL_INDICES = torch.arange(self._num_envs, device=self._device, dtype=torch.long)
@@ -361,10 +341,9 @@ class GelSightSensor(SensorBase):
             self.camera.update(dt=0, force_recompute=True)
 
         if self.compute_indentation_depth_func is not None:
-            # -- height_map
+            # get height map and indentation depth data
             self._get_height_map()
-            # -- pressing depth
-            self._indentation_depth[:] = self.compute_indentation_depth_func()  # type: ignore #todo uncomment
+            self._indentation_depth[:] = self.compute_indentation_depth_func()
 
         if "camera_depth" in self._data.output:
             self._get_camera_depth()
@@ -381,7 +360,7 @@ class GelSightSensor(SensorBase):
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         # we actually set the debug_vis in _initialize_impl, since we need the _prim_view, which
-        # is only correctly initialized after _initialize_impl method (in ManagerBased workflow, in Direct workflow you can control it yourself)
+        # is only correctly initialized after _initialize_impl method (thats the case in ManagerBased workflow - in Direct workflow you can control it yourself)
         self._initialize_debug_vis_flag: bool = debug_vis
 
     def _initialize_debug_vis(self, debug_vis: bool):
@@ -410,6 +389,10 @@ class GelSightSensor(SensorBase):
                 if "camera_rgb" in self.cfg.data_types:
                     attr = prim.CreateAttribute("debug_camera_rgb", Sdf.ValueTypeNames.Bool)
                     attr.Set(False)
+                if "height_map" in self.cfg.data_types:
+                    attr = prim.CreateAttribute("debug_height_map", Sdf.ValueTypeNames.Bool)
+                    attr.Set(False)
+
                 if "tactile_rgb" in self.cfg.data_types:
                     attr = prim.CreateAttribute("debug_tactile_rgb", Sdf.ValueTypeNames.Bool)
                     attr.Set(False)
@@ -428,6 +411,9 @@ class GelSightSensor(SensorBase):
                 if "camera_rgb" in self.cfg.data_types:
                     self._windows["camera_rgb"] = {}
                     self._img_providers["camera_rgb"] = {}
+                if "height_map" in self.cfg.data_types:
+                    self._windows["height_map"] = {}
+                    self._img_providers["height_map"] = {}
 
             if "tactile_rgb" in self.cfg.data_types:
                 self.optical_simulator._set_debug_vis_impl(debug_vis)
@@ -457,9 +443,9 @@ class GelSightSensor(SensorBase):
                         )
                         self._windows["camera_rgb"][str(i)] = window
                         # create image provider
-                        self._img_providers["camera_rgb"][
-                            str(i)
-                        ] = omni.ui.ByteImageProvider()  # default format omni.ui.TextureFormat.RGBA8_UNORM
+                        self._img_providers["camera_rgb"][str(i)] = (
+                            omni.ui.ByteImageProvider()
+                        )  # default format omni.ui.TextureFormat.RGBA8_UNORM
 
                     frame = self._data.output["camera_rgb"][i].cpu().numpy()
 
@@ -492,19 +478,16 @@ class GelSightSensor(SensorBase):
                         )
                         self._windows["camera_depth"][str(i)] = window
                         # create image provider
-                        self._img_providers["camera_depth"][
-                            str(i)
-                        ] = omni.ui.ByteImageProvider()  # default format omni.ui.TextureFormat.RGBA8_UNORM
+                        self._img_providers["camera_depth"][str(i)] = (
+                            omni.ui.ByteImageProvider()
+                        )  # default format omni.ui.TextureFormat.RGBA8_UNORM
 
                     frame = self._data.output["camera_depth"][i].cpu().numpy()
                     # # image is channel first, convert to channel last
                     # frame = np.moveaxis(frame, 0, -1)
                     # convert to 3 channel image, to later turn it into 4 channel RGBA for Isaac Widget
                     frame = np.dstack((frame, frame, frame)).astype(np.uint8)
-                    frame = cv2.normalize(frame, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_32F)
-
                     # update image of the window
-                    frame = frame.astype(np.uint8)
                     frame = cv2.cvtColor(frame, cv2.COLOR_RGB2RGBA)  # cv.COLOR_BGR2RGBA) COLOR_RGB2RGBA
                     height, width, channels = frame.shape
                     with self._windows["camera_depth"][str(i)].frame:
@@ -519,6 +502,51 @@ class GelSightSensor(SensorBase):
                     # remove window/img_provider from dictionary and destroy them
                     self._windows["camera_depth"].pop(str(i)).destroy()
                     self._img_providers["camera_depth"].pop(str(i)).destroy()
+
+            if "height_map" in self.cfg.data_types:
+                show_img = prim.GetAttribute("debug_height_map").Get()
+                if show_img:
+                    if str(i) not in self._windows["height_map"]:
+                        # create a window
+                        window = omni.ui.Window(
+                            self._prim_view.prim_paths[i] + "/height_map",
+                            height=self.cfg.sensor_camera_cfg.resolution[1],
+                            width=self.cfg.sensor_camera_cfg.resolution[0],
+                        )
+                        self._windows["height_map"][str(i)] = window
+                        # create image provider
+                        self._img_providers["height_map"][str(i)] = (
+                            omni.ui.ByteImageProvider()
+                        )  # default format omni.ui.TextureFormat.RGBA8_UNORM
+
+                    frame = self._data.output["height_map"][i].cpu().numpy()
+                    # map [-gelpad_height, 0] to [0,255] for proper depth image of height_map
+                    frame = (
+                        (
+                            np.clip(frame, -self.cfg.max_indentation_depth * 1000, 0)
+                            + self.cfg.max_indentation_depth * 1000
+                        )
+                        / (self.cfg.max_indentation_depth * 1000)
+                        * 255
+                    ).astype(np.uint8)
+                    # convert to 3 channel image, to later turn it into 4 channel RGBA for Isaac Widget
+                    frame = np.dstack((frame, frame, frame)).astype(np.uint8)
+
+                    # update image of the window
+                    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2RGBA)  # cv.COLOR_BGR2RGBA) COLOR_RGB2RGBA
+                    height, width, channels = frame.shape
+                    with self._windows["height_map"][str(i)].frame:
+                        # self._img_providers[str(i)].set_data_array(frame, [width, height, channels]) #method signature: (numpy.ndarray[numpy.uint8], (width, height))
+                        self._img_providers["height_map"][str(i)].set_bytes_data(
+                            frame.flatten().data, [width, height]
+                        )  # method signature: (numpy.ndarray[numpy.uint8], (width, height))
+                        omni.ui.ImageWithProvider(
+                            self._img_providers["height_map"][str(i)]
+                        )  # , fill_policy=omni.ui.IwpFillPolicy.IWP_PRESERVE_ASPECT_FIT -> fill_policy by default: specifying the width and height of the item causes the image to be scaled to that size
+                elif str(i) in self._windows["height_map"]:
+                    # remove window/img_provider from dictionary and destroy them
+                    self._windows["height_map"].pop(str(i)).destroy()
+                    self._img_providers["height_map"].pop(str(i)).destroy()
 
         if "tactile_rgb" in self.cfg.data_types:
             self.optical_simulator._debug_vis_callback(event)
@@ -573,19 +601,17 @@ class GelSightSensor(SensorBase):
             # clip camera values that are = inf
             depth_output[torch.isinf(depth_output)] = self.cfg.sensor_camera_cfg.clipping_range[1]
 
-            self._data.output["camera_depth"] = depth_output.reshape(
-                (self._num_envs, 1, self.camera_resolution[1], self.camera_resolution[0])
-            )  # add a channel to the depth image for debug_vis
-            self._data.output["camera_depth"] *= 1000.0
+            # add a channel to the depth image for debug_vis
+            self._data.output["camera_depth"] = depth_output[:, :, :, None]
 
-            # normalize the depth image
-            normalized = self._data.output["camera_depth"].view(self._data.output["camera_depth"].size(0), -1)
-            normalized -= self.cfg.sensor_camera_cfg.clipping_range[0] * 1000
-            normalized /= self.cfg.sensor_camera_cfg.clipping_range[1] * 1000
+            # normalize the depth image in clipping range
+            normalized = (self._data.output["camera_depth"] - self.cfg.sensor_camera_cfg.clipping_range[0]) / (
+                self.cfg.sensor_camera_cfg.clipping_range[1] - self.cfg.sensor_camera_cfg.clipping_range[0]
+            )
             normalized = (normalized * 255).type(dtype=torch.uint8)
-            self._data.output["camera_depth"] = normalized.reshape(
-                (self._num_envs, self.camera_resolution[1], self.camera_resolution[0], 1)
-            )  # add a channel to the depth image for debug_vis
+            self._data.output["camera_depth"] = normalized
+
+            # self._data.output["camera_depth"] *= 1000.0
 
         return self._data.output["camera_depth"]
 
@@ -598,6 +624,15 @@ class GelSightSensor(SensorBase):
             self._data.output["height_map"][torch.isinf(self._data.output["height_map"])] = (
                 self.cfg.sensor_camera_cfg.clipping_range[1]
             )
+            # transform camera depth values to values in gelpad range, i.e. [0, gelpad_height]
+            self._data.output["height_map"] -= self.cfg.sensor_camera_cfg.clipping_range[0]
+            # height_map == 0 should mean that no indentation, min(height_map) == biggest indentation
+            self._data.output["height_map"] -= self.cfg.gelpad_dimensions.height
+
+            self._data.output["height_map"] = self._data.output["height_map"].clamp(
+                -self.cfg.gelpad_dimensions.height, 0
+            )
+
             # default unit is meter -> convert to mm for optical sim
             self._data.output["height_map"] *= 1000
 
@@ -608,20 +643,47 @@ class GelSightSensor(SensorBase):
             # or that we dont need a height map in general
             pass
 
-    def _show_height_map_inside_gui(self, index):
-        plt.close()
-        height_map = self._data.output["height_map"][index].cpu().numpy()
-        np.save("height_map.npy", height_map)
+    def _create_tiled_camera(self) -> TiledCamera:
+        # delete existing camera prim
+        prim_path = self.cfg.prim_path + f"/{self.cfg.sensor_camera_cfg.prim_name}"
+        # sim_utils.delete_prim(prim_path)
 
-        X = np.arange(0, height_map.shape[0])
-        Y = np.arange(0, height_map.shape[1])
-        X, Y = np.meshgrid(X, Y)
-        Z = height_map
-        fig, ax = plt.subplots(subplot_kw={"projection": "3d"})
-        ax.plot_surface(X, Y, Z.T)
-        # plt.show()
-        print("saving height_map img")
-        plt.savefig(f"height_map{index}.png")
+        # compute camera parameters for desired field-of-view
+        fov_width = self.cfg.sensor_camera_cfg.fov_width
+        fov_height = self.cfg.sensor_camera_cfg.fov_height
+        # convert into cm
+        fov_width *= 100.0
+        fov_height *= 100.0
+
+        # use a fixed focal_length value to compute horizontal and vertical aperture
+        # this way we can easily try out different focal length values to adjust the zoom.
+        focal_length = 1
+        horizontal_aperture = fov_width * focal_length / (self.cfg.sensor_camera_cfg.focus_distance * 100)
+        vertical_aperture = fov_height * focal_length / (self.cfg.sensor_camera_cfg.focus_distance * 100)
+
+        self.camera_cfg: TiledCameraCfg = TiledCameraCfg(
+            prim_path=prim_path,
+            update_period=self.cfg.sensor_camera_cfg.update_period,
+            offset=TiledCameraCfg.OffsetCfg(
+                pos=self.cfg.sensor_camera_cfg.camera_pos_offset,
+                rot=self.cfg.sensor_camera_cfg.camera_rot_offset,
+                convention="opengl",
+            ),  # need to use opengl convention, since IsaacLab converts it into the opengl convention for the camera -> x and y are switched
+            width=self.cfg.sensor_camera_cfg.resolution[0],
+            height=self.cfg.sensor_camera_cfg.resolution[1],
+            data_types=self.cfg.sensor_camera_cfg.data_types,
+            update_latest_camera_pose=self.cfg.sensor_camera_cfg.update_latest_camera_pose,  # needed for FEM based marker sim
+            spawn=sim_utils.PinholeCameraCfg(
+                # use user-defined focal length to set proper zoom factor
+                focal_length=self.cfg.sensor_camera_cfg.focal_length,
+                focus_distance=self.cfg.sensor_camera_cfg.focus_distance,
+                horizontal_aperture=horizontal_aperture,
+                vertical_aperture=vertical_aperture,
+                clipping_range=self.cfg.sensor_camera_cfg.clipping_range,
+            ),
+            depth_clipping_behavior="max",
+        )
+        return TiledCamera(cfg=self.camera_cfg)
 
     """
     Internal simulation callbacks.

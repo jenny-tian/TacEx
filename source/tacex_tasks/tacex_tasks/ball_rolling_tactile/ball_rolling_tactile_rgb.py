@@ -49,7 +49,7 @@ from tacex_assets import TACEX_ASSETS_DATA_DIR
 from tacex_assets.robots.franka.franka_gsmini_single_rigid import (
     FRANKA_PANDA_ARM_SINGLE_GSMINI_HIGH_PD_RIGID_CFG,
 )
-from tacex_assets.sensors.gelsight_mini.gsmini_cfg import GelSightMiniCfg
+from tacex_assets.sensors.gelsight_mini.generic_gsmini_cfg import GeneralGelSightMiniCfg
 
 from tacex_tasks.utils import DirectLiveVisualizer
 
@@ -234,6 +234,8 @@ class BallRollingTactileRGBCfg(DirectRLEnvCfg):
     )
 
     ik_controller_cfg = DifferentialIKControllerCfg(command_type="pose", use_relative_mode=True, ik_method="dls")
+    ee_pos_offset = [0.0, 0.0, 0.0]
+    ee_rot_offset = [0.0, 1.0, 0.0, 0.0]
 
     # plate
     plate: RigidObjectCfg = RigidObjectCfg(
@@ -265,7 +267,7 @@ class BallRollingTactileRGBCfg(DirectRLEnvCfg):
                 prim_path="/World/envs/env_.*/Robot/panda_hand",
                 name="end_effector",
                 offset=OffsetCfg(
-                    pos=(0.0, 0.0, 0.131),  # 0ffset from panda hand frame origin to gelpad top
+                    pos=(0.0, 0.0, 0.11765),  # 0ffset from panda hand frame origin to gelpad top
                     rot=(0.0, 0.0, 1.0, 0.0),
                     # rot=(0, 0.92388, -0.38268, 0) # our panda hand asset has rotation from (180,0,-45) -> we subtract 180 for defining the rotation limits
                 ),
@@ -292,24 +294,24 @@ class BallRollingTactileRGBCfg(DirectRLEnvCfg):
     )
 
     # sensors
-    gsmini = GelSightMiniCfg(
+    gsmini = GeneralGelSightMiniCfg(
         prim_path="/World/envs/env_.*/Robot/gelsight_mini_case",
-        sensor_camera_cfg=GelSightMiniCfg.SensorCameraCfg(
-            prim_path_appendix="/Camera",
+        sensor_camera_cfg=GeneralGelSightMiniCfg.SensorCameraCfg(
+            prim_name="Camera",
             update_period=0,
-            resolution=(32, 32),  # (48, 64),
+            resolution=(32, 32),
             data_types=["depth"],
             clipping_range=(
-                0.015,
-                0.029,
-            ),  # (0.024, 0.029), make min value little bit smaller, due to penetration issues
+                0.024,
+                0.034,
+            ),
         ),
         device="cuda",
         debug_vis=True,  # for being able to see sensor output in the gui
         # update Taxim cfg
         optical_sim_cfg=TaximSimulatorCfg(
-            calib_folder_path=f"{TACEX_ASSETS_DATA_DIR}/Sensors/GelSight_Mini/calibs/640x480",
-            gelpad_height=GelSightMiniCfg().gelpad_dimensions.height,
+            calib_folder_path=f"{TACEX_ASSETS_DATA_DIR}/Sensors/GelSight_Mini/calibs/taxim/640x480",
+            gelpad_height=GeneralGelSightMiniCfg().gelpad_dimensions.height,
             gelpad_to_camera_min_distance=0.024,
             with_shadow=False,
             tactile_img_res=(32, 32),
@@ -340,7 +342,7 @@ class BallRollingTactileRGBCfg(DirectRLEnvCfg):
         #         debug_vis=False,
         #     )
         # ),
-        data_types=["tactile_rgb"],  # marker_motion
+        data_types=["tactile_rgb", "height_map"],  # marker_motion
     )
 
     # noise models
@@ -362,13 +364,13 @@ class BallRollingTactileRGBCfg(DirectRLEnvCfg):
         "centering_error": {"weight": -0.05},
         "off_the_ground_penalty": {"weight": -15, "max_height": 0.025},
         "height_reward": {
-            "weight": 0.15,
+            "weight": 1.15,
             "std": 0.4901,
             "alpha": 0.00067,
-            "target_height_cm": 1.225,
+            "target_height_cm": 1.075,  # 1.225,
             "min_height": 0.002,
-        },  # target height: 1cm + 0.25cm - 0.125cm
-        "orient_reward": {"weight": -1.25},
+        },  # target height: ball_height + base_plate_height/2 + desired_indentation_depth = 1cm + 0.125cm - 0.05cm
+        "orient_reward": {"weight": -0.5},
         # for solving the task
         "ee_goal_tracking": {"weight": 0.75, "std": 0.2, "std_fine": 0.36},
         "obj_goal_tracking": {"weight": 0.75, "std": 0.6},  # 0.2
@@ -398,7 +400,7 @@ class BallRollingTactileRGBCfg(DirectRLEnvCfg):
     state_space = 0
     action_scale = 0.05  # [cm]
 
-    ball_radius = 0.005  # don't change, because rewards (e.g. height reward) are tuned for this ball size
+    ball_radius = 0.005  # if you change, then also change rewards (e.g. height reward is tuned for this ball size)
 
     x_bounds = (0.2, 0.8)
     y_bounds = (-0.4, 0.4)
@@ -461,19 +463,17 @@ class BallRollingTactileRGBEnv(DirectRLEnv):
             cfg=self.cfg.ik_controller_cfg, num_envs=self.num_envs, device=self.device
         )
         # Obtain the frame index of the end-effector
-        body_ids, body_names = self._robot.find_bodies("panda_hand")
+        body_ids, _ = self._robot.find_bodies("TCP")
         # save only the first body index
         self._body_idx = body_ids[0]
-        self._body_name = body_names[0]
 
         # For a fixed base robot, the frame index is one less than the body index.
         # This is because the root body is not included in the returned Jacobians.
         self._jacobi_body_idx = self._body_idx - 1
 
-        # ee offset w.r.t panda hand -> based on the asset
-        self._offset_pos = torch.tensor([0.0, 0.0, 0.131], device=self.device).repeat(self.num_envs, 1)
-        self._offset_rot = torch.tensor([0.0, 0.0, 1.0, 0.0], device=self.device).repeat(self.num_envs, 1)
-        # self._offset_rot = torch.tensor([0, 0.92388, -0.38268, 0], device=self.device).repeat(self.num_envs, 1)
+        # ee offset w.r.t TCP -> TCP is defined so that z-axis shows down. In our case here we want z to show upwards
+        self._ee_pos_offset = torch.tensor(self.cfg.ee_pos_offset, device=self.device).repeat(self.num_envs, 1)
+        self._ee_rot_offset = torch.tensor(self.cfg.ee_rot_offset, device=self.device).repeat(self.num_envs, 1)
         # ---
 
         # create auxiliary variables for computing applied action, observations and rewards
@@ -652,14 +652,13 @@ class BallRollingTactileRGBEnv(DirectRLEnv):
 
     def _apply_action(self):
         # obtain quantities from simulation
-        ee_pos_curr_b, ee_quat_curr_b = self._compute_frame_pose()
+        jacobian = self._robot.root_physx_view.get_jacobians()[:, self._jacobi_body_idx, :, :]
         joint_pos = self._robot.data.joint_pos[:, :]
-        # compute the delta in joint-space
-        if ee_pos_curr_b.norm() != 0:
-            jacobian = self._compute_frame_jacobian()
-            joint_pos_des = self._ik_controller.compute(ee_pos_curr_b, ee_quat_curr_b, jacobian, joint_pos)
-        else:
-            joint_pos_des = joint_pos.clone()
+        ee_pos_curr_b, ee_quat_curr_b = self._compute_frame_pose()
+
+        # compute the joint commands
+        joint_pos_des = self._ik_controller.compute(ee_pos_curr_b, ee_quat_curr_b, jacobian, joint_pos)
+
         self._robot.set_joint_position_target(joint_pos_des)
 
         # pass
@@ -951,62 +950,27 @@ class BallRollingTactileRGBEnv(DirectRLEnv):
     Helper Functions for IK control (from task_space_actions.py of IsaacLab).
     """
 
-    @property
-    def jacobian_w(self) -> torch.Tensor:
-        return self._robot.root_physx_view.get_jacobians()[:, self._jacobi_body_idx, :, :]
-
-    @property
-    def jacobian_b(self) -> torch.Tensor:
-        jacobian = self.jacobian_w
-        base_rot = self._robot.data.root_link_quat_w
-        base_rot_matrix = math_utils.matrix_from_quat(math_utils.quat_inv(base_rot))
-        jacobian[:, :3, :] = torch.bmm(base_rot_matrix, jacobian[:, :3, :])
-        jacobian[:, 3:, :] = torch.bmm(base_rot_matrix, jacobian[:, 3:, :])
-        return jacobian
-
     def _compute_frame_pose(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Computes the pose of the target frame in the root frame.
 
         Returns:
             A tuple of the body's position and orientation in the root frame.
         """
-        # obtain quantities from simulation
-        ee_pos_w = self._robot.data.body_link_pos_w[:, self._body_idx]
-        ee_quat_w = self._robot.data.body_link_quat_w[:, self._body_idx]
-        root_pos_w = self._robot.data.root_link_pos_w
-        root_quat_w = self._robot.data.root_link_quat_w
-        # compute the pose of the body in the root frame
-        ee_pose_b, ee_quat_b = math_utils.subtract_frame_transforms(root_pos_w, root_quat_w, ee_pos_w, ee_quat_w)
-        # account for the offset
-        # if self.cfg.body_offset is not None:
-        ee_pose_b, ee_quat_b = math_utils.combine_frame_transforms(
-            ee_pose_b, ee_quat_b, self._offset_pos, self._offset_rot
+        ee_pose_w = self._robot.data.body_pose_w[:, self._body_idx]
+        root_pose_w = self._robot.data.root_pose_w
+        # compute ee frame in root frame
+        ee_frame_pos_b, ee_frame_orient_b = math_utils.subtract_frame_transforms(
+            root_pose_w[:, 0:3],
+            root_pose_w[:, 3:7],
+            ee_pose_w[:, 0:3],
+            ee_pose_w[:, 3:7],
+        )
+        # apply ee offset
+        ee_frame_pos_b, ee_frame_orient_b = math_utils.combine_frame_transforms(
+            ee_frame_pos_b, ee_frame_orient_b, self._ee_pos_offset, self._ee_rot_offset
         )
 
-        return ee_pose_b, ee_quat_b
-
-    def _compute_frame_jacobian(self):
-        """Computes the geometric Jacobian of the target frame in the root frame.
-
-        This function accounts for the target frame offset and applies the necessary transformations to obtain
-        the right Jacobian from the parent body Jacobian.
-        """
-        # read the parent jacobian
-        jacobian = self.jacobian_b
-
-        # account for the offset
-        # if self.cfg.body_offset is not None:
-        # Modify the jacobian to account for the offset
-        # -- translational part
-        # v_link = v_ee + w_ee x r_link_ee = v_J_ee * q + w_J_ee * q x r_link_ee
-        #        = (v_J_ee + w_J_ee x r_link_ee ) * q
-        #        = (v_J_ee - r_link_ee_[x] @ w_J_ee) * q
-        jacobian[:, 0:3, :] += torch.bmm(-math_utils.skew_symmetric_matrix(self._offset_pos), jacobian[:, 3:, :])
-        # -- rotational part
-        # w_link = R_link_ee @ w_ee
-        jacobian[:, 3:, :] = torch.bmm(math_utils.matrix_from_quat(self._offset_rot), jacobian[:, 3:, :])
-
-        return jacobian
+        return ee_frame_pos_b, ee_frame_orient_b
 
     ###################################
 

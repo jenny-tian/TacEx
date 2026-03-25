@@ -48,8 +48,7 @@ FRANKA_PANDA_ARM_SINGLE_GSMINI_RIGID_CFG = ArticulationCfg(
             "panda_joint4": -2.810,
             "panda_joint5": 0.0,
             "panda_joint6": 3.037,
-            "panda_joint7": 0.741,
-            # "panda_finger_joint.*": 0.04,
+            "panda_joint7": -0.785,  # 0.741,
         },
     ),
     actuators={

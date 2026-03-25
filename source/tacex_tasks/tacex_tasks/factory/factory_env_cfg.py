@@ -13,7 +13,7 @@ from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMater
 from isaaclab.utils import configclass
 
 from tacex_assets import TACEX_ASSETS_DATA_DIR
-from tacex_assets.sensors.gelsight_mini.gsmini_cfg import GelSightMiniCfg
+from tacex_assets.sensors.gelsight_mini import GELSIGHT_MINI_TAXIM_FEM_CFG
 
 from .factory_tasks_cfg import FactoryTask, GearMesh, NutThread, PegInsert
 
@@ -189,10 +189,10 @@ class FactoryEnvCfg(DirectRLEnvCfg):
         },
     )
 
-    gsmini_left = GelSightMiniCfg(
+    gsmini_left = GELSIGHT_MINI_TAXIM_FEM_CFG.replace(
         prim_path="/World/envs/env_.*/Robot/gelsight_mini_case_left",
-        sensor_camera_cfg=GelSightMiniCfg.SensorCameraCfg(
-            prim_path_appendix="/Camera",
+        sensor_camera_cfg=GELSIGHT_MINI_TAXIM_FEM_CFG.SensorCameraCfg(
+            prim_name="Camera",
             update_period=0,
             resolution=(32, 32),
         ),

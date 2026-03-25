@@ -15,12 +15,11 @@ parser = argparse.ArgumentParser(
     description="Control Franka, which is equipped with one GelSight Mini Sensor, by moving the Frame in the GUI"
 )
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to spawn.")
-parser.add_argument("--sys", type=bool, default=True, help="Whether to track system utilization.")
 parser.add_argument(
     "--debug_vis",
     default=True,
     action="store_true",
-    help="Whether to render tactile images in the# append AppLauncher cli args",
+    help="If tactile images should be rendered inside the GUI.",
 )
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
@@ -77,7 +76,7 @@ from tacex_assets import TACEX_ASSETS_DATA_DIR
 from tacex_assets.robots.franka.franka_gsmini_single_rigid import (
     FRANKA_PANDA_ARM_SINGLE_GSMINI_HIGH_PD_RIGID_CFG,
 )
-from tacex_assets.sensors.gelsight_mini.gsmini_cfg import GelSightMiniCfg
+from tacex_assets.sensors.gelsight_mini import GELSIGHT_MINI_TAXIM_FOTS_CFG
 
 
 class CustomEnvWindow(BaseEnvWindow):
@@ -171,17 +170,25 @@ def create_shapes_cfg() -> dict[str, RigidObjectCfg]:
         shapes: dict of names and corresponding RigidObjectCfg's
     """
     shapes = {}
-    usd_files_path = list(Path(f"{TACEX_ASSETS_DATA_DIR}/Props/tactile_test_shapes/").glob("*.usd"))
+    usd_files_path = sorted(list(Path(f"{TACEX_ASSETS_DATA_DIR}/Props/tactile_test_shapes/").glob("*.usd")))
 
     for i, file_path in enumerate(usd_files_path):
         file_name = file_path.stem
 
+        if i == 0:
+            pos = [0.5, 0.0, 0.02]
+        else:
+            pos = [
+                0.5 - 0.25,
+                -0.025 * len(usd_files_path) / 2 + 0.025 * i,
+                0.02,
+            ]
+
         shapes[file_name] = RigidObjectCfg(
             prim_path=f"/World/envs/env_.*/{file_name}",
-            init_state=RigidObjectCfg.InitialStateCfg(pos=[0.5, 0.025 * i, 0.02]),
+            init_state=RigidObjectCfg.InitialStateCfg(pos=pos),
             spawn=sim_utils.UsdFileCfg(
                 usd_path=str(file_path),
-                # scale=(0.8, 0.8, 0.8),
                 rigid_props=sim_utils.RigidBodyPropertiesCfg(
                     solver_position_iteration_count=16,
                     solver_velocity_iteration_count=1,
@@ -198,7 +205,7 @@ def create_shapes_cfg() -> dict[str, RigidObjectCfg]:
 
 
 @configclass
-class BallRollingEnvCfg(DirectRLEnvCfg):
+class ShapeTouchEnvCfg(DirectRLEnvCfg):
     # viewer settings
     viewer: ViewerCfg = ViewerCfg()
     # viewer.eye = (0.6, 0.1, 0.025)
@@ -216,8 +223,7 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
         dt=1 / 60,
         render_interval=decimation,
         physx=PhysxCfg(
-            enable_ccd=True,  # needed for more stable ball_rolling
-            # bounce_threshold_velocity=10000,
+            enable_ccd=True,
         ),
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
@@ -269,10 +275,10 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
     marker_cfg.markers["frame"].scale = (0.01, 0.01, 0.01)
     marker_cfg.prim_path = "/Visuals/FrameTransformer"
 
-    gsmini = GelSightMiniCfg(
+    gsmini = GELSIGHT_MINI_TAXIM_FOTS_CFG.replace(
         prim_path="/World/envs/env_.*/Robot/gelsight_mini_case",
-        sensor_camera_cfg=GelSightMiniCfg.SensorCameraCfg(
-            prim_path_appendix="/Camera",
+        sensor_camera_cfg=GELSIGHT_MINI_TAXIM_FOTS_CFG.SensorCameraCfg(
+            prim_name="Camera",
             update_period=0,
             resolution=(320, 240),
             data_types=["depth"],
@@ -282,7 +288,7 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
         debug_vis=True,  # for being able to see sensor output in the gui
         # update FOTS cfg
         marker_motion_sim_cfg=FOTSMarkerSimulatorCfg(
-            lamb=[0.00125, 0.00021, 0.00038],
+            lamb=[0, 0.00021, 0.00038],
             # mm_to_pixel=10.0,
             pyramid_kernel_size=[51, 21, 11, 5],  # [11, 11, 11, 11, 11, 5],
             kernel_size=5,
@@ -300,18 +306,16 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
             frame_transformer_cfg=FrameTransformerCfg(
                 prim_path="/World/envs/env_.*/Robot/gelsight_mini_gelpad",  # "/World/envs/env_.*/Robot/gelsight_mini_case",
                 # you have to make sure that the asset frame center is correct, otherwise wrong shear/twist motions
-                source_frame_offset=OffsetCfg(
-                    # rot=(0.0, 0.92388, -0.38268, 0.0) # values for the robot used here
-                ),
+                source_frame_offset=OffsetCfg(),
                 target_frames=[
                     FrameTransformerCfg.FrameCfg(prim_path=f"/World/envs/env_.*/{obj_name}")
                     for obj_name in list(shapes.keys())
                 ],
-                debug_vis=True,
+                debug_vis=False,
                 visualizer_cfg=marker_cfg,
             ),
         ),
-        data_types=["marker_motion", "tactile_rgb"],
+        data_types=["marker_motion", "tactile_rgb", "height_map", "camera_depth"],
     )
     # change settings for optical sim
     gsmini.optical_sim_cfg = gsmini.optical_sim_cfg.replace(
@@ -321,6 +325,8 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
     )
 
     ik_controller_cfg = DifferentialIKControllerCfg(command_type="pose", use_relative_mode=False, ik_method="dls")
+    ee_pos_offset = [0.0, 0.0, 0.0]
+    ee_rot_offset = [0.0, 1.0, 0.0, 0.0]
 
     main_pose = [0.5, 0.0, 0.02, 1, 0, 0, 0]
 
@@ -331,10 +337,10 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
     state_space = 0
 
 
-class BallRollingEnv(DirectRLEnv):
-    cfg: BallRollingEnvCfg
+class ShapeTouchEnv(DirectRLEnv):
+    cfg: ShapeTouchEnvCfg
 
-    def __init__(self, cfg: BallRollingEnvCfg, render_mode: str | None = None, **kwargs):
+    def __init__(self, cfg: ShapeTouchEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
 
         # --- for IK ---
@@ -343,24 +349,21 @@ class BallRollingEnv(DirectRLEnv):
             cfg=self.cfg.ik_controller_cfg, num_envs=self.num_envs, device=self.device
         )
         # Obtain the frame index of the end-effector
-        body_ids, body_names = self._robot.find_bodies("panda_hand")
-        # save only the first body index
-        self._body_idx = body_ids[0]
-        self._body_name = body_names[0]
+        body_ids, _ = self._robot.find_bodies("TCP")
+        # only save the first body index
+        self._body_tcp_idx = body_ids[0]
 
         # For a fixed base robot, the frame index is one less than the body index.
         # This is because the root body is not included in the returned Jacobians.
-        self._jacobi_body_idx = self._body_idx - 1
-        # self._jacobi_joint_ids = self._joint_ids # we take every joint
+        self._jacobi_body_idx = self._body_tcp_idx - 1
 
-        # ee offset w.r.t panda hand -> based on the asset
-        self._offset_pos = torch.tensor([0.0, 0.0, 0.131], device=self.device).repeat(self.num_envs, 1)
-        self._offset_rot = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).repeat(self.num_envs, 1)
+        # ee offset w.r.t TCP -> TCP is defined so that z-axis shows down. In our case here we want z to show upwards
+        self._ee_pos_offset = torch.tensor(self.cfg.ee_pos_offset, device=self.device).repeat(self.num_envs, 1)
+        self._ee_rot_offset = torch.tensor(self.cfg.ee_rot_offset, device=self.device).repeat(self.num_envs, 1)
         # ---
 
         # create buffer to store actions (= ik_commands)
         self.ik_commands = torch.zeros((self.num_envs, self._ik_controller.action_dim), device=self.device)
-        # self.ik_commands[:, 3:] = torch.tensor([0,1,0,0],device=self.device)
 
         self.step_count = 0
 
@@ -388,15 +391,13 @@ class BallRollingEnv(DirectRLEnv):
         marker_cfg.prim_path = "/Visuals/FrameTransformer"
         ee_frame_cfg = FrameTransformerCfg(
             prim_path="/World/envs/env_.*/Robot/panda_link0",
-            debug_vis=False,
+            debug_vis=True,
             visualizer_cfg=marker_cfg,
             target_frames=[
                 FrameTransformerCfg.FrameCfg(
-                    prim_path="/World/envs/env_.*/Robot/panda_hand",
+                    prim_path="/World/envs/env_.*/Robot/TCP",
                     name="end_effector",
-                    offset=OffsetCfg(
-                        pos=(0.0, 0.0, 0.131),  # 0.1034
-                    ),
+                    offset=OffsetCfg(pos=self.cfg.ee_pos_offset, rot=self.cfg.ee_rot_offset),
                 ),
             ],
         )
@@ -422,7 +423,7 @@ class BallRollingEnv(DirectRLEnv):
             prim_path="/Goal",
             size=0.01,
             position=np.array([0.5, 0.0, 0.021]),
-            orientation=np.array([0, 1, 0, 0]),
+            orientation=np.array([1, 0, 0, 0]),
             visible=False,
         )
 
@@ -445,15 +446,27 @@ class BallRollingEnv(DirectRLEnv):
 
     def _apply_action(self):
         # obtain quantities from simulation
-        ee_pos_curr_b, ee_quat_curr_b = self._compute_frame_pose()
+        jacobian = self._robot.root_physx_view.get_jacobians()[:, self._jacobi_body_idx, :, :]
+        ee_pose_w = self._robot.data.body_pose_w[:, self._body_tcp_idx]
+        root_pose_w = self._robot.data.root_pose_w
         joint_pos = self._robot.data.joint_pos[:, :]
 
-        # compute the delta in joint-space
-        if ee_pos_curr_b.norm() != 0:
-            jacobian = self._compute_frame_jacobian()
-            joint_pos_des = self._ik_controller.compute(ee_pos_curr_b, ee_quat_curr_b, jacobian, joint_pos)
-        else:
-            joint_pos_des = joint_pos.clone()
+        # compute ee frame in root frame
+        ee_pos_b, ee_quat_b = math_utils.subtract_frame_transforms(
+            root_pose_w[:, 0:3],
+            root_pose_w[:, 3:7],
+            ee_pose_w[:, 0:3],
+            ee_pose_w[:, 3:7],
+        )
+
+        # apply ee offset
+        ee_pos_b, ee_quat_b = math_utils.combine_frame_transforms(
+            ee_pos_b, ee_quat_b, self._ee_pos_offset, self._ee_rot_offset
+        )
+
+        # compute the joint commands
+        joint_pos_des = self._ik_controller.compute(ee_pos_b, ee_quat_b, jacobian, joint_pos)
+
         self._robot.set_joint_position_target(joint_pos_des)
 
         self.step_count += 1
@@ -476,10 +489,10 @@ class BallRollingEnv(DirectRLEnv):
         # set goal pos
         if self.goal_prim_view is not None:
             # move goal back to main area
-            goal_pos = self.main_pose[:, :3]
+            goal_pos = self.start_pose[:, :3]
             goal_pos[:, 2] += 0.001
 
-            goal_orient = torch.tensor([[0, 1, 0, 0]], device=self.device)
+            goal_orient = torch.tensor([[1, 0, 0, 0]], device=self.device)
             self.goal_prim_view.set_world_poses(positions=goal_pos, orientations=goal_orient)
 
         # reset robot state
@@ -493,69 +506,8 @@ class BallRollingEnv(DirectRLEnv):
     def _get_observations(self) -> dict:
         pass
 
-    """
-    Helper Functions for IK control (from task_space_actions.py of IsaacLab).
-    """
 
-    @property
-    def jacobian_w(self) -> torch.Tensor:
-        return self._robot.root_physx_view.get_jacobians()[:, self._jacobi_body_idx, :, :]
-
-    @property
-    def jacobian_b(self) -> torch.Tensor:
-        jacobian = self.jacobian_w
-        base_rot = self._robot.data.root_link_quat_w
-        base_rot_matrix = math_utils.matrix_from_quat(math_utils.quat_inv(base_rot))
-        jacobian[:, :3, :] = torch.bmm(base_rot_matrix, jacobian[:, :3, :])
-        jacobian[:, 3:, :] = torch.bmm(base_rot_matrix, jacobian[:, 3:, :])
-        return jacobian
-
-    def _compute_frame_pose(self) -> tuple[torch.Tensor, torch.Tensor]:
-        """Computes the pose of the target frame in the root frame.
-
-        Returns:
-            A tuple of the body's position and orientation in the root frame.
-        """
-        # obtain quantities from simulation
-        ee_pos_w = self._robot.data.body_link_pos_w[:, self._body_idx]
-        ee_quat_w = self._robot.data.body_link_quat_w[:, self._body_idx]
-        root_pos_w = self._robot.data.root_link_pos_w
-        root_quat_w = self._robot.data.root_link_quat_w
-        # compute the pose of the body in the root frame
-        ee_pose_b, ee_quat_b = math_utils.subtract_frame_transforms(root_pos_w, root_quat_w, ee_pos_w, ee_quat_w)
-        # account for the offset
-        # if self.cfg.body_offset is not None:
-        ee_pose_b, ee_quat_b = math_utils.combine_frame_transforms(
-            ee_pose_b, ee_quat_b, self._offset_pos, self._offset_rot
-        )
-
-        return ee_pose_b, ee_quat_b
-
-    def _compute_frame_jacobian(self):
-        """Computes the geometric Jacobian of the target frame in the root frame.
-
-        This function accounts for the target frame offset and applies the necessary transformations to obtain
-        the right Jacobian from the parent body Jacobian.
-        """
-        # read the parent jacobian
-        jacobian = self.jacobian_b
-
-        # account for the offset
-        # if self.cfg.body_offset is not None:
-        # Modify the jacobian to account for the offset
-        # -- translational part
-        # v_link = v_ee + w_ee x r_link_ee = v_J_ee * q + w_J_ee * q x r_link_ee
-        #        = (v_J_ee + w_J_ee x r_link_ee ) * q
-        #        = (v_J_ee - r_link_ee_[x] @ w_J_ee) * q
-        jacobian[:, 0:3, :] += torch.bmm(-math_utils.skew_symmetric_matrix(self._offset_pos), jacobian[:, 3:, :])
-        # -- rotational part
-        # w_link = R_link_ee @ w_ee
-        jacobian[:, 3:, :] = torch.bmm(math_utils.matrix_from_quat(self._offset_rot), jacobian[:, 3:, :])
-
-        return jacobian
-
-
-def run_simulator(env: BallRollingEnv):
+def run_simulator(env: ShapeTouchEnv):
     """Runs the simulation loop."""
     # for convenience, we directly turn on debug_vis
     if env.cfg.gsmini.debug_vis:
@@ -574,23 +526,22 @@ def run_simulator(env: BallRollingEnv):
 
     # Simulation loop
     while simulation_app.is_running():
+        positions, orientations = env.goal_prim_view.get_world_poses()
+        env.ik_commands[:, :3] = positions - env.scene.env_origins
+        env.ik_commands[:, 3:] = orientations
+
         # perform physics step
         env._pre_physics_step(None)
         env._apply_action()
         env.scene.write_data_to_sim()
         env.sim.step(render=False)
 
-        positions, orientations = env.goal_prim_view.get_world_poses()
-        env.ik_commands[:, :3] = positions - env.scene.env_origins
-        env.ik_commands[:, 3:] = orientations
+        # env.ik_commands = env.start_pose
 
         # update isaac buffers() -> also updates sensors
         env.scene.update(dt=env.physics_dt)
         # render scene for cameras (used by sensor)
         env.sim.render()
-
-    # )
-    #         env.gsmini.update(dt=env.physics_dt, force_recompute=True)
 
     env.close()
 
@@ -600,13 +551,13 @@ def run_simulator(env: BallRollingEnv):
 def main():
     """Main function."""
     # Define simulation env
-    env_cfg = BallRollingEnvCfg()
+    env_cfg = ShapeTouchEnvCfg()
     # override configurations with non-hydra CLI arguments
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     env_cfg.gsmini.debug_vis = args_cli.debug_vis
 
-    experiment = BallRollingEnv(env_cfg)
+    experiment = ShapeTouchEnv(env_cfg)
 
     # Now we are ready!
     print("[INFO]: Setup complete...")

@@ -215,7 +215,7 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
     gsmini = GELSIGHT_MINI_TAXIM_FEM_CFG.replace(
         prim_path="/World/envs/env_.*/Robot/gelsight_mini_case",
         sensor_camera_cfg=GELSIGHT_MINI_TAXIM_FEM_CFG.SensorCameraCfg(
-            prim_path_appendix="/Camera",
+            prim_name="Camera",
             update_period=0,
             resolution=(32, 24),
             data_types=["depth"],
