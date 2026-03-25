@@ -58,13 +58,11 @@ from tacex_assets.robots.franka.franka_gsmini_single_uipc import (
 from tacex_assets.sensors.gelsight_mini import GELSIGHT_MINI_TAXIM_CFG
 
 from tacex_uipc import (
-    UipcIsaacAttachments,
     UipcIsaacAttachmentsCfg,
-    UipcObject,
-    UipcObjectCfg,
     UipcRLEnv,
     UipcSimCfg,
 )
+from tacex_uipc.objects import UipcDeformableObject, UipcDeformableObjectCfg
 from tacex_uipc.utils import TetMeshCfg
 
 
@@ -95,9 +93,6 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
     viewer.eye = (1.9, 1.4, 0.3)
     viewer.lookat = (-1.5, -1.9, -1.1)
 
-    # viewer.origin_type = "env"
-    # viewer.env_idx = 50
-
     debug_vis = True
 
     ui_window_class_type = CustomEnvWindow
@@ -124,6 +119,7 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
         # logger_level="Info"
         ground_height=0.0025,
         contact=UipcSimCfg.Contact(d_hat=0.0001),
+        debug_vis=debug_vis,
     )
 
     # scene
@@ -178,15 +174,14 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
         edge_length_r=1 / 5,
         # epsilon_r=0.01
     )
-    ball = UipcObjectCfg(
+    ball = UipcDeformableObjectCfg(
         prim_path="/World/envs/env_.*/ball",
         init_state=AssetBaseCfg.InitialStateCfg(pos=[0.5, 0, 0.15]),  # rot=(0.72,-0.3,0.42,-0.45)
         spawn=sim_utils.UsdFileCfg(
-            # usd_path="/workspace/tacex/source/tacex_assets/tacex_assets/data/Sensors/GelSight_Mini/Gelpad_low_res.usd",
             usd_path=f"{TACEX_ASSETS_DATA_DIR}/Props/ball_wood.usd",
         ),
         mesh_cfg=mesh_cfg,
-        constitution_cfg=UipcObjectCfg.StableNeoHookeanCfg(),
+        constitution_cfg=UipcDeformableObjectCfg.StableNeoHookeanCfg(),
     )
 
     robot: ArticulationCfg = FRANKA_PANDA_ARM_SINGLE_GSMINI_HIGH_PD_UIPC_CFG.replace(
@@ -199,14 +194,22 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
         edge_length_r=1 / 15,
         # epsilon_r=0.01
     )
-    gelpad_cfg = UipcObjectCfg(
+    gelpad_cfg = UipcDeformableObjectCfg(
         prim_path="/World/envs/env_.*/Robot/gelsight_mini_gelpad",
-        mesh_cfg=mesh_cfg,
-        constitution_cfg=UipcObjectCfg.StableNeoHookeanCfg(),
+        # mesh_cfg=mesh_cfg,
+        mesh_cfg=None,  # use precomputed mesh
+        constitution_cfg=UipcDeformableObjectCfg.StableNeoHookeanCfg(),
+        constraint_cfg=UipcIsaacAttachmentsCfg(
+            constraint_strength_ratio=100.0,
+            body_name="gelsight_mini_case",
+            debug_vis=debug_vis,
+            compute_attachment_data=True,
+            isaaclab_rigid_body_prim_path="/World/envs/env_.*/Robot",
+        ),
     )
-    gelpad_attachment_cfg = UipcIsaacAttachmentsCfg(
-        constraint_strength_ratio=100.0, body_name="gelsight_mini_case", debug_vis=True, compute_attachment_data=True
-    )
+    # gelpad_attachment_cfg = UipcIsaacAttachmentsCfg(
+    #     constraint_strength_ratio=100.0, body_name="gelsight_mini_case", debug_vis=True, compute_attachment_data=True
+    # )
 
     gsmini = GELSIGHT_MINI_TAXIM_CFG.replace(
         prim_path="/World/envs/env_.*/Robot/gelsight_mini_case",
@@ -322,7 +325,7 @@ class BallRollingEnv(UipcRLEnv):
         )
 
         VisualCuboid(
-            prim_path="/World/envs/env_0/goal",
+            prim_path="/Goal",
             size=0.01,
             position=np.array([0.5, 0.0, 0.15]),
             color=np.array([255.0, 0.0, 0.0]),
@@ -333,16 +336,15 @@ class BallRollingEnv(UipcRLEnv):
         light_cfg.func("/World/Light", light_cfg)
 
         # --- UIPC simulation setup ---
-
         # gelpad simulated via uipc
-        self._uipc_gelpad = UipcObject(self.cfg.gelpad_cfg, self.uipc_sim)
-
-        self.ball = UipcObject(self.cfg.ball, self.uipc_sim)
-
-        # create attachment
-        self.attachment = UipcIsaacAttachments(
-            self.cfg.gelpad_attachment_cfg, self._uipc_gelpad, self.scene.articulations["robot"]
+        self._uipc_gelpad = UipcDeformableObject(
+            self.cfg.gelpad_cfg,
+            self.uipc_sim,
         )
+        # set rigid object for attachment-constraint
+        self._uipc_gelpad.constraint.isaaclab_rigid_object = self.scene.articulations["robot"]
+
+        self.ball = UipcDeformableObject(self.cfg.ball, self.uipc_sim)
 
     # MARK: pre-physics step calls
 
@@ -404,7 +406,7 @@ def run_simulator(env: BallRollingEnv):
     print(f"Starting simulation with {env.num_envs} envs")
     env.reset()
 
-    env.goal_prim_view = XFormPrim(prim_paths_expr="/World/envs/env_.*/goal", name="goals", usd=True)
+    env.goal_prim_view = XFormPrim(prim_paths_expr="/Goal", name="Goal", usd=True)
 
     # Simulation loop
     while simulation_app.is_running():

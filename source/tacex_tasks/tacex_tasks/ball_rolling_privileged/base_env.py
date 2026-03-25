@@ -36,9 +36,6 @@ from tacex_assets.robots.franka.franka_gsmini_single_rigid import (
     FRANKA_PANDA_ARM_SINGLE_GSMINI_HIGH_PD_RIGID_CFG,
 )
 
-#  from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
-# from isaaclab.envs.mdp.actions.actions_cfg import DifferentialInverseKinematicsActionCfg
-
 
 from isaaclab.markers import CUBOID_MARKER_CFG  # isort: skip
 

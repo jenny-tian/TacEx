@@ -21,7 +21,7 @@ args_cli = parser.parse_args()
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
-# simulation_app.set_setting("/app/useFabricSceneDelegate", True)
+simulation_app.set_setting("/app/useFabricSceneDelegate", True)
 # simulation_app.set_setting("/app/usdrt/scene_delegate/enableProxyCubes", False)
 # simulation_app.set_setting("/app/usdrt/scene_delegate/geometryStreaming/enabled", False)
 # simulation_app.set_setting("/omnihydra/parallelHydraSprimSync", False)
@@ -42,10 +42,9 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import AssetBaseCfg
 from isaaclab.utils.timer import Timer
 
-from tacex_uipc import UipcObject, UipcObjectCfg, UipcSim, UipcSimCfg
+from tacex_uipc import UipcSim, UipcSimCfg
+from tacex_uipc.objects import UipcDeformableObject, UipcDeformableObjectCfg, UipcRigidObject, UipcRigidObjectCfg
 from tacex_uipc.utils import TetMeshCfg
-
-# import vtk
 
 
 def design_scene():
@@ -97,10 +96,11 @@ def main():
     # Initialize uipc sim
     uipc_cfg = UipcSimCfg(
         # logger_level="Info",
+        newton=UipcSimCfg.Newton(max_iter=100),
         contact=UipcSimCfg.Contact(
             # enable=False,
             d_hat=0.01,
-        )
+        ),
     )
     uipc_sim = UipcSim(uipc_cfg)
 
@@ -113,42 +113,38 @@ def main():
     print("Mesh cfg ", mesh_cfg)
 
     # spawn uipc cube
-    # tet_cube_asset_path = "/workspace/tacex/source/tacex_assets/tacex_assets/data/Sensors/GelSight_Mini/Gelpad_low_res.usd"
     tet_cube_asset_path = pathlib.Path(__file__).parent.resolve() / "assets" / "cube.usd"
-    cube_cfg = UipcObjectCfg(
+    soft_cfg = UipcDeformableObjectCfg(
         prim_path="/World/Objects/Cube0",
         init_state=AssetBaseCfg.InitialStateCfg(pos=[0, 0, 2.25]),  # rot=(0.72,-0.3,0.42,-0.45)
         spawn=sim_utils.UsdFileCfg(
             usd_path=str(tet_cube_asset_path),
             # scale=(0.1, 0.1, 0.1)
         ),
-        # mesh_cfg=mesh_cfg,
-        constitution_cfg=UipcObjectCfg.StableNeoHookeanCfg(),  # UipcObjectCfg.AffineBodyConstitutionCfg() #
+        mesh_cfg=mesh_cfg,
+        # mesh_cfg=None,
+        constitution_cfg=UipcDeformableObjectCfg.StableNeoHookeanCfg(),
+        debug_vis=True,
+        debug_deformation_vis=True,
     )
-    cube = UipcObject(cube_cfg, uipc_sim)
+    soft_obj = UipcDeformableObject(soft_cfg, uipc_sim)
 
+    # spawn a ball instead
     # tet_ball_asset_path = pathlib.Path(__file__).parent.resolve() / "assets" / "ball.usd"
-    # ball_cfg = UipcObjectCfg(
+    # soft_cfg = UipcDeformableObjectCfg(
     #     prim_path="/World/Objects/ball",
-    #     init_state=AssetBaseCfg.InitialStateCfg(pos=[0, 0, 1.0]), #rot=(0.72,-0.3,0.42,-0.45)
-    #     spawn=sim_utils.UsdFileCfg(
-    #         usd_path=str(tet_ball_asset_path),
-    #         scale=(1.0, 1.0, 1.0)
-    #     ),
+    #     init_state=AssetBaseCfg.InitialStateCfg(pos=[0, 0, 1.0]),  # rot=(0.72,-0.3,0.42,-0.45)
+    #     spawn=sim_utils.UsdFileCfg(usd_path=str(tet_ball_asset_path), scale=(1.0, 1.0, 1.0)),
     #     mesh_cfg=mesh_cfg,
-    #     constitution_cfg=UipcObjectCfg.StableNeoHookeanCfg()
+    #     constitution_cfg=UipcDeformableObjectCfg.StableNeoHookeanCfg(),
+    #     debug_deformation_vis=True,
+    #     debug_vis=True,
     # )
-    # ball = UipcObject(ball_cfg, uipc_sim)
+    # soft_obj = UipcDeformableObject(soft_cfg, uipc_sim)
 
-    tet_cube_asset_path = pathlib.Path(__file__).parent.resolve() / "assets" / "cube.usd"
-
-    num_cubes = 5  # 30
+    num_cubes = 3
     cubes = []
     for i in range(num_cubes):
-        if i % 2 == 1:
-            constitution_type = UipcObjectCfg.AffineBodyConstitutionCfg(kinematic=True)
-        else:
-            constitution_type = UipcObjectCfg.StableNeoHookeanCfg()
         # might lead to intersections due to random pos
         # pos = (random.uniform(-1.0, 1.0), random.uniform(-1.0, 1.0), random.uniform(2.5, 6.0))
         pos = (0, 0, 3.0 + 0.3 * i)
@@ -158,32 +154,48 @@ def main():
             random.uniform(-1.0, 1.0),
             random.uniform(-1.0, 1.0),
         )
-        cube_cfg = UipcObjectCfg(
+
+        # alternate between rigid and soft cubes
+        if i % 2 == 1:
+            uipc_obj_cfg_class = UipcRigidObjectCfg
+            constitution_cfg = UipcRigidObjectCfg.AffineBodyConstitutionCfg()
+            uipc_obj_class = UipcRigidObject
+        else:
+            uipc_obj_cfg_class = UipcDeformableObjectCfg
+            constitution_cfg = UipcDeformableObjectCfg.StableNeoHookeanCfg()
+            uipc_obj_class = UipcDeformableObject
+
+        cube_cfg = uipc_obj_cfg_class(
             prim_path=f"/World/Objects/Cube{i + 1}",
             init_state=AssetBaseCfg.InitialStateCfg(pos=pos, rot=rot),  # rot=(0.72,-0.3,0.42,-0.45)
             spawn=sim_utils.UsdFileCfg(usd_path=str(tet_cube_asset_path), scale=(0.15, 0.15, 0.15)),
-            constitution_cfg=constitution_type,
+            constitution_cfg=constitution_cfg,
+            mesh_cfg=None,
+            debug_vis=True,
         )
-        cubeX = UipcObject(cube_cfg, uipc_sim)
+        cubeX = uipc_obj_class(cube_cfg, uipc_sim)
         cubes.append(cubeX)
 
     rot = (random.uniform(-1.0, 1.0), random.uniform(-1.0, 1.0), random.uniform(-1.0, 1.0), random.uniform(-1.0, 1.0))
-    cube_cfg = UipcObjectCfg(
+    # rot = [1, 0, 0, 0]
+    rigid_cube_cfg = UipcRigidObjectCfg(
         prim_path="/World/Objects/CubeTop",
         init_state=AssetBaseCfg.InitialStateCfg(pos=[0, 0, 3.65 + 0.3 * num_cubes], rot=rot),
         spawn=sim_utils.UsdFileCfg(usd_path=str(tet_cube_asset_path), scale=(1.0, 1.0, 1.0)),
-        # mesh_cfg=mesh_cfg,
-        constitution_cfg=UipcObjectCfg.AffineBodyConstitutionCfg(),  # UipcObjectCfg.StableNeoHookeanCfg()
+        mesh_cfg=mesh_cfg,
+        debug_vis=True,
+        constitution_cfg=UipcRigidObjectCfg.AffineBodyConstitutionCfg(),
     )
-    cube_top = UipcObject(cube_cfg, uipc_sim)
-
-    # Play the simulator
-    sim.reset()
+    rigid_cube = UipcRigidObject(rigid_cube_cfg, uipc_sim)
 
     # only after Isaac Sim got reset (= objects init), otherwise wold init is false
     # because _initialize_impl() of the object is called in the sim.reset() method
-    # and setup_scene() relies on objects being _intialized_impl()
+    # and setup_scene() relies on objects being _initialized_impl()
+    # -> setup_sim calls world.init, which only works if the uipc were already created! #todo adjust code?
     uipc_sim.setup_sim()
+
+    # Play the simulator
+    sim.reset()
 
     # Now we are ready!
     print("[INFO]: Setup complete...")
@@ -225,20 +237,24 @@ def main():
             start_uipc_test = True
             print("Start uipc simulation by pressing Play")
 
-        if step % 250 == 0:  # 500
+        if step % 200 == 0:
             print("")
             print("====================================================================================")
             print("====================================================================================")
             print("Reset simulation")
             if start_uipc_test:
-                print("systems offsets ", uipc_sim._system_vertex_offsets)
-                cube.write_vertex_positions_to_sim(vertex_positions=cube.init_vertex_pos)
-                cube_top.write_vertex_positions_to_sim(vertex_positions=cube_top.init_vertex_pos)
+                soft_obj.write_nodal_pos_to_sim(soft_obj.data.default_nodal_state_w[:, :, :3])
+                rigid_cube.write_pose_to_sim(rigid_cube.data.default_root_state)
 
-                small_cube_id = random.randint(0, num_cubes - 1)
-                cubes[small_cube_id].write_vertex_positions_to_sim(
-                    vertex_positions=cubes[small_cube_id].init_vertex_pos
-                )
+                # reset a random small cube
+                if num_cubes > 0:
+                    small_cube_id = random.randint(0, num_cubes - 1)
+                    if small_cube_id % 2 == 1:
+                        cubes[small_cube_id].write_pose_to_sim(cubes[small_cube_id].data.default_root_state)
+                    else:
+                        cubes[small_cube_id].write_nodal_pos_to_sim(
+                            cubes[small_cube_id].data.default_nodal_state_w[:, :, :3]
+                        )
 
                 uipc_sim.reset()
                 sim.render()

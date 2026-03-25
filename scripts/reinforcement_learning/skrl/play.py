@@ -117,6 +117,9 @@ import tacex_tasks
 
 # PLACEHOLDER: Extension template (do not remove this comment)
 
+# PLACEHOLDER: Extension template (do not remove this comment)
+
+
 # config shortcuts
 if args_cli.agent is None:
     algorithm = args_cli.algorithm.lower()

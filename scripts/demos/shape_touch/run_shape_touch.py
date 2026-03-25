@@ -1,6 +1,7 @@
 """Collecting tactile data of the shapes from https://danfergo.github.io/gelsight-simulation/.
 
-Use
+- Move the ee by moving the goal-prim around in the Isaac GUI
+- Change the indenter shape by choosing a different object in the IsaacLab window
 """
 
 from __future__ import annotations

@@ -1,14 +1,14 @@
 #
 
-[![IsaacSim](https://img.shields.io/badge/IsaacSim-4.5.0-silver.svg)](https://docs.omniverse.nvidia.com/isaacsim/latest/overview.html)
-[![Isaac Lab](https://img.shields.io/badge/IsaacLab-2.1.1-silver)](https://isaac-sim.github.io/IsaacLab)
-[![Python](https://img.shields.io/badge/python-3.10-blue.svg)](https://docs.python.org/3/whatsnew/3.10.html)
-[![Linux platform](https://img.shields.io/badge/platform-linux--64-orange.svg)](https://releases.ubuntu.com/22.04/)
+[![IsaacSim](https://img.shields.io/badge/IsaacSim-5.1.0-silver.svg)](https://docs.isaacsim.omniverse.nvidia.com/latest/index.html)
+[![Isaac Lab](https://img.shields.io/badge/IsaacLab-2.3.0-silver)](https://isaac-sim.github.io/IsaacLab)
+[![Python](https://img.shields.io/badge/python-3.11-blue.svg)](https://docs.python.org/3/whatsnew/3.11.html)
+[![Linux platform](https://img.shields.io/badge/platform-linux--64-orange.svg)](https://releases.ubuntu.com/noble/)
 <!-- [![Windows platform](https://img.shields.io/badge/platform-windows--64-orange.svg)](https://www.microsoft.com/en-us/) -->
 [![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit&logoColor=white)](https://pre-commit.com/)
 [![License](https://img.shields.io/badge/license-MIT-yellow.svg)](https://opensource.org/license/mit)
 
-**Keywords:** tactile sensing, gelsight, isaaclab, vision-based-tactile-sensor, vbts, reinforcement learning
+**Keywords:** tactile, gelsight, isaac lab, isaac sim, vision-based-tactile-sensor, vbts, reinforcement learning
 
 > [!note]
 > **Preview Release**:
@@ -18,7 +18,7 @@
 
 
 # TacEx - Tactile Extension for Isaac Sim/Isaac Lab
-**TacEx** brings **Vision-Based Tactile Sensor (VBTS)** into Isaac Sim/Lab.
+**TacEx** brings **Vision-Based Tactile Sensors (VBTS)** into Isaac Sim/Lab.
 
 The framework integrates multiple simulation approaches for VBTS's and aims to be modular and extendable.
 Components can be easily switched out, added and modified.
@@ -37,17 +37,10 @@ Checkout the [website](https://sites.google.com/view/tacex) for showcases and th
 
 ## Installation
 > [!NOTE]
-> TacEx currently works with **Isaac Sim 4.5** and **IsaacLab 2.1.1**.
-> The installation was tested on Ubuntu 22.04 with a 4090 GPU and Driver Version 550.163.01 + Cuda 12.4.
+> TacEx currently works with **Isaac Sim 5.1.0** and **IsaacLab 2.3.0**.
+> The installation was tested on Ubuntu 24.04 with a 4090 GPU and Driver Version 580.105.08 + Cuda 13.0.
 
-**0.** Make sure that you have **git-lfs**:
-
-```bash
-# Need it for the USD assets
-git lfs install
-```
-
-**1.** Clone this repository and its submodules:
+Clone this repository and its submodules:
 ```bash
 git clone --recurse-submodules https://github.com/DH-Ng/TacEx
 cd TacEx

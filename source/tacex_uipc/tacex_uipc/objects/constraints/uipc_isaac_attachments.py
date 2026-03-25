@@ -4,6 +4,7 @@ import inspect
 import numpy as np
 import torch
 import weakref
+from typing import TYPE_CHECKING
 
 import omni
 from omni.physx import get_physx_interface, get_physx_scene_query_interface
@@ -30,16 +31,14 @@ from isaaclab.assets import Articulation, RigidObject
 from isaaclab.utils import configclass
 from isaaclab.utils.math import transform_points
 
-from tacex_uipc.objects import UipcObject
+from .uipc_constraints import UipcConstraint, UipcConstraintCfg
+
+if TYPE_CHECKING:
+    from ..uipc_object import UipcObject
 
 
 @configclass
-class UipcIsaacAttachmentsCfg:
-    constraint_strength_ratio: float = 100.0
-    """
-    E.g., 100.0 means the stiffness of the constraint is 100 times of the mass of the uipc object.
-    """
-
+class UipcIsaacAttachmentsCfg(UipcConstraintCfg):
     debug_vis: bool = False
     """Draw attachment offsets and aim_position via IsaacSim's _debug_draw api.
 
@@ -65,17 +64,17 @@ class UipcIsaacAttachmentsCfg:
     point is considered "attached" to the isaaclab_rigid_object.
     """
 
+    isaaclab_rigid_body_prim_path: str = None
 
-class UipcIsaacAttachments:
+
+class UipcIsaacAttachments(UipcConstraint):
     cfg: UipcIsaacAttachmentsCfg
 
     # todo code init properly
-    def __init__(
-        self, cfg: UipcIsaacAttachmentsCfg, uipc_object: UipcObject, isaaclab_rigid_object: RigidObject | Articulation
-    ) -> None:
+    def __init__(self, cfg: UipcIsaacAttachmentsCfg, uipc_object: UipcObject) -> None:
         # check that the config is valid
         cfg.validate()
-        self.cfg = cfg.copy()
+        self.cfg: UipcIsaacAttachmentsCfg = cfg.copy()
 
         self.uipc_object: UipcObject = uipc_object
         # check if prim of uipc_object has rigid body API applied to it, if yes -> throw error
@@ -85,20 +84,18 @@ class UipcIsaacAttachments:
                 " unwanted behavior (e.g. when part of articulation)."
             )
 
-        self.isaaclab_rigid_object: RigidObject | Articulation = isaaclab_rigid_object
-
+        self.isaaclab_rigid_object: RigidObject | Articulation = None
         self.rigid_body_id = None  # used to query the position of the rigid body
 
         self.uipc_object_vertex_indices = []
         self.attachment_points_init_positions = []
 
         # self.attachments_offsets_idx_range = [0]
-        self.aim_positions = np.zeros(0)
+        self._aim_positions = np.zeros(0)
 
         # create the attachment
-
         if not self.cfg.compute_attachment_data:
-            # todo hmm, its kinda tricky. Can only use precomputed attachment data, if its the same tet mesh.
+            # todo hmm, its kinda tricky. Can only use precomputed attachment data, if its the same tet mesh (= same topology as during precomputation)).
             # -- how can we make sure that this case?
 
             # Load precomputed attachmend data from USD prim.
@@ -117,7 +114,7 @@ class UipcIsaacAttachments:
             # compute attachment
             attachment_points_radius = self.cfg.attachment_points_radius
 
-            isaac_rigid_prim_path = self.isaaclab_rigid_object.cfg.prim_path
+            isaac_rigid_prim_path = self.cfg.isaaclab_rigid_body_prim_path  # self.isaaclab_rigid_object.cfg.prim_path
             if self.cfg.body_name is not None:
                 isaac_rigid_prim_path += "/.*" + self.cfg.body_name
             print("isaac_rigid_prim ", isaac_rigid_prim_path)
@@ -132,6 +129,7 @@ class UipcIsaacAttachments:
         # set attachment data
         self.attachment_offsets = attachment_offsets
         self.attachment_points_idx = idx
+        self._aim_positions = attachment_points_pos
         self.num_attachment_points_per_obj = len(idx)
 
         self._num_instances = 1
@@ -146,7 +144,7 @@ class UipcIsaacAttachments:
 
         # note: Use weakref on all callbacks to ensure that this object can be deleted when its destructor is called.
         # add callbacks for stage play/stop
-        # The order is set to 10 which is arbitrary but should be lower priority than the default order of 0
+        # The order is set to 10 which is the same as the IsaacLab AssetBase _initialize_callback
         timeline_event_stream = omni.timeline.get_timeline_interface().get_timeline_event_stream()
         self._initialize_handle = timeline_event_stream.create_subscription_to_pop_by_type(
             int(omni.timeline.TimelineEventType.PLAY),
@@ -162,6 +160,8 @@ class UipcIsaacAttachments:
         self._debug_vis_handle = None
         # set initial state of debug visualization
         self.set_debug_vis(self.cfg.debug_vis)
+
+        self._create_animation()
 
     def __del__(self):
         """Unsubscribe from the callbacks."""
@@ -180,6 +180,10 @@ class UipcIsaacAttachments:
     """
     Properties
     """
+
+    @property
+    def isaaclab_rigid_body(self) -> RigidObject | Articulation:
+        return self.isaaclab_rigid_object
 
     @property
     def is_initialized(self) -> bool:
@@ -208,6 +212,10 @@ class UipcIsaacAttachments:
         # check if function raises NotImplementedError
         source_code = inspect.getsource(self._set_debug_vis_impl)
         return "NotImplementedError" not in source_code
+
+    @property
+    def aim_positions(self) -> np.array:
+        return self._compute_aim_positions()
 
     """
     Operations.
@@ -337,11 +345,15 @@ class UipcIsaacAttachments:
         # self._create_attachment_data_attributes(isaac_mesh_path, self.objects_gipc, idx, attachment_points_positions, attachment_offsets)
 
         # # draw attachment data
-        # draw.draw_points(attachment_points_positions, [(255,0,0,0.5)]*attachment_points_positions.shape[0], [30]*attachment_points_positions.shape[0]) # the new positions
+        # draw.draw_points(
+        #     attachment_points_positions,
+        #     [(255, 0, 0, 0.5)] * attachment_points_positions.shape[0],
+        #     [30] * attachment_points_positions.shape[0],
+        # )  # the new positions
         # obj_center = obj_position[0]
 
         # for j in range(0, attachment_points_positions.shape[0]):
-        #     draw.draw_lines([obj_center], [attachment_points_positions[j,:]], [(255,255,0,0.5)], [10])
+        #     draw.draw_lines([obj_center], [attachment_points_positions[j, :]], [(255, 255, 0, 0.5)], [10])
 
         return attachment_offsets, idx, matching_prims, attachment_points_positions, obj_pos
 
@@ -350,10 +362,30 @@ class UipcIsaacAttachments:
     """
 
     def _initialize_impl(self):
+        if self.isaaclab_rigid_object is None:
+            raise RuntimeError(
+                "Need an Articulation or a RigidBody object for the Isaac X UIPC attachment. Make sure that you set the correct IsaacLab rigid object for the attachment in the _setup_scene method."
+            )
+
         if self.cfg.body_name is not None:
             self.rigid_body_id, found_body_name = self.isaaclab_rigid_object.find_bodies(self.cfg.body_name)
 
-        self._create_animation()
+        if type(self.isaaclab_rigid_object) is Articulation:
+            # this only works when rigid body is an articulation
+            # self.isaaclab_rigid_object._physics_sim_view.update_articulations_kinematic()
+            # read data from simulation
+            poses = self.isaaclab_rigid_object.root_physx_view.get_link_transforms().clone()
+            poses[..., 3:7] = math_utils.convert_quat(poses[..., 3:7], to="wxyz")
+            pose = poses[:, self.rigid_body_id, 0:7].clone()
+        elif type(self.isaaclab_rigid_object) is RigidObject:
+            # only works with rigid body
+            # read data from simulation
+            pose = self.isaaclab_rigid_object._root_physx_view.get_transforms().clone()
+            pose[:, 3:7] = math_utils.convert_quat(pose[:, 3:7], to="wxyz")
+            # pose = self.isaaclab_rigid_object.root_physx_view.root_state_w.view(-1, 1, 13)
+            pose = pose[:, self.rigid_body_id, 0:7].clone()
+
+        self.obj_pose = pose
 
         sim: sim_utils.SimulationContext = sim_utils.SimulationContext.instance()
         sim.add_physics_callback(
@@ -365,7 +397,8 @@ class UipcIsaacAttachments:
         animator = self.uipc_object._uipc_sim.scene.animator()
 
         def animate_tet(info: Animation.UpdateInfo):  # animation function
-            # print("test, ", self.aim_positions)
+            if not self._is_initialized:
+                return
 
             geo_slots: list[GeometrySlot] = info.geo_slots()
             geo: SimplicialComplex = geo_slots[0].geometry()
@@ -374,11 +407,15 @@ class UipcIsaacAttachments:
 
             is_constrained = geo.vertices().find(builtin.is_constrained)
             is_constrained_view = view(is_constrained)
+            is_constrained_view[self.attachment_points_idx] = 1
+
+            # is_dynamic = geo.vertices().find(builtin.is_dynamic)
+            # is_dynamic_view = view(is_dynamic)
+            # is_dynamic_view[self.attachment_points_idx] = 0
+
             aim_position = geo.vertices().find(builtin.aim_position)
             aim_position_view = view(aim_position)
             # rest_position_view = rest_geo.positions().view()
-
-            is_constrained_view[self.attachment_points_idx] = 1
 
             aim_position_view[self.attachment_points_idx] = self.aim_positions.reshape(-1, 3, 1)
 
@@ -386,21 +423,23 @@ class UipcIsaacAttachments:
 
     def _compute_aim_positions(self, dt=0):
         # make sure we have the newest data
-
         if type(self.isaaclab_rigid_object) is Articulation:
             # this only works when rigid body is an articulation
             # self.isaaclab_rigid_object._physics_sim_view.update_articulations_kinematic()
             # read data from simulation
-            poses = self.isaaclab_rigid_object._root_physx_view.get_link_transforms().clone()
+            poses = self.isaaclab_rigid_object.root_physx_view.get_link_transforms().clone()
             poses[..., 3:7] = math_utils.convert_quat(poses[..., 3:7], to="wxyz")
             pose = poses[:, self.rigid_body_id, 0:7].clone()
         elif type(self.isaaclab_rigid_object) is RigidObject:
             # only works with rigid body
-            pose = self.isaaclab_rigid_object._root_physx_view.root_state_w.view(-1, 1, 13)
+            # pose = self.isaaclab_rigid_object.root_physx_view.root_state_w.view(-1, 1, 13)
+            # pose = pose[:, self.rigid_body_id, 0:7].clone()
+
+            pose = self.isaaclab_rigid_object._root_physx_view.get_transforms().clone()
+            pose[:, 3:7] = math_utils.convert_quat(pose[:, 3:7], to="wxyz")
             pose = pose[:, self.rigid_body_id, 0:7].clone()
-        else:
-            raise RuntimeError("Need an Articulation or a RigidBody object for the Isaac X UIPC attachment.")
-        # - doing this is undesirable -> need to update the scene to get newest data
+
+        # - doing this is undesirable -> need to update the scene to get newest data and that happens in the next sim step
         # pose = self.isaaclab_rigid_object.data.body_state_w[:, self.rigid_body_id, 0:7].clone()
 
         self.obj_pose = pose
@@ -418,14 +457,14 @@ class UipcIsaacAttachments:
             attachment_offsets, pos=pose[:, 0, 0:3], quat=pose[:, 0, 3:]
         )  # todo give over batch of pos and quat for each instance (i.e. pos has shape N,3 and quat N,4)
         aim_pos = aim_pos.cpu().numpy()
-        self.aim_positions = aim_pos.flatten().reshape(-1, 3)
+        self._aim_positions = aim_pos.flatten().reshape(-1, 3)
 
         #      # extract velocity
         #      lin_vel = scene["robot"].data.body_state_w[:, robot_entity_cfg.body_ids[1], 7:10]
         #      lin_vel = lin_vel.cpu().numpy()
         #      lin_vel = np.tile(lin_vel, len(attachment_points)).reshape(len(attachment_points),3)
 
-        return self.aim_positions
+        return self._aim_positions
 
     """
     Internal simulation callbacks.
@@ -470,18 +509,18 @@ class UipcIsaacAttachments:
                 print("No debug_vis for attachment. Reason: Cannot import _debug_draw")
 
     def _debug_vis_callback(self, event):
-        if self.aim_positions.shape[0] == 0:
+        if self._aim_positions.shape[0] == 0 or not self._is_initialized:
             return
 
         # self._compute_aim_positions()
 
         # # draw attachment data
-        self._draw.clear_points()
+        # self._draw.clear_points()
         self._draw.clear_lines()
 
         # drawing with the debug method leads to render delay
         self._draw.draw_points(
-            self.aim_positions, [(255, 0, 0, 0.5)] * self.aim_positions.shape[0], [60] * self.aim_positions.shape[0]
+            self._aim_positions, [(255, 0, 0, 0.5)] * self._aim_positions.shape[0], [60] * self._aim_positions.shape[0]
         )  # the new positions
         # pose = self.isaaclab_rigid_object.data.body_state_w[:, self.rigid_body_id, 0:7].clone()
         pose = self.obj_pose.clone()
@@ -493,4 +532,4 @@ class UipcIsaacAttachments:
             # draw.draw_points([obj_center], [(255,255,0,0.5)]*obj_center.shape[0], [50]*obj_center.shape[0]) # the new positions
             # print("")
             for j in range(i, self._num_instances * self.num_attachment_points_per_obj):
-                self._draw.draw_lines([obj_center], [self.aim_positions[j]], [(255, 255, 0, 0.5)], [10])
+                self._draw.draw_lines([obj_center], [self._aim_positions[j]], [(255, 255, 0, 0.5)], [10])

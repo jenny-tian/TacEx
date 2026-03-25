@@ -40,6 +40,16 @@ from uipc.unit import MPa
 import isaaclab.sim as sim_utils
 from isaaclab.utils.timer import Timer
 
+try:
+    from isaacsim.util.debug_draw import _debug_draw
+
+    draw = _debug_draw.acquire_debug_draw_interface()
+except ImportError:
+    import warnings
+
+    warnings.warn("_debug_draw failed to import", ImportWarning)
+    draw = None
+
 from tacex_uipc import UipcSim, UipcSimCfg
 
 
@@ -102,6 +112,15 @@ def setup_libuipc_scene(scene):
         y = -np.sin(theta)
 
         aim_position_view[0] = rest_position_view[0] + Vector3.UnitY() * y
+
+        draw.clear_points()
+        points = np.array(aim_position_view)
+        draw.draw_points(
+            points,
+            [(255, 0, 0, 0.5)] * points.shape[0],
+            [30] * points.shape[0],
+        )  # the new positions
+        # obj_center = obj_position[0]
 
     animator.insert(tet_object, animate_tet)
 

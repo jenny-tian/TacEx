@@ -19,11 +19,11 @@ except ImportError:
 if TYPE_CHECKING:
     from tacex_uipc.sim import UipcSim
 
-    from .uipc_object import UipcObject
+    from .uipc_deformable_object import UipcDeformableObject
 
 
-class UipcObjectRigidData:
-    """Data container for a uipc object.
+class UipcDeformableObjectData:
+    """Data container for a uipc deformable object.
 
     This class contains the data for a rigid object in the simulation. The data includes the state of
     the root rigid body and the state of all the bodies in the object. The data is stored in the simulation
@@ -43,7 +43,7 @@ class UipcObjectRigidData:
     is older than the current simulation timestamp. The timestamp is updated whenever the data is updated.
     """
 
-    def __init__(self, uipc_sim: UipcSim, uipc_object: UipcObject, device: str):
+    def __init__(self, uipc_sim: UipcSim, uipc_deformable_object: UipcDeformableObject, device: str):
         """Initializes the rigid object data.
 
         Args:
@@ -58,13 +58,14 @@ class UipcObjectRigidData:
         # Set the root rigid body view
         # note: this is stored as a weak reference to avoid circular references between the asset class
         #  and the data container. This is important to avoid memory leaks.
-        self._uipc_object: UipcObject = weakref.proxy(uipc_object)
+        self._uipc_deformable_object: UipcDeformableObject = weakref.proxy(uipc_deformable_object)
 
         # Set initial time stamp
         self._sim_timestamp = 0.0
 
         # Initialize the lazy buffers.
         self._nodal_pos_w = TimestampedBuffer()
+        self._surf_nodal_pos_w = TimestampedBuffer()
         self._root_state_w = TimestampedBuffer()
         self._root_link_state_w = TimestampedBuffer()
         self._root_com_state_w = TimestampedBuffer()
@@ -120,7 +121,7 @@ class UipcObjectRigidData:
             # get current world vertex positions
             geom = self._uipc_sim.scene.geometries()
             geo_slot, geo_slot_rest = geom.find(
-                self._uipc_object.obj_id
+                self._uipc_deformable_object.obj_id
             )  # todo instead of finding obj, lets just save ref to geo_slot
 
             vertex_positions_world = torch.tensor(
@@ -133,18 +134,18 @@ class UipcObjectRigidData:
 
     @property
     def surf_nodal_pos_w(self):
-        """Nodal positions in simulation world frame. Shape is (num_instances, max_sim_vertices_per_body, 3)."""
+        """Surface nodal positions in simulation world frame. Shape is (num_instances, max_sim_vertices_per_body, 3)."""
         if self._nodal_pos_w.timestamp < self._sim_timestamp:
             all_trimesh_points = self._uipc_sim.sio.simplicial_surface(2).positions().view().reshape(-1, 3)
             surf_points = all_trimesh_points[
-                self._uipc_sim._surf_vertex_offsets[self._uipc_object.obj_id - 1] : self._uipc_sim._surf_vertex_offsets[
-                    self._uipc_object.obj_id
-                ]
+                self._uipc_sim._surf_vertex_offsets[
+                    self._uipc_deformable_object.obj_id - 1
+                ] : self._uipc_sim._surf_vertex_offsets[self._uipc_deformable_object.obj_id]
             ]
-            self._nodal_pos_w.data = torch.tensor(surf_points, device=self.device, dtype=torch.float)
+            self._surf_nodal_pos_w.data = torch.tensor(surf_points, device=self.device, dtype=torch.float)
 
-            self._nodal_pos_w.timestamp = self._sim_timestamp
-        return self._nodal_pos_w.data
+            self._surf_nodal_pos_w.timestamp = self._sim_timestamp
+        return self._surf_nodal_pos_w.data
 
     ##
     # Derived properties.
@@ -158,21 +159,7 @@ class UipcObjectRigidData:
         This quantity is computed as the mean of the nodal positions.
         """
         # return self.nodal_pos_w.mean(dim=1)
-        geom = self._uipc_sim.scene.geometries()
-        geo_slot, geo_slot_rest = geom.find(
-            self._uipc_object.obj_id
-        )  # todo instead of finding obj, lets just save ref to geo_slot in uipc_object
-
-        # transformation is w.r.t. to initial pose
-        # trans = geo_slot.geometry().instances().find(builtin.transform).view()
-        # trans = torch.tensor(trans, device=self.device).reshape(1, 4, 4)
-        # root_pos_w, root_orient_w = math_utils.unmake_pose(trans)
-        # print("trans ", trans)
-
-        # mean_pos = torch.tensor(geo_slot.geometry().positions().view().copy().reshape(-1, 3), device=self.device)
-
-        root_pos_w = self.surf_nodal_pos_w.mean(dim=0)
-        return root_pos_w.reshape(1, 3)  # todo need to adjust once we go multi env
+        return self.surf_nodal_pos_w.mean(dim=0).reshape(1, 3)  # todo need to adjust once we go multi env
 
     # @property
     # def root_vel_w(self) -> torch.Tensor:

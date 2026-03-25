@@ -5,9 +5,6 @@ import torch
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.envs import ViewerCfg
-from isaaclab.markers.config import FRAME_MARKER_CFG
-from isaaclab.sensors import FrameTransformerCfg
-from isaaclab.sensors.frame_transformer.frame_transformer_cfg import OffsetCfg
 from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.utils import configclass
 
@@ -20,12 +17,10 @@ from tacex_assets.robots.franka.franka_gsmini_single_uipc import (
 from tacex_assets.sensors.gelsight_mini import GELSIGHT_MINI_TAXIM_FOTS_CFG
 
 from tacex_uipc import (
-    UipcIsaacAttachments,
     UipcIsaacAttachmentsCfg,
-    UipcObject,
-    UipcObjectCfg,
     UipcSimCfg,
 )
+from tacex_uipc.objects import UipcDeformableObject, UipcDeformableObjectCfg, UipcRigidObject, UipcRigidObjectCfg
 from tacex_uipc.utils import TetMeshCfg
 
 try:
@@ -70,7 +65,7 @@ class UipcEnvCfg(PhysXRigidEnvCfg):
 
     uipc_sim = UipcSimCfg(
         # logger_level="Info"
-        ground_height=0.001,
+        ground_height=0.0025,
         contact=UipcSimCfg.Contact(d_hat=0.0005),
     )
 
@@ -81,14 +76,14 @@ class UipcEnvCfg(PhysXRigidEnvCfg):
         # epsilon_r=0.01
     )
 
-    ball = UipcObjectCfg(
+    ball = UipcRigidObjectCfg(
         prim_path="/World/envs/env_.*/ball",
-        init_state=AssetBaseCfg.InitialStateCfg(pos=[0.5, 0, 0.01]),  # rot=(0.72,-0.3,0.42,-0.45)
+        init_state=AssetBaseCfg.InitialStateCfg(pos=[0.5, 0, 0.015]),
         spawn=sim_utils.UsdFileCfg(
             usd_path=f"{TACEX_ASSETS_DATA_DIR}/Props/ball_wood.usd",
         ),
         mesh_cfg=mesh_cfg,
-        constitution_cfg=UipcObjectCfg.AffineBodyConstitutionCfg(),  # UipcObjectCfg.StableNeoHookeanCfg() #
+        constitution_cfg=UipcRigidObjectCfg.AffineBodyConstitutionCfg(),  # UipcObjectCfg.StableNeoHookeanCfg() #
     )
 
     robot: ArticulationCfg = FRANKA_PANDA_ARM_SINGLE_GSMINI_HIGH_PD_UIPC_CFG.replace(
@@ -112,16 +107,17 @@ class UipcEnvCfg(PhysXRigidEnvCfg):
         edge_length_r=1 / 5,
         # epsilon_r=0.01
     )
-    gelpad_cfg = UipcObjectCfg(
+    gelpad_cfg = UipcDeformableObjectCfg(
         prim_path="/World/envs/env_.*/Robot/gelsight_mini_gelpad",
         # mesh_cfg=mesh_cfg,
-        constitution_cfg=UipcObjectCfg.StableNeoHookeanCfg(),
-    )
-    gelpad_attachment_cfg = UipcIsaacAttachmentsCfg(
-        constraint_strength_ratio=1000.0,
-        body_name="gelsight_mini_case",
-        debug_vis=False,
-        compute_attachment_data=True,
+        constitution_cfg=UipcDeformableObjectCfg.StableNeoHookeanCfg(),
+        constraint_cfg=UipcIsaacAttachmentsCfg(
+            constraint_strength_ratio=100.0,
+            body_name="gelsight_mini_case",
+            debug_vis=False,
+            compute_attachment_data=True,
+            isaaclab_rigid_body_prim_path="/World/envs/env_.*/Robot",
+        ),
     )
 
     gsmini = GELSIGHT_MINI_TAXIM_FOTS_CFG.replace(
@@ -136,7 +132,7 @@ class UipcEnvCfg(PhysXRigidEnvCfg):
         device="cuda",
         debug_vis=True,  # for rendering sensor output in the gui
         # marker_motion_sim_cfg=None,
-        data_types=["tactile_rgb", "marker_motion", "camera_depth"],  # marker_motion
+        data_types=["tactile_rgb", "camera_depth"],  # marker_motion
     )
 
     # settings for optical sim - update Taxim cfg
@@ -145,23 +141,23 @@ class UipcEnvCfg(PhysXRigidEnvCfg):
         device="cuda",
         tactile_img_res=(320, 240),
     )
-    # update FOTS cfg
-    marker_cfg = FRAME_MARKER_CFG.copy()
-    marker_cfg.markers["frame"].scale = (0.01, 0.01, 0.01)
-    marker_cfg.prim_path = "/Visuals/FrameTransformer"
-
-    gsmini.marker_motion_sim_cfg = gsmini.marker_motion_sim_cfg.replace(
-        device="cuda",
-        tactile_img_res=(320, 240),
-        frame_transformer_cfg=FrameTransformerCfg(
-            prim_path="/World/envs/env_.*/Robot/gelsight_mini_case",  # "/World/envs/env_.*/Robot/gelsight_mini_case",
-            # you have to make sure that the asset frame center is correct, otherwise wrong shear/twist motions
-            source_frame_offset=OffsetCfg(rot=(0.0, 0.92388, -0.38268, 0.0)),  # values for the robot used here
-            target_frames=[FrameTransformerCfg.FrameCfg(prim_path="/World/envs/env_.*/ball")],
-            debug_vis=False,
-            visualizer_cfg=marker_cfg,
-        ),
-    )
+    # # update FOTS cfg
+    # marker_cfg = FRAME_MARKER_CFG.copy()
+    # marker_cfg.markers["frame"].scale = (0.01, 0.01, 0.01)
+    # marker_cfg.prim_path = "/Visuals/FrameTransformer"
+    gsmini.marker_motion_sim_cfg = None
+    # gsmini.marker_motion_sim_cfg = gsmini.marker_motion_sim_cfg.replace(
+    #     device="cuda",
+    #     tactile_img_res=(320, 240),
+    #     frame_transformer_cfg=FrameTransformerCfg(
+    #         prim_path="/World/envs/env_.*/Robot/gelsight_mini_case",  # "/World/envs/env_.*/Robot/gelsight_mini_case",
+    #         # you have to make sure that the asset frame center is correct, otherwise wrong shear/twist motions
+    #         source_frame_offset=OffsetCfg(rot=(0.0, 0.92388, -0.38268, 0.0)),  # values for the robot used here
+    #         target_frames=[FrameTransformerCfg.FrameCfg(prim_path="/World/envs/env_.*/ball")],
+    #         debug_vis=False,
+    #         visualizer_cfg=marker_cfg,
+    #     ),
+    # )
 
 
 class UipcEnv(PhysXRigidEnv):
@@ -181,21 +177,17 @@ class UipcEnv(PhysXRigidEnv):
         # --- UIPC simulation setup ---
 
         # gelpad simulated via uipc
-        self._uipc_gelpad: UipcObject = UipcObject(self.cfg.gelpad_cfg, self.uipc_sim)
+        self._uipc_gelpad: UipcDeformableObject = UipcDeformableObject(self.cfg.gelpad_cfg, self.uipc_sim)
+        # set rigid object for attachment-constraint
+        self._uipc_gelpad.constraint.isaaclab_rigid_object = self.scene.articulations["robot"]
 
-        self.object: UipcObject = UipcObject(self.cfg.ball, self.uipc_sim)
+        self.object: UipcRigidObject = UipcRigidObject(self.cfg.ball, self.uipc_sim)
         self.scene.uipc_objects["object"] = self.object
-
-        # create attachment
-        self.attachment = UipcIsaacAttachments(
-            self.cfg.gelpad_attachment_cfg,
-            self._uipc_gelpad,
-            self.scene.articulations["robot"],
-        )
 
     def _pre_physics_step(self, actions: torch.Tensor):
         # update movement pattern according to the ball position
         ball_pos = self.object.data.root_pos_w - self.scene.env_origins
+        print("Ball pos ", ball_pos)
 
         # change goal
         if (self.step_count + 1) % self.num_step_goal_change == 0:
@@ -211,8 +203,8 @@ class UipcEnv(PhysXRigidEnv):
         self._robot.set_joint_position_target(joint_pos, env_ids=env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
 
-        self.object.write_vertex_positions_to_sim(vertex_positions=self.object.init_vertex_pos)
-        self._uipc_gelpad.write_vertex_positions_to_sim(vertex_positions=self._uipc_gelpad.init_vertex_pos)
+        self.object.write_pose_to_sim(self.object.data.default_root_state)
+        self._uipc_gelpad.write_nodal_pos_to_sim(self._uipc_gelpad.data.default_nodal_state_w[:, :, :3])
 
         self.step_count = 0
 

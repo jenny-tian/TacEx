@@ -53,9 +53,6 @@ from tacex_assets.sensors.gelsight_mini.generic_gsmini_cfg import GeneralGelSigh
 
 from tacex_tasks.utils import DirectLiveVisualizer
 
-#  from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
-# from isaaclab.envs.mdp.actions.actions_cfg import DifferentialInverseKinematicsActionCfg
-
 
 class CustomEnvWindow(BaseEnvWindow):
     """Window manager for the RL environment."""

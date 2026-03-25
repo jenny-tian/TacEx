@@ -73,9 +73,6 @@ from tacex_uipc import (
     UipcSimCfg,
 )
 
-#  from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
-# from isaaclab.envs.mdp.actions.actions_cfg import DifferentialInverseKinematicsActionCfg
-
 
 class CustomEnvWindow(BaseEnvWindow):
     """Window manager for the RL environment."""
@@ -199,8 +196,9 @@ class CustomEnvWindow(BaseEnvWindow):
         self.reset = True
 
 
+# TODO Need to fix script, since newest tacex_uipc version
 @configclass
-class BallRollingEnvCfg(DirectRLEnvCfg):
+class PickUpEnvCfg(DirectRLEnvCfg):
     # viewer settings
     viewer: ViewerCfg = ViewerCfg()
     viewer.eye = (1.9, 1.4, 0.3)
@@ -388,10 +386,10 @@ class BallRollingEnvCfg(DirectRLEnvCfg):
     state_space = 0
 
 
-class BallRollingEnv(UipcRLEnv):
-    cfg: BallRollingEnvCfg
+class PickUpEnv(UipcRLEnv):
+    cfg: PickUpEnvCfg
 
-    def __init__(self, cfg: BallRollingEnvCfg, render_mode: str | None = None, **kwargs):
+    def __init__(self, cfg: PickUpEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
 
         # --- for IK ---
@@ -627,7 +625,7 @@ class BallRollingEnv(UipcRLEnv):
         return jacobian
 
 
-def run_simulator(env: BallRollingEnv):
+def run_simulator(env: PickUpEnv):
     """Runs the simulation loop."""
 
     print(f"Starting simulation with {env.num_envs} envs")
@@ -673,13 +671,13 @@ def run_simulator(env: BallRollingEnv):
 def main():
     """Main function."""
     # Define simulation env
-    env_cfg = BallRollingEnvCfg()
+    env_cfg = PickUpEnvCfg()
     # override configurations with non-hydra CLI arguments
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     env_cfg.gsmini_left.debug_vis = args_cli.debug_vis
 
-    experiment = BallRollingEnv(env_cfg)
+    experiment = PickUpEnv(env_cfg)
 
     # Now we are ready!
     print("[INFO]: Setup complete...")
