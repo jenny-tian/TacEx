@@ -108,7 +108,7 @@ class Pix2PixSimulator(GelSightSimulator):
         self.generator_model.load_state_dict(state_dict)
         if self._device != "cpu":
             self.generator_model.cuda()
-        # self.generator_model.eval()  # - somehow worse image simulation with eval mode -> due to skip connections disabled
+        self.generator_model.eval()  # - somehow worse image simulation with eval mode -> due to skip connections disabled
 
         self.tactile_rgb_img = torch.zeros(
             (self.sensor._num_envs, self.cfg.tactile_img_res[1], self.cfg.tactile_img_res[0], 3),

@@ -15,7 +15,7 @@ import isaaclab.utils.math as math_utils
 from isaaclab.assets import Articulation, ArticulationCfg, AssetBaseCfg, RigidObject, RigidObjectCfg
 from isaaclab.controllers.differential_ik import DifferentialIKController
 from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
-from isaaclab.envs import DirectRLEnvCfg, ViewerCfg
+from isaaclab.envs import DirectRLEnv, DirectRLEnvCfg, ViewerCfg
 from isaaclab.envs.ui import BaseEnvWindow
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import SceneEntityCfg
@@ -52,6 +52,9 @@ from tacex_assets.robots.franka.franka_gsmini_single_uipc import (
 from tacex_assets.sensors.gelsight_mini.generic_gsmini_cfg import GeneralGelSightMiniCfg
 
 from tacex_tasks.utils import DirectLiveVisualizer
+
+#  from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
+# from isaaclab.envs.mdp.actions.actions_cfg import DifferentialInverseKinematicsActionCfg
 from tacex_uipc import (
     UipcIsaacAttachments,
     UipcIsaacAttachmentsCfg,
@@ -61,9 +64,6 @@ from tacex_uipc import (
     UipcSimCfg,
 )
 from tacex_uipc.utils import TetMeshCfg
-
-#  from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
-# from isaaclab.envs.mdp.actions.actions_cfg import DifferentialInverseKinematicsActionCfg
 
 
 class CustomEnvWindow(BaseEnvWindow):
@@ -86,89 +86,89 @@ class CustomEnvWindow(BaseEnvWindow):
                     self._create_debug_vis_ui_element("targets", self.env)
 
 
-@configclass
-class EventCfg:
-    robot_physics_material = EventTerm(
-        func=mdp.randomize_rigid_body_material,
-        # workaround for having compliant properties on gelpad:
-        # - we set compliant contact as default material
-        # - but overwrite all the other materials (ball, sensor case, plate) by using the
-        # randomization functions here -> they create new materials without compliant contact
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", body_names="gelsight_mini_case"),
-            "static_friction_range": (0.1, 1.3),
-            "dynamic_friction_range": (0.5, 1.0),
-            "restitution_range": (0.65, 1.0),
-            "num_buckets": 1,
-        },
-    )
-    robot_add_gelpad_mass = EventTerm(
-        func=mdp.randomize_rigid_body_mass,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", body_names="gelsight_mini_gelpad"),
-            "mass_distribution_params": (-0.005, 0.005),
-            "operation": "add",
-        },
-    )
-    # robot_joint_stiffness_and_damping = EventTerm(
-    #     func=mdp.randomize_actuator_gains,
-    #     mode="reset",
-    #     params={
-    #         "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
-    #         "stiffness_distribution_params": (0.75, 1.5),
-    #         "damping_distribution_params": (0.3, 3.0),
-    #         "operation": "scale",
-    #         "distribution": "log_uniform",
-    #     },
-    # )
-    reset_gravity = EventTerm(
-        func=mdp.randomize_physics_scene_gravity,
-        mode="interval",
-        is_global_time=True,
-        interval_range_s=(36.0, 36.0),  # time_s = num_steps * (decimation * dt)
-        params={
-            "gravity_distribution_params": ([0.0, 0.0, 0.0], [0.0, 0.0, 0.4]),
-            "operation": "add",
-            "distribution": "gaussian",
-        },
-    )
+# @configclass
+# class EventCfg:
+#     robot_physics_material = EventTerm(
+#         func=mdp.randomize_rigid_body_material,
+#         # workaround for having compliant properties on gelpad:
+#         # - we set compliant contact as default material
+#         # - but overwrite all the other materials (ball, sensor case, plate) by using the
+#         # randomization functions here -> they create new materials without compliant contact
+#         mode="reset",
+#         params={
+#             "asset_cfg": SceneEntityCfg("robot", body_names="gelsight_mini_case"),
+#             "static_friction_range": (0.1, 1.3),
+#             "dynamic_friction_range": (0.5, 1.0),
+#             "restitution_range": (0.65, 1.0),
+#             "num_buckets": 1,
+#         },
+#     )
+#     robot_add_gelpad_mass = EventTerm(
+#         func=mdp.randomize_rigid_body_mass,
+#         mode="reset",
+#         params={
+#             "asset_cfg": SceneEntityCfg("robot", body_names="gelsight_mini_gelpad"),
+#             "mass_distribution_params": (-0.005, 0.005),
+#             "operation": "add",
+#         },
+#     )
+#     # robot_joint_stiffness_and_damping = EventTerm(
+#     #     func=mdp.randomize_actuator_gains,
+#     #     mode="reset",
+#     #     params={
+#     #         "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
+#     #         "stiffness_distribution_params": (0.75, 1.5),
+#     #         "damping_distribution_params": (0.3, 3.0),
+#     #         "operation": "scale",
+#     #         "distribution": "log_uniform",
+#     #     },
+#     # )
+#     reset_gravity = EventTerm(
+#         func=mdp.randomize_physics_scene_gravity,
+#         mode="interval",
+#         is_global_time=True,
+#         interval_range_s=(36.0, 36.0),  # time_s = num_steps * (decimation * dt)
+#         params={
+#             "gravity_distribution_params": ([0.0, 0.0, 0.0], [0.0, 0.0, 0.4]),
+#             "operation": "add",
+#             "distribution": "gaussian",
+#         },
+#     )
 
-    # ball properties
-    ball_physics_material = EventTerm(
-        func=mdp.randomize_rigid_body_material,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg("object"),
-            "static_friction_range": (0.1, 1.0),
-            "dynamic_friction_range": (0.25, 1.0),
-            "restitution_range": (0.0, 1.0),
-            "num_buckets": 250,
-        },
-    )
-    ball_add_base_mass = EventTerm(
-        func=mdp.randomize_rigid_body_mass,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg("object"),
-            "mass_distribution_params": (-0.01, 0.01),
-            "operation": "add",
-        },
-    )
+#     # ball properties
+#     ball_physics_material = EventTerm(
+#         func=mdp.randomize_rigid_body_material,
+#         mode="reset",
+#         params={
+#             "asset_cfg": SceneEntityCfg("object"),
+#             "static_friction_range": (0.1, 1.0),
+#             "dynamic_friction_range": (0.25, 1.0),
+#             "restitution_range": (0.0, 1.0),
+#             "num_buckets": 250,
+#         },
+#     )
+#     ball_add_base_mass = EventTerm(
+#         func=mdp.randomize_rigid_body_mass,
+#         mode="reset",
+#         params={
+#             "asset_cfg": SceneEntityCfg("object"),
+#             "mass_distribution_params": (-0.01, 0.01),
+#             "operation": "add",
+#         },
+#     )
 
-    # friction of plate where ball rolls
-    plate_physics_material = EventTerm(
-        func=mdp.randomize_rigid_body_material,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg("plate"),
-            "static_friction_range": (0.1, 1.0),
-            "dynamic_friction_range": (0.1, 1.0),
-            "restitution_range": (0.0, 1.0),
-            "num_buckets": 250,
-        },
-    )
+#     # friction of plate where ball rolls
+#     plate_physics_material = EventTerm(
+#         func=mdp.randomize_rigid_body_material,
+#         mode="reset",
+#         params={
+#             "asset_cfg": SceneEntityCfg("plate"),
+#             "static_friction_range": (0.1, 1.0),
+#             "dynamic_friction_range": (0.1, 1.0),
+#             "restitution_range": (0.0, 1.0),
+#             "num_buckets": 250,
+#         },
+#     )
 
 
 @configclass
@@ -220,7 +220,7 @@ class BallRollingTactileRGBUipcCfg(DirectRLEnvCfg):
     uipc_sim = UipcSimCfg(
         # logger_level="Info"
         ground_height=0.0025,
-        contact=UipcSimCfg.Contact(default_friction_ratio=0.5, d_hat=0.0005),
+        contact=UipcSimCfg.Contact(d_hat=0.0001),
     )
 
     # scene
@@ -230,15 +230,6 @@ class BallRollingTactileRGBUipcCfg(DirectRLEnvCfg):
     robot: ArticulationCfg = FRANKA_PANDA_ARM_SINGLE_GSMINI_HIGH_PD_UIPC_CFG.replace(
         prim_path="/World/envs/env_.*/Robot",
         init_state=ArticulationCfg.InitialStateCfg(
-            # joint_pos={
-            #     "panda_joint1": 0.0,
-            #     "panda_joint2": 0.43,
-            #     "panda_joint3": 0.0,
-            #     "panda_joint4": -2.37,
-            #     "panda_joint5": 0.0,
-            #     "panda_joint6": 2.79,
-            #     "panda_joint7": 0.741,
-            # },
             joint_pos={
                 "panda_joint1": -1.02,
                 "panda_joint2": 0.3175,
@@ -252,6 +243,8 @@ class BallRollingTactileRGBUipcCfg(DirectRLEnvCfg):
     )
 
     ik_controller_cfg = DifferentialIKControllerCfg(command_type="pose", use_relative_mode=True, ik_method="dls")
+    ee_pos_offset = [0.0, 0.0, 0.0]
+    ee_rot_offset = [0.0, 1.0, 0.0, 0.0]
 
     # plate
     plate: RigidObjectCfg = RigidObjectCfg(
@@ -283,7 +276,7 @@ class BallRollingTactileRGBUipcCfg(DirectRLEnvCfg):
                 prim_path="/World/envs/env_.*/Robot/panda_hand",
                 name="end_effector",
                 offset=OffsetCfg(
-                    pos=(0.0, 0.0, 0.131),  # 0ffset from panda hand frame origin to gelpad top
+                    pos=(0.0, 0.0, 0.11765),  # 0ffset from panda hand frame origin to gelpad top
                     rot=(0.0, 0.0, 1.0, 0.0),
                     # rot=(0, 0.92388, -0.38268, 0) # our panda hand asset has rotation from (180,0,-45) -> we subtract 180 for defining the rotation limits
                 ),
@@ -291,39 +284,36 @@ class BallRollingTactileRGBUipcCfg(DirectRLEnvCfg):
         ],
     )
 
-    # rigid body ball
-    object: UipcObjectCfg = UipcObjectCfg(
-        prim_path="/World/envs/env_.*/uipc_ball",
-        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.25, -0.35, 0.0051 + 0.0025)),  # rot=(0.72,-0.3,0.42,-0.45)
+    mesh_cfg = TetMeshCfg(
+        stop_quality=8,
+        max_its=100,
+        edge_length_r=1 / 5,
+        # epsilon_r=0.01
+    )
+    object = UipcObjectCfg(
+        prim_path="/World/envs/env_.*/ball",
+        init_state=AssetBaseCfg.InitialStateCfg(pos=[0.5, 0, 0.05]),  # rot=(0.72,-0.3,0.42,-0.45)
         spawn=sim_utils.UsdFileCfg(
+            # usd_path="/workspace/tacex/source/tacex_assets/tacex_assets/data/Sensors/GelSight_Mini/Gelpad_low_res.usd",
             usd_path=f"{TACEX_ASSETS_DATA_DIR}/Props/ball_wood.usd",
         ),
-        mesh_cfg=TetMeshCfg(
-            stop_quality=8,
-            max_its=100,
-            edge_length_r=1 / 5,
-            # epsilon_r=0.01
-        ),
-        constitution_cfg=UipcObjectCfg.StableNeoHookeanCfg(
-            youngs_modulus=100.0,
-        ),  # UipcObjectCfg.AffineBodyConstitutionCfg() #
+        mesh_cfg=mesh_cfg,
+        constitution_cfg=UipcObjectCfg.AffineBodyConstitutionCfg(),
     )
-
     # simulate the gelpad as uipc mesh
+    mesh_cfg = TetMeshCfg(
+        stop_quality=8,
+        max_its=100,
+        edge_length_r=1 / 5,
+        # epsilon_r=0.01
+    )
     gelpad_cfg = UipcObjectCfg(
         prim_path="/World/envs/env_.*/Robot/gelsight_mini_gelpad",
-        mesh_cfg=TetMeshCfg(
-            stop_quality=8,
-            max_its=100,
-            edge_length_r=1 / 5,
-            # epsilon_r=0.01
-        ),
-        constitution_cfg=UipcObjectCfg.StableNeoHookeanCfg(youngs_modulus=10),
+        mesh_cfg=mesh_cfg,
+        constitution_cfg=UipcObjectCfg.StableNeoHookeanCfg(),
     )
     gelpad_attachment_cfg = UipcIsaacAttachmentsCfg(
-        constraint_strength_ratio=200000.0,
-        body_name="gelsight_mini_case",
-        debug_vis=False,
+        constraint_strength_ratio=100.0, body_name="gelsight_mini_case", debug_vis=False, compute_attachment_data=True
     )
 
     # sensors
@@ -332,12 +322,12 @@ class BallRollingTactileRGBUipcCfg(DirectRLEnvCfg):
         sensor_camera_cfg=GeneralGelSightMiniCfg.SensorCameraCfg(
             prim_name="Camera",
             update_period=0,
-            resolution=(32, 32),  # (48, 64),
+            resolution=(32, 32),
             data_types=["depth"],
             clipping_range=(
-                0.015,
-                0.029,
-            ),  # (0.024, 0.029), make min value little bit smaller, due to penetration issues
+                0.024,
+                0.034,
+            ),
         ),
         device="cuda",
         debug_vis=True,  # for being able to see sensor output in the gui
@@ -375,7 +365,7 @@ class BallRollingTactileRGBUipcCfg(DirectRLEnvCfg):
         #         debug_vis=False,
         #     )
         # ),
-        data_types=["tactile_rgb"],  # marker_motion
+        data_types=["tactile_rgb", "height_map"],  # marker_motion
     )
 
     # noise models
@@ -397,13 +387,13 @@ class BallRollingTactileRGBUipcCfg(DirectRLEnvCfg):
         "centering_error": {"weight": -0.05},
         "off_the_ground_penalty": {"weight": -15, "max_height": 0.025},
         "height_reward": {
-            "weight": 0.15,
+            "weight": 1.15,
             "std": 0.4901,
             "alpha": 0.00067,
-            "target_height_cm": 1.225,
+            "target_height_cm": 1.075,  # 1.225,
             "min_height": 0.002,
-        },  # target height: 1cm + 0.25cm - 0.125cm
-        "orient_reward": {"weight": -1.25},
+        },  # target height: ball_height + base_plate_height/2 + desired_indentation_depth = 1cm + 0.125cm - 0.05cm
+        "orient_reward": {"weight": -0.5},
         # for solving the task
         "ee_goal_tracking": {"weight": 0.75, "std": 0.2, "std_fine": 0.36},
         "obj_goal_tracking": {"weight": 0.75, "std": 0.6},  # 0.2
@@ -433,7 +423,7 @@ class BallRollingTactileRGBUipcCfg(DirectRLEnvCfg):
     state_space = 0
     action_scale = 0.05  # [cm]
 
-    ball_radius = 0.005  # don't change, because rewards (e.g. height reward) are tuned for this ball size
+    ball_radius = 0.005  # if you change, then also change rewards (e.g. height reward is tuned for this ball size)
 
     x_bounds = (0.2, 0.8)
     y_bounds = (-0.4, 0.4)
@@ -496,19 +486,17 @@ class BallRollingTactileRGBUipcEnv(UipcRLEnv):
             cfg=self.cfg.ik_controller_cfg, num_envs=self.num_envs, device=self.device
         )
         # Obtain the frame index of the end-effector
-        body_ids, body_names = self._robot.find_bodies("panda_hand")
+        body_ids, _ = self._robot.find_bodies("TCP")
         # save only the first body index
         self._body_idx = body_ids[0]
-        self._body_name = body_names[0]
 
         # For a fixed base robot, the frame index is one less than the body index.
         # This is because the root body is not included in the returned Jacobians.
         self._jacobi_body_idx = self._body_idx - 1
 
-        # ee offset w.r.t panda hand -> based on the asset
-        self._offset_pos = torch.tensor([0.0, 0.0, 0.131], device=self.device).repeat(self.num_envs, 1)
-        self._offset_rot = torch.tensor([0.0, 0.0, 1.0, 0.0], device=self.device).repeat(self.num_envs, 1)
-        # self._offset_rot = torch.tensor([0, 0.92388, -0.38268, 0], device=self.device).repeat(self.num_envs, 1)
+        # ee offset w.r.t TCP -> TCP is defined so that z-axis shows down. In our case here we want z to show upwards
+        self._ee_pos_offset = torch.tensor(self.cfg.ee_pos_offset, device=self.device).repeat(self.num_envs, 1)
+        self._ee_rot_offset = torch.tensor(self.cfg.ee_rot_offset, device=self.device).repeat(self.num_envs, 1)
         # ---
 
         # create auxiliary variables for computing applied action, observations and rewards
@@ -621,9 +609,6 @@ class BallRollingTactileRGBUipcEnv(UipcRLEnv):
         self._robot = Articulation(self.cfg.robot)
         self.scene.articulations["robot"] = self._robot
 
-        # self.object = RigidObject(self.cfg.object)
-        # self.scene.rigid_objects["object"] = self.object
-
         plate = RigidObject(self.cfg.plate)
         self.scene.rigid_objects["plate"] = plate
 
@@ -659,25 +644,13 @@ class BallRollingTactileRGBUipcEnv(UipcRLEnv):
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
-        # # Physics Materials
-        # gelpad_mat = sim_utils.spawn_rigid_body_material(
-        #     prim_path="/World/Materials/gelpad",
-        #     cfg=sim_utils.RigidBodyMaterialCfg(
-        #         static_friction=1.5,
-        #         dynamic_friction=1.5,
-        #         restitution=0.75,
-        #         compliant_contact_damping=0.5,
-        #         compliant_contact_stiffness=0.25
-        #     )
-        # )
-        # sim_utils.bind_physics_material("/World/envs/env_.*/Robot/gelsight_mini_gelpad", "/World/Materials/gelpad")
-
         # --- UIPC simulation setup ---
 
         # gelpad simulated via uipc
-        self._uipc_gelpad: UipcObject = UipcObject(self.cfg.gelpad_cfg, self.uipc_sim)
+        self._uipc_gelpad = UipcObject(self.cfg.gelpad_cfg, self.uipc_sim)
+        self.scene.uipc_objects["uipc_gelpad"] = self._uipc_gelpad
 
-        self.object: UipcObject = UipcObject(self.cfg.object, self.uipc_sim)
+        self.object = UipcObject(self.cfg.object, self.uipc_sim)
         self.scene.uipc_objects["object"] = self.object
 
         # create attachment
@@ -700,14 +673,13 @@ class BallRollingTactileRGBUipcEnv(UipcRLEnv):
 
     def _apply_action(self):
         # obtain quantities from simulation
-        ee_pos_curr_b, ee_quat_curr_b = self._compute_frame_pose()
+        jacobian = self._robot.root_physx_view.get_jacobians()[:, self._jacobi_body_idx, :, :]
         joint_pos = self._robot.data.joint_pos[:, :]
-        # compute the delta in joint-space
-        if ee_pos_curr_b.norm() != 0:
-            jacobian = self._compute_frame_jacobian()
-            joint_pos_des = self._ik_controller.compute(ee_pos_curr_b, ee_quat_curr_b, jacobian, joint_pos)
-        else:
-            joint_pos_des = joint_pos.clone()
+        ee_pos_curr_b, ee_quat_curr_b = self._compute_frame_pose()
+
+        # compute the joint commands
+        joint_pos_des = self._ik_controller.compute(ee_pos_curr_b, ee_quat_curr_b, jacobian, joint_pos)
+
         self._robot.set_joint_position_target(joint_pos_des)
 
         # pass
@@ -716,8 +688,7 @@ class BallRollingTactileRGBUipcEnv(UipcRLEnv):
 
     # MARK: dones
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:  # which environment is done
-        obj_pos = self.object.data.root_pos_w - self.scene.env_origins
-
+        obj_pos = self.object.data.root_link_pos_w - self.scene.env_origins
         out_of_bounds_x = (obj_pos[:, 0] < self.cfg.x_bounds[0]) | (obj_pos[:, 0] > self.cfg.x_bounds[1])
         out_of_bounds_y = (obj_pos[:, 1] < self.cfg.y_bounds[0]) | (obj_pos[:, 1] > self.cfg.y_bounds[1])
 
@@ -775,27 +746,23 @@ class BallRollingTactileRGBUipcEnv(UipcRLEnv):
         # reset buffers
         super()._reset_idx(env_ids)
 
-        # # spawn obj at initial position
+        # spawn obj at initial position
         # obj_pos = self.object.data.default_root_state[full_reset_env_ids]
-        # obj_pos[:, :2] += sample_uniform(
-        #     -0.00025,
-        #     0.00025,
-        #     (len(full_reset_env_ids), 2),
-        #     self.device
-        # )
+        # obj_pos[:, :2] += sample_uniform(-0.00025, 0.00025, (len(full_reset_env_ids), 2), self.device)
         # obj_pos[:, :3] += self.scene.env_origins[full_reset_env_ids]
         # self.object.write_root_state_to_sim(obj_pos, env_ids=full_reset_env_ids)
+
+        self.object.write_vertex_positions_to_sim(vertex_positions=self.object.init_vertex_pos)
 
         # reset robot state
         joint_pos = self._robot.data.default_joint_pos[full_reset_env_ids]
         joint_vel = torch.zeros_like(joint_pos)
         self._robot.set_joint_position_target(joint_pos, env_ids=full_reset_env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=full_reset_env_ids)
+        self._uipc_gelpad.write_vertex_positions_to_sim(vertex_positions=self._uipc_gelpad.init_vertex_pos)
 
         # set commands: random target position
-        # self._goal_pos_b[env_ids, :2] = self.object.data.default_root_state[env_ids, :2] #todo code that properly
-        self._goal_pos_b[env_ids, :2] = self.object.data.root_pos_w[env_ids, :2]
-
+        self._goal_pos_b[env_ids, :2] = self.object.data.default_root_state[env_ids, :2]
         self._goal_pos_b[env_ids, 0] += sample_uniform(
             self.cfg.goal_randomization_range_x[0]
             - self._goal_random_curr[self.curriculum_levels["goal_randomization_range"]],
@@ -820,14 +787,10 @@ class BallRollingTactileRGBUipcEnv(UipcRLEnv):
         # reset buffers used for curriculum learning
         self._total_episode_rew[env_ids] = 0.0
 
-        # reset uipc objects #todo implement that properly
-        self._uipc_gelpad.write_vertex_positions_to_sim(vertex_positions=self._uipc_gelpad.init_vertex_pos)
-        self.object.write_vertex_positions_to_sim(vertex_positions=self.object.init_vertex_pos)
-
     # MARK: rewards
     def _get_rewards(self) -> torch.Tensor:
         # - Reward the agent for reaching the object using tanh-kernel.
-        obj_pos_b = self.object.data.root_pos_w - self.scene.env_origins
+        obj_pos_b = self.object.data.root_link_pos_w - self.scene.env_origins
         ee_frame_pos_b, ee_frame_orient_b = self._compute_frame_pose()
 
         (self.object_ee_distance, self.ee_goal_distance, self.ee_orient_error, self.obj_goal_distance) = (
@@ -1011,62 +974,27 @@ class BallRollingTactileRGBUipcEnv(UipcRLEnv):
     Helper Functions for IK control (from task_space_actions.py of IsaacLab).
     """
 
-    @property
-    def jacobian_w(self) -> torch.Tensor:
-        return self._robot.root_physx_view.get_jacobians()[:, self._jacobi_body_idx, :, :]
-
-    @property
-    def jacobian_b(self) -> torch.Tensor:
-        jacobian = self.jacobian_w
-        base_rot = self._robot.data.root_link_quat_w
-        base_rot_matrix = math_utils.matrix_from_quat(math_utils.quat_inv(base_rot))
-        jacobian[:, :3, :] = torch.bmm(base_rot_matrix, jacobian[:, :3, :])
-        jacobian[:, 3:, :] = torch.bmm(base_rot_matrix, jacobian[:, 3:, :])
-        return jacobian
-
     def _compute_frame_pose(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Computes the pose of the target frame in the root frame.
 
         Returns:
             A tuple of the body's position and orientation in the root frame.
         """
-        # obtain quantities from simulation
-        ee_pos_w = self._robot.data.body_link_pos_w[:, self._body_idx]
-        ee_quat_w = self._robot.data.body_link_quat_w[:, self._body_idx]
-        root_pos_w = self._robot.data.root_link_pos_w
-        root_quat_w = self._robot.data.root_link_quat_w
-        # compute the pose of the body in the root frame
-        ee_pose_b, ee_quat_b = math_utils.subtract_frame_transforms(root_pos_w, root_quat_w, ee_pos_w, ee_quat_w)
-        # account for the offset
-        # if self.cfg.body_offset is not None:
-        ee_pose_b, ee_quat_b = math_utils.combine_frame_transforms(
-            ee_pose_b, ee_quat_b, self._offset_pos, self._offset_rot
+        ee_pose_w = self._robot.data.body_pose_w[:, self._body_idx]
+        root_pose_w = self._robot.data.root_pose_w
+        # compute ee frame in root frame
+        ee_frame_pos_b, ee_frame_orient_b = math_utils.subtract_frame_transforms(
+            root_pose_w[:, 0:3],
+            root_pose_w[:, 3:7],
+            ee_pose_w[:, 0:3],
+            ee_pose_w[:, 3:7],
+        )
+        # apply ee offset
+        ee_frame_pos_b, ee_frame_orient_b = math_utils.combine_frame_transforms(
+            ee_frame_pos_b, ee_frame_orient_b, self._ee_pos_offset, self._ee_rot_offset
         )
 
-        return ee_pose_b, ee_quat_b
-
-    def _compute_frame_jacobian(self):
-        """Computes the geometric Jacobian of the target frame in the root frame.
-
-        This function accounts for the target frame offset and applies the necessary transformations to obtain
-        the right Jacobian from the parent body Jacobian.
-        """
-        # read the parent jacobian
-        jacobian = self.jacobian_b
-
-        # account for the offset
-        # if self.cfg.body_offset is not None:
-        # Modify the jacobian to account for the offset
-        # -- translational part
-        # v_link = v_ee + w_ee x r_link_ee = v_J_ee * q + w_J_ee * q x r_link_ee
-        #        = (v_J_ee + w_J_ee x r_link_ee ) * q
-        #        = (v_J_ee - r_link_ee_[x] @ w_J_ee) * q
-        jacobian[:, 0:3, :] += torch.bmm(-math_utils.skew_symmetric_matrix(self._offset_pos), jacobian[:, 3:, :])
-        # -- rotational part
-        # w_link = R_link_ee @ w_ee
-        jacobian[:, 3:, :] = torch.bmm(math_utils.matrix_from_quat(self._offset_rot), jacobian[:, 3:, :])
-
-        return jacobian
+        return ee_frame_pos_b, ee_frame_orient_b
 
     ###################################
 
