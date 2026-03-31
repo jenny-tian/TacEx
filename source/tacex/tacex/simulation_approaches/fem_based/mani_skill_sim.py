@@ -9,14 +9,13 @@ from typing import TYPE_CHECKING
 import cv2
 import omni.usd
 
-from tacex_uipc.objects import UipcObject
-
 from ...gelsight_sensor import GelSightSensor
 from ..gelsight_simulator import GelSightSimulator
 from .sim import VisionTactileSensorUIPC
 
 if TYPE_CHECKING:
     from .mani_skill_sim_cfg import ManiSkillSimulatorCfg
+    from tacex_uipc.objects import UipcObject
 
 
 class ManiSkillSimulator(GelSightSimulator):
@@ -79,6 +78,9 @@ class ManiSkillSimulator(GelSightSimulator):
         self.patch_array_dict = copy.deepcopy(generate_patch_array())
 
     def marker_motion_simulation(self):
+        # update camera data
+        # self._ALL_INDICES = torch.arange(self.sensor._num_envs, device=self._device, dtype=torch.long)
+        # self.camera._update_poses(self._ALL_INDICES) # doesnt update time sampled buffers
         marker_flow = self.marker_motion_sim.gen_marker_flow()
         # todo do it properly for multi env, currently marker flow has shape [2, num_markers, 2] and we want [num_envs, 2, num_markers, 2]
         self.marker_data[0] = marker_flow

@@ -58,6 +58,7 @@ gym.register(
         "skrl_sac_cfg_entry_point": f"{agents.__name__}:skrl_sac_cfg.yaml",
     },
 )
+from .ball_rolling_tactile_rgb_uipc import BallRollingTactileRGBUipcCfg, BallRollingTactileRGBUipcEnv
 
 try:
     from .ball_rolling_tactile_rgb_uipc import BallRollingTactileRGBUipcCfg, BallRollingTactileRGBUipcEnv

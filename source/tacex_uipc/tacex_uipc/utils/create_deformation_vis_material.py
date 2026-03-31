@@ -107,7 +107,7 @@ def add_deform_primvar(gprim: UsdGeom.Mesh, primvar_name="deformValue"):
 def create_deform_vis_material(
     mat_path="/Materials/TriangleOutlineMat",
     primvar_name="deformValue",
-    ramp_img_path="",
+    ramp_img_path=None,
 ):
     stage = omni.usd.get_context().get_stage()
     if stage is None:

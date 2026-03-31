@@ -58,8 +58,10 @@ from tacex_tasks.utils import DirectLiveVisualizer
 from tacex_uipc import (
     UipcIsaacAttachments,
     UipcIsaacAttachmentsCfg,
-    UipcObject,
-    UipcObjectCfg,
+    UipcRigidObject,
+    UipcRigidObjectCfg,
+    UipcDeformableObject,
+    UipcDeformableObjectCfg,
     UipcRLEnv,
     UipcSimCfg,
 )
@@ -220,7 +222,10 @@ class BallRollingTactileRGBUipcCfg(DirectRLEnvCfg):
     uipc_sim = UipcSimCfg(
         # logger_level="Info"
         ground_height=0.0025,
-        contact=UipcSimCfg.Contact(d_hat=0.0001),
+        contact=UipcSimCfg.Contact(
+            d_hat=0.0001, enable_friction=True, default_friction_ratio=0.15, default_contact_resistance=100.0
+        ),
+        dt=0.005,
     )
 
     # scene
@@ -290,15 +295,15 @@ class BallRollingTactileRGBUipcCfg(DirectRLEnvCfg):
         edge_length_r=1 / 5,
         # epsilon_r=0.01
     )
-    object = UipcObjectCfg(
+    object = UipcRigidObjectCfg(
         prim_path="/World/envs/env_.*/ball",
-        init_state=AssetBaseCfg.InitialStateCfg(pos=[0.5, 0, 0.05]),  # rot=(0.72,-0.3,0.42,-0.45)
+        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.25, -0.35, 0.0051 + 0.0025)),  # rot=(0.72,-0.3,0.42,-0.45)
         spawn=sim_utils.UsdFileCfg(
             # usd_path="/workspace/tacex/source/tacex_assets/tacex_assets/data/Sensors/GelSight_Mini/Gelpad_low_res.usd",
             usd_path=f"{TACEX_ASSETS_DATA_DIR}/Props/ball_wood.usd",
         ),
         mesh_cfg=mesh_cfg,
-        constitution_cfg=UipcObjectCfg.AffineBodyConstitutionCfg(),
+        constitution_cfg=UipcRigidObjectCfg.AffineBodyConstitutionCfg(),
     )
     # simulate the gelpad as uipc mesh
     mesh_cfg = TetMeshCfg(
@@ -307,13 +312,18 @@ class BallRollingTactileRGBUipcCfg(DirectRLEnvCfg):
         edge_length_r=1 / 5,
         # epsilon_r=0.01
     )
-    gelpad_cfg = UipcObjectCfg(
+    gelpad_cfg = UipcDeformableObjectCfg(
         prim_path="/World/envs/env_.*/Robot/gelsight_mini_gelpad",
-        mesh_cfg=mesh_cfg,
-        constitution_cfg=UipcObjectCfg.StableNeoHookeanCfg(),
-    )
-    gelpad_attachment_cfg = UipcIsaacAttachmentsCfg(
-        constraint_strength_ratio=100.0, body_name="gelsight_mini_case", debug_vis=False, compute_attachment_data=True
+        # mesh_cfg=mesh_cfg,
+        mesh_cfg=None,  # use precomputed mesh
+        constitution_cfg=UipcDeformableObjectCfg.StableNeoHookeanCfg(),
+        constraint_cfg=UipcIsaacAttachmentsCfg(
+            constraint_strength_ratio=100.0,
+            body_name="gelsight_mini_case",
+            debug_vis=False,
+            compute_attachment_data=True,
+            isaaclab_rigid_body_prim_path="/World/envs/env_.*/Robot",
+        ),
     )
 
     # sensors
@@ -427,7 +437,7 @@ class BallRollingTactileRGBUipcCfg(DirectRLEnvCfg):
 
     x_bounds = (0.2, 0.8)
     y_bounds = (-0.4, 0.4)
-    too_far_away_threshold = 0.015
+    too_far_away_threshold = 0.02  # 0.015
     min_height_threshold = 0.002
 
     curriculum_cfg = {
@@ -647,16 +657,14 @@ class BallRollingTactileRGBUipcEnv(UipcRLEnv):
         # --- UIPC simulation setup ---
 
         # gelpad simulated via uipc
-        self._uipc_gelpad = UipcObject(self.cfg.gelpad_cfg, self.uipc_sim)
+        self._uipc_gelpad = UipcDeformableObject(self.cfg.gelpad_cfg, self.uipc_sim)
         self.scene.uipc_objects["uipc_gelpad"] = self._uipc_gelpad
 
-        self.object = UipcObject(self.cfg.object, self.uipc_sim)
-        self.scene.uipc_objects["object"] = self.object
+        # set rigid object for attachment-constraint
+        self._uipc_gelpad.constraint.isaaclab_rigid_object = self.scene.articulations["robot"]
 
-        # create attachment
-        self.attachment = UipcIsaacAttachments(
-            self.cfg.gelpad_attachment_cfg, self._uipc_gelpad, self.scene.articulations["robot"]
-        )
+        self.object = UipcRigidObject(self.cfg.object, self.uipc_sim)
+        self.scene.uipc_objects["object"] = self.object
 
     # MARK: pre-physics step calls
 
@@ -688,9 +696,11 @@ class BallRollingTactileRGBUipcEnv(UipcRLEnv):
 
     # MARK: dones
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:  # which environment is done
-        obj_pos = self.object.data.root_link_pos_w - self.scene.env_origins
+        obj_pos = self.object.data.root_pos_w - self.scene.env_origins
         out_of_bounds_x = (obj_pos[:, 0] < self.cfg.x_bounds[0]) | (obj_pos[:, 0] > self.cfg.x_bounds[1])
         out_of_bounds_y = (obj_pos[:, 1] < self.cfg.y_bounds[0]) | (obj_pos[:, 1] > self.cfg.y_bounds[1])
+
+        out_of_bounds_z = obj_pos[:, 2] > 0.05  # TODO add to env cfg
 
         obj_goal_distance = torch.norm(self._goal_pos_b[:, :2] - obj_pos[:, :2], dim=1)
         obj_too_far_away = obj_goal_distance > 0.75
@@ -708,7 +718,15 @@ class BallRollingTactileRGBUipcEnv(UipcRLEnv):
 
         min_height = ee_frame_pos[:, 2] < self.cfg.min_height_threshold
 
-        reset_cond = out_of_bounds_x | out_of_bounds_y | obj_too_far_away | ee_too_far_away | orient_cond | min_height
+        reset_cond = (
+            out_of_bounds_z
+            | out_of_bounds_x
+            | out_of_bounds_y
+            | obj_too_far_away
+            | ee_too_far_away
+            | orient_cond
+            | min_height
+        )
 
         # new goal position, if successful
         # success_env = (obj_goal_distance < self.cfg.success_reward["threshold"]).nonzero(as_tuple=False).squeeze(-1)
@@ -721,7 +739,8 @@ class BallRollingTactileRGBUipcEnv(UipcRLEnv):
         #     )
         #     # reset episode length
         #     self.episode_length_buf[success_env] = 0
-
+        # TODO rmv artifical shortening of episode
+        self.episode_length_buf = (0.5 + self.episode_length_buf).long()
         self._time_out = self.episode_length_buf >= self.max_episode_length - 1  # episode length limit
 
         return reset_cond, self._time_out
@@ -746,20 +765,32 @@ class BallRollingTactileRGBUipcEnv(UipcRLEnv):
         # reset buffers
         super()._reset_idx(env_ids)
 
+        # update initial nodal state of the gelpad for correct resets
+        if (
+            torch.norm(self._uipc_gelpad.data.default_nodal_state_w[:, :, :3] - self._uipc_gelpad.data.nodal_pos_w)
+            > 1e-5
+        ):
+            self._uipc_gelpad.data.default_nodal_state_w[:, :, :3] = self._uipc_gelpad.data.nodal_pos_w
+
         # spawn obj at initial position
         # obj_pos = self.object.data.default_root_state[full_reset_env_ids]
         # obj_pos[:, :2] += sample_uniform(-0.00025, 0.00025, (len(full_reset_env_ids), 2), self.device)
         # obj_pos[:, :3] += self.scene.env_origins[full_reset_env_ids]
         # self.object.write_root_state_to_sim(obj_pos, env_ids=full_reset_env_ids)
 
-        self.object.write_vertex_positions_to_sim(vertex_positions=self.object.init_vertex_pos)
+        obj_pos = self.object.data.default_root_state  # [full_reset_env_ids]
+        obj_pos[:, :2] += sample_uniform(-0.00025, 0.00025, (1, 2), self.device)  # (len(full_reset_env_ids), 2)
+        obj_pos[:, :3] += self.scene.env_origins  # [full_reset_env_ids]
+        self.object.write_pose_to_sim(obj_pos)
 
         # reset robot state
         joint_pos = self._robot.data.default_joint_pos[full_reset_env_ids]
         joint_vel = torch.zeros_like(joint_pos)
         self._robot.set_joint_position_target(joint_pos, env_ids=full_reset_env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=full_reset_env_ids)
-        self._uipc_gelpad.write_vertex_positions_to_sim(vertex_positions=self._uipc_gelpad.init_vertex_pos)
+
+        # reset uipc soft body
+        self._uipc_gelpad.write_nodal_pos_to_sim(self._uipc_gelpad.data.default_nodal_state_w[:, :, :3])
 
         # set commands: random target position
         self._goal_pos_b[env_ids, :2] = self.object.data.default_root_state[env_ids, :2]
@@ -787,10 +818,13 @@ class BallRollingTactileRGBUipcEnv(UipcRLEnv):
         # reset buffers used for curriculum learning
         self._total_episode_rew[env_ids] = 0.0
 
+        # # repeat resets of uipc objects
+        # self.object.write_pose_to_sim(obj_pos)
+
     # MARK: rewards
     def _get_rewards(self) -> torch.Tensor:
         # - Reward the agent for reaching the object using tanh-kernel.
-        obj_pos_b = self.object.data.root_link_pos_w - self.scene.env_origins
+        obj_pos_b = self.object.data.root_pos_w - self.scene.env_origins
         ee_frame_pos_b, ee_frame_orient_b = self._compute_frame_pose()
 
         (self.object_ee_distance, self.ee_goal_distance, self.ee_orient_error, self.obj_goal_distance) = (

@@ -10,3 +10,7 @@ from .create_deformation_vis_material import (
     create_deform_vis_material,
 )
 from .uipc_contact_info import ContactInfo
+
+import os
+
+TACEX_UIPC_UTILS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../"))

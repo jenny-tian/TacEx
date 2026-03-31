@@ -46,14 +46,14 @@ from tacex_uipc.utils.create_deformation_vis_material import (
     add_deform_primvar,
     compute_residuals_and_magnitudes,
 )
-from tacex_assets import TACEX_ASSETS_DATA_DIR
+from tacex_uipc.utils import TACEX_UIPC_UTILS_DIR
+# from tacex_assets import TACEX_ASSETS_DATA_DIR cannot import things from tacex_assets, otherwise circular import problem
 
 from ..uipc_object import UipcObject
 from .uipc_deformable_object_data import UipcDeformableObjectData
 
 if TYPE_CHECKING:
     from tacex_uipc.sim import UipcSim
-
     from .uipc_deformable_object_cfg import UipcDeformableObjectCfg
 
 
@@ -80,7 +80,7 @@ class UipcDeformableObject(UipcObject):
             usd_mesh_path = str(self._usd_geom_mesh.GetPath())
             fabric_prim = self.stage.GetPrimAtPath(usdrt.Sdf.Path(usd_mesh_path))
             mat_path = "/World/Materials/DeformationVisMat"
-            create_deform_vis_material(mat_path, ramp_img_path=f"{TACEX_ASSETS_DATA_DIR}/Materials/color_ramp.png")
+            create_deform_vis_material(mat_path, ramp_img_path=f"{TACEX_UIPC_UTILS_DIR}/color_ramp.png")
 
             # bind material with fabric
             rel = fabric_prim.GetRelationship(usdrt.UsdShade.Tokens.materialBinding)

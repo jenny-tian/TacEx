@@ -54,7 +54,7 @@ from tacex import GelSightSensor
 
 from tacex_assets import TACEX_ASSETS_DATA_DIR
 from tacex_assets.robots.franka.franka_gsmini_gripper_uipc import FRANKA_PANDA_ARM_GSMINI_GRIPPER_HIGH_PD_UIPC_CFG
-from tacex_assets.sensors.gelsight_mini.gsmini_cfg import GelSightMiniCfg
+from tacex_assets.sensors.gelsight_mini import GELSIGHT_MINI_TAXIM_CFG
 
 from tacex_uipc import (
     UipcIsaacAttachmentsCfg,
@@ -159,10 +159,10 @@ class BeamTwistEnvCfg(DirectRLEnvCfg):
     )
 
     # -- Configs for GsMinis
-    gsmini_left = GelSightMiniCfg(
+    gsmini_left = GELSIGHT_MINI_TAXIM_CFG.replace(
         prim_path="/World/envs/env_.*/Robot/gelsight_mini_case_left",
-        sensor_camera_cfg=GelSightMiniCfg.SensorCameraCfg(
-            prim_path_appendix="/Camera",
+        sensor_camera_cfg=GELSIGHT_MINI_TAXIM_CFG.SensorCameraCfg(
+            prim_name="Camera",
             update_period=0,
             resolution=(32, 32),
             data_types=["depth"],
@@ -180,10 +180,10 @@ class BeamTwistEnvCfg(DirectRLEnvCfg):
         tactile_img_res=(32, 32),
     )
 
-    gsmini_right = GelSightMiniCfg(
+    gsmini_right = GELSIGHT_MINI_TAXIM_CFG.replace(
         prim_path="/World/envs/env_.*/Robot/gelsight_mini_case_right",
-        sensor_camera_cfg=GelSightMiniCfg.SensorCameraCfg(
-            prim_path_appendix="/Camera",
+        sensor_camera_cfg=GELSIGHT_MINI_TAXIM_CFG.SensorCameraCfg(
+            prim_name="Camera",
             update_period=0,
             resolution=(32, 32),
             data_types=["depth"],

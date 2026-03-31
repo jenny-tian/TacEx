@@ -120,7 +120,7 @@ class UipcRigidObjectData:
         trans = geo_slot.geometry().transforms().view()
         trans = torch.tensor(trans, device=self.device).reshape(1, 4, 4)
         root_pos_w, root_orient_w = math_utils.unmake_pose(trans)
-        print("Root pos w of abd body: ", root_pos_w)
+        # print("Root pos w of abd body: ", root_pos_w)
         return root_pos_w.reshape(1, 3)  # todo need to adjust once we go multi env
 
     # @property

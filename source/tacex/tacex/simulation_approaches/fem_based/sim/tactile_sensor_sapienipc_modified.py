@@ -131,7 +131,12 @@ class VisionTactileSensorUIPC:
         # self.camera._update_poses(self.camera._ALL_INDICES)
         # math_utils.convert_camera_frame_orientation_convention
         cam_pos_w = self.camera._data.pos_w
-        cam_quat_w = self.camera._data.quat_w_ros  # quat_w_opengl quat_w_ros #quat_w_world
+        cam_quat_w = self.camera._data.quat_w_ros  # quat_w_opengl #quat_w_world
+
+        # NOTE: I think there is a slight delay between camera pose data, thats why marker sim with FEM bad in case of fast movement
+        # self._ALL_INDICES = torch.arange(self.camera._num_envs, device=self.camera._device, dtype=torch.long)
+        # cam_pos_w, cam_quat_w = self.camera._view.get_world_poses(self._ALL_INDICES)
+
         v_cv = math_utils.transform_points(input_vertices, pos=cam_pos_w, quat=cam_quat_w)
         return v_cv
 
@@ -151,6 +156,7 @@ class VisionTactileSensorUIPC:
         # convert to batched #todo fix it for multi env
         t_target = t_target[None, :, :]  # (N, 3) -> (N, 1, 3)
 
+        rot_inv = rot_inv.to(t_target.dtype)
         v_cv = torch.matmul(rot_inv, t_target.transpose_(1, 2))
         v_cv = v_cv.transpose_(1, 2)
         # todo fix it for multi env

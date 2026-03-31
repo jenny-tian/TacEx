@@ -1,6 +1,6 @@
 from tacex import GelSightSensorCfg
-from tacex.simulation_approaches.fem_based import ManiSkillSimulatorCfg
 from tacex.simulation_approaches.gpu_taxim import TaximSimulatorCfg
+from tacex.simulation_approaches.fem_based import ManiSkillSimulatorCfg
 
 from tacex_assets import TACEX_SENSORS_DATA_DIR
 

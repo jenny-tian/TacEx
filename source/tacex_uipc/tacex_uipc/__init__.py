@@ -1,5 +1,7 @@
 from .envs import UipcInteractiveScene, UipcRLEnv
 from .objects import (
+    UipcObject,
+    UipcObjectCfg,
     UipcConstraint,
     UipcConstraintCfg,
     UipcDeformableObject,
