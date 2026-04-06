@@ -57,7 +57,9 @@ def add_barycentric_primvar(gprim: UsdGeom.Mesh, primvar_name="baryCoord"):
         for _ in range(count):
             next(idx_iter, None)
     primvar.Set(bary_vals)
-    print(f"Added face-varying barycentric primvar '{primvar_name}' to {gprim.GetPath()}")
+    print(
+        f"Added face-varying barycentric primvar for surface triangles visualization - '{primvar_name}' to {gprim.GetPath()}"
+    )
 
     # print("MESH Debug")
     # mesh = mesh_prim.GetPrim()

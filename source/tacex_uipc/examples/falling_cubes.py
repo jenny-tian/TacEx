@@ -158,7 +158,7 @@ def main():
         # alternate between rigid and soft cubes
         if i % 2 == 1:
             uipc_obj_cfg_class = UipcRigidObjectCfg
-            constitution_cfg = UipcRigidObjectCfg.AffineBodyConstitutionCfg()
+            constitution_cfg = UipcRigidObjectCfg.AffineBodyConstitutionCfg(kinematic=True)
             uipc_obj_class = UipcRigidObject
         else:
             uipc_obj_cfg_class = UipcDeformableObjectCfg

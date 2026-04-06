@@ -170,6 +170,11 @@ class UipcRigidObject(UipcObject):
         translation = np.array(tf_world.ExtractTranslation())
         rotation = math_utils.quat_from_matrix(torch.tensor(np.array(tf_world.ExtractRotationMatrix())))
         scale = np.array(Gf.Vec3d(*(v.GetLength() for v in tf_world.ExtractRotationMatrix())))
+
+        # workaround for bug with kinematic objects -> somehow mesh is scaled additionally/twice?
+        if self.cfg.constitution_cfg.kinematic:
+            scale = [1, 1, 1]
+
         scale_mat = np.array(
             [
                 [scale[0], 0, 0],
