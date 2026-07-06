@@ -100,6 +100,16 @@ def test_lab_pick_cafe_dataset_writer_and_collection_script_exist():
     assert "--num_demos" in script_source
     assert "--dataset_file" in script_source
     assert "--success_only" in script_source
+    assert (
+        "else:\n"
+        "                exported = writer.flush_episode(\n"
+        "                    success=False,"
+    ) in script_source
+    assert (
+        "                if exported:\n"
+        "                    recorded += 1\n"
+        "                    print(f\"[INFO] recorded_demo={recorded}/{args_cli.num_demos} success=False\")"
+    ) in script_source
 
 
 def test_launch_scripts_are_thin_and_import_shared_env():
@@ -169,3 +179,38 @@ def test_cafe_writer_outputs_forcecapture_compatible_hdf5(tmp_path):
         assert demo["obs"]["robot0_force"].dtype == np.float32
         assert demo["obs"]["robot0_image"].shape == (2, 224, 224, 3)
         assert demo["obs"]["robot0_image"].dtype == np.uint8
+
+
+def test_cafe_writer_reopens_existing_file_and_appends_next_demo(tmp_path):
+    spec = importlib.util.spec_from_file_location("bc_dataset", TASK_ROOT / "bc_dataset.py")
+    bc_dataset = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(bc_dataset)
+    CafeHdf5Writer = bc_dataset.CafeHdf5Writer
+
+    dataset_file = tmp_path / "append_existing.hdf5"
+
+    def write_episode(writer: CafeHdf5Writer, value: float):
+        for _ in range(3):
+            obs = {
+                "robot0_pos": torch.full((1, 10), value),
+                "robot0_force": torch.full((1, 4), value),
+            }
+            action = torch.full((1, 10), value)
+            writer.append_high_step(obs, action)
+        writer.append_low_step(torch.zeros((1, 224, 224, 3), dtype=torch.uint8), torch.full((1, 10), value))
+        return writer.flush_episode(
+            success=False,
+            labware_reset_pos_w=torch.zeros((1, 3)),
+            labware_reset_quat_w=torch.tensor([[1.0, 0.0, 0.0, 0.0]]),
+            success_only=False,
+        )
+
+    assert write_episode(CafeHdf5Writer(dataset_file, freq_ratio=3), 1.0) is True
+    assert write_episode(CafeHdf5Writer(dataset_file, freq_ratio=3), 2.0) is True
+
+    with h5py.File(dataset_file, "r") as h5:
+        assert h5.attrs["num_demos"] == 2
+        assert "demo_0" in h5["data"]
+        assert "demo_1" in h5["data"]
+        np.testing.assert_allclose(h5["data"]["demo_1"]["actions"]["high"][0], np.full((10,), 2.0))

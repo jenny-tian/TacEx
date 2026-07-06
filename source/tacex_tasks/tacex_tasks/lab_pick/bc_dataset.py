@@ -16,6 +16,18 @@ class CafeHdf5Writer:
         self.freq_ratio = freq_ratio
         self.include_marker = include_marker
         self.episode_index = 0
+        if self.dataset_file.exists():
+            with h5py.File(self.dataset_file, "r") as h5:
+                self.episode_index = int(h5.attrs.get("num_demos", 0))
+                data_group = h5.get("data")
+                if data_group is not None:
+                    demo_indices = [
+                        int(name.split("_", maxsplit=1)[1])
+                        for name in data_group.keys()
+                        if name.startswith("demo_") and name.split("_", maxsplit=1)[1].isdigit()
+                    ]
+                    if demo_indices:
+                        self.episode_index = max(self.episode_index, max(demo_indices) + 1)
         self.high_pos: list[np.ndarray] = []
         self.high_force: list[np.ndarray] = []
         self.high_action: list[np.ndarray] = []

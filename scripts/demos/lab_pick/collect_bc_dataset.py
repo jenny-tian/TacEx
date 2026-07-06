@@ -74,12 +74,15 @@ def main():
                         print(f"[INFO] recorded_demo={recorded}/{args_cli.num_demos} success={success}")
                     break
             else:
-                writer.flush_episode(
+                exported = writer.flush_episode(
                     success=False,
                     labware_reset_pos_w=env.labware_reset_pos_w,
                     labware_reset_quat_w=env.labware_reset_quat_w,
                     success_only=args_cli.success_only,
                 )
+                if exported:
+                    recorded += 1
+                    print(f"[INFO] recorded_demo={recorded}/{args_cli.num_demos} success=False")
     finally:
         env.close()
 
