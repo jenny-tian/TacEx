@@ -53,6 +53,7 @@ class LabPickEnv(DirectRLEnv):
         self.labware_reset_pos_w = torch.zeros((self.num_envs, 3), device=self.device)
         self.labware_reset_quat_w = torch.zeros((self.num_envs, 4), device=self.device)
         self.labware_reset_quat_w[:, 0] = 1.0
+        self.last_object_pos_b = self.initial_object_pos_b.clone()
 
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
@@ -143,7 +144,14 @@ class LabPickEnv(DirectRLEnv):
         workspace_max = self.workspace_max_b + self.cfg.terminate_ee_workspace_margin
         ee_outside_workspace = torch.any((ee_pos_b < workspace_min) | (ee_pos_b > workspace_max), dim=1)
 
-        terminated = object_dropped | object_too_far | ee_outside_workspace
+        left_touch, right_touch = self.tactile_contact_depths()
+        touched = (left_touch > self.cfg.tactile_threshold_mm) | (right_touch > self.cfg.tactile_threshold_mm)
+        self.has_touched |= touched
+        ft = self.get_cafe_ft()
+        force_norm = torch.linalg.norm(ft[:, :3], dim=1)
+        object_broken = self.has_touched & (force_norm > self.cfg.terminate_break_force_threshold_n)
+
+        terminated = object_dropped | object_too_far | ee_outside_workspace | object_broken
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         return terminated, time_out
 
@@ -193,6 +201,7 @@ class LabPickEnv(DirectRLEnv):
         self.gripper_width[env_ids] = 0.04
         self.labware_reset_pos_w[env_ids] = root_state[:, :3]
         self.labware_reset_quat_w[env_ids] = root_state[:, 3:7]
+        self.last_object_pos_b[env_ids] = self.initial_object_pos_b[env_ids]
 
         _, ee_quat_b = self._compute_frame_pose()
         self.nominal_ee_quat_b[env_ids] = ee_quat_b[env_ids]
@@ -234,15 +243,57 @@ class LabPickEnv(DirectRLEnv):
     def get_cafe_observation(self) -> dict[str, torch.Tensor]:
         tool_pos_b, tool_quat_b = self._compute_frame_pose()
         tool_rot6d_b = self._quat_to_rot6d(tool_quat_b)
-        left_touch, right_touch = self.tactile_contact_depths()
-        mean_touch = 0.5 * (left_touch + right_touch)
-        contact_tag = ((left_touch > self.cfg.tactile_threshold_mm) | (right_touch > self.cfg.tactile_threshold_mm)).float()
 
         return {
             # CAFE: xyz(3) + rot6d(6) + gripper_width(1)
             "robot0_pos": torch.cat((tool_pos_b, tool_rot6d_b, self.gripper_width[:, :1]), dim=-1).detach().clone(),
-            "robot0_force": torch.stack((left_touch, right_touch, mean_touch, contact_tag), dim=-1).detach().clone(),
+            # CAFE: Fx,Fy,Fz,Tx,Ty,Tz
+            "robot0_force": self.get_cafe_ft(),
         }
+
+    def get_cafe_ft(self) -> torch.Tensor:
+        left_force_n, right_force_n = self._estimate_contact_forces_from_tactile()
+        ft = torch.zeros((self.num_envs, 6), dtype=torch.float32, device=self.device)
+        ft[:, 2] = left_force_n + right_force_n
+        torque_y = self.cfg.contact_torque_arm_m * (right_force_n - left_force_n)
+        ft[:, 4] = torque_y
+        return ft.detach().clone()
+
+    def _estimate_contact_forces_from_tactile(self) -> tuple[torch.Tensor, torch.Tensor]:
+        left_touch, right_touch = self.tactile_contact_depths()
+        left_force_n = torch.clamp(left_touch, min=0.0) * self.cfg.contact_force_n_per_mm
+        right_force_n = torch.clamp(right_touch, min=0.0) * self.cfg.contact_force_n_per_mm
+        return left_force_n, right_force_n
+
+    def get_cafe_marker2d(self) -> torch.Tensor:
+        left_touch, right_touch = self.tactile_contact_depths()
+        object_pos_b = self.labware.data.root_pos_w - self._robot.data.root_link_pos_w
+        object_delta_b = object_pos_b - self.last_object_pos_b
+        self.last_object_pos_b[:] = object_pos_b
+
+        rows = torch.linspace(-1.0, 1.0, self.cfg.marker2d_rows, device=self.device)
+        cols = torch.linspace(-1.0, 1.0, self.cfg.marker2d_cols, device=self.device)
+        grid_y, grid_x = torch.meshgrid(rows, cols, indexing="ij")
+
+        left_weight = self._marker2d_weight(grid_x, grid_y, center_x=-0.35, center_y=0.0)
+        right_weight = self._marker2d_weight(grid_x, grid_y, center_x=0.35, center_y=0.0)
+
+        depth = (
+            left_touch[:, None, None] * left_weight[None, :, :]
+            + right_touch[:, None, None] * right_weight[None, :, :]
+        ) * self.cfg.marker2d_depth_scale
+        shear_x = object_delta_b[:, 0, None, None] * self.cfg.marker2d_shear_scale
+        shear_y = object_delta_b[:, 1, None, None] * self.cfg.marker2d_shear_scale
+        dx = shear_x * (left_weight + right_weight)[None, :, :] + depth * grid_x[None, :, :]
+        dy = shear_y * (left_weight + right_weight)[None, :, :] + depth * grid_y[None, :, :]
+        marker2d = torch.stack((dx, dy), dim=-1)
+        return marker2d.detach().clone().float()
+
+    def _marker2d_weight(
+        self, grid_x: torch.Tensor, grid_y: torch.Tensor, center_x: float, center_y: float
+    ) -> torch.Tensor:
+        dist2 = (grid_x - center_x) ** 2 + (grid_y - center_y) ** 2
+        return torch.exp(-dist2 / (2.0 * self.cfg.marker2d_sigma**2))
 
     def get_cafe_action(self) -> torch.Tensor:
         target_rot6d_b = self._quat_to_rot6d(self.last_target_quat_b)

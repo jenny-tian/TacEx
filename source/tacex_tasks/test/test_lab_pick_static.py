@@ -77,9 +77,47 @@ def test_lab_pick_env_implements_dones_reset_randomization_and_cafe_io():
     ) in source
 
 
+def test_lab_pick_env_uses_six_axis_ft_for_cafe_force_and_break_failure():
+    cfg_source = read(TASK_ROOT / "lab_pick_env_cfg.py")
+    env_source = read(TASK_ROOT / "lab_pick_env.py")
+    assert "terminate_break_force_threshold_n: float" in cfg_source
+    assert "contact_force_n_per_mm: float" in cfg_source
+    assert "contact_torque_arm_m: float" in cfg_source
+    assert "def _estimate_contact_forces_from_tactile(self) -> tuple[torch.Tensor, torch.Tensor]:" in env_source
+    assert "def get_cafe_ft(self) -> torch.Tensor:" in env_source
+    assert "ft[:, :3]" in env_source
+    assert "force_norm = torch.linalg.norm(ft[:, :3], dim=1)" in env_source
+    assert "object_broken = self.has_touched & (force_norm > self.cfg.terminate_break_force_threshold_n)" in env_source
+    assert "terminated = object_dropped | object_too_far | ee_outside_workspace | object_broken" in env_source
+    assert '"robot0_force": self.get_cafe_ft()' in env_source
+    assert "CAFE: Fx,Fy,Fz,Tx,Ty,Tz" in env_source
+    get_cafe_ft_source = env_source.split("def get_cafe_ft(self) -> torch.Tensor:", maxsplit=1)[1].split(
+        "\n    def ", maxsplit=1
+    )[0]
+    assert "body_incoming_joint_wrench_b" not in get_cafe_ft_source
+    assert "left_force_n, right_force_n = self._estimate_contact_forces_from_tactile()" in get_cafe_ft_source
+    assert "torque_y = self.cfg.contact_torque_arm_m * (right_force_n - left_force_n)" in get_cafe_ft_source
+
+
+def test_lab_pick_env_generates_gelsight_marker2d_displacement_field():
+    cfg_source = read(TASK_ROOT / "lab_pick_env_cfg.py")
+    env_source = read(TASK_ROOT / "lab_pick_env.py")
+    assert "marker2d_rows: int = 14" in cfg_source
+    assert "marker2d_cols: int = 26" in cfg_source
+    assert "marker2d_sigma: float" in cfg_source
+    assert "marker2d_depth_scale: float" in cfg_source
+    assert "marker2d_shear_scale: float" in cfg_source
+    assert "self.last_object_pos_b" in env_source
+    assert "def get_cafe_marker2d(self) -> torch.Tensor:" in env_source
+    assert "torch.meshgrid" in env_source
+    assert "torch.exp(-dist2 / (2.0 * self.cfg.marker2d_sigma**2))" in env_source
+    assert "left_touch, right_touch = self.tactile_contact_depths()" in env_source
+    assert "object_delta_b = object_pos_b - self.last_object_pos_b" in env_source
+    assert "marker2d = torch.stack((dx, dy), dim=-1)" in env_source
+
+
 def test_lab_pick_cafe_dataset_writer_and_collection_script_exist():
     writer_source = read(TASK_ROOT / "bc_dataset.py")
-    script_source = read(SCRIPT_ROOT / "collect_bc_dataset.py")
     assert "class CafeHdf5Writer:" in writer_source
     assert "def append_high_step(" in writer_source
     assert "def append_low_step(" in writer_source
@@ -94,22 +132,29 @@ def test_lab_pick_cafe_dataset_writer_and_collection_script_exist():
     assert 'obs_group.create_dataset("robot0_image"' in writer_source
     assert 'h5.attrs["freq_ratio"] = self.freq_ratio' in writer_source
     assert "n_high = n_low * self.freq_ratio" in writer_source
-    assert "env.get_cafe_observation()" in script_source
-    assert "env.get_cafe_action()" in script_source
-    assert "env.get_cafe_image()" in script_source
-    assert "--num_demos" in script_source
-    assert "--dataset_file" in script_source
-    assert "--success_only" in script_source
-    assert (
-        "else:\n"
-        "                exported = writer.flush_episode(\n"
-        "                    success=False,"
-    ) in script_source
-    assert (
-        "                if exported:\n"
-        "                    recorded += 1\n"
-        "                    print(f\"[INFO] recorded_demo={recorded}/{args_cli.num_demos} success=False\")"
-    ) in script_source
+
+
+def test_lab_pick_collection_script_uses_forcecapture_cafe_record_layout():
+    script_source = read(SCRIPT_ROOT / "collect_bc_dataset.py")
+    assert "CafeRecordWriter" in script_source
+    assert "--record_dir" in script_source
+    assert "--camera_hz" in script_source
+    assert "--aligned_hz" in script_source
+    assert "--ft_hz" in script_source
+    assert "--tracker_hz" in script_source
+    assert "append_aligned_sample" in script_source
+    assert "append_camera_sample" in script_source
+    assert "append_ft_sample" in script_source
+    assert "append_tracker_sample" in script_source
+    assert "append_encoder_sample" in script_source
+    assert "append_xense_sample" in script_source
+    assert "record_dir / f\"record_{recorded:06d}\"" in script_source
+    assert "env.wrist_camera.data.output" in script_source
+    assert "def _due(next_timestamp: float, current_timestamp: float) -> bool:" in script_source
+    assert "while _due(next_ft_t, timestamp)" in script_source
+    assert "while _due(next_tracker_t, timestamp)" in script_source
+    assert "env.get_cafe_marker2d()" in script_source
+    assert "np.zeros((14, 26, 2)" not in script_source
 
 
 def test_launch_scripts_are_thin_and_import_shared_env():
@@ -214,3 +259,77 @@ def test_cafe_writer_reopens_existing_file_and_appends_next_demo(tmp_path):
         assert "demo_0" in h5["data"]
         assert "demo_1" in h5["data"]
         np.testing.assert_allclose(h5["data"]["demo_1"]["actions"]["high"][0], np.full((10,), 2.0))
+
+
+def test_cafe_record_writer_outputs_forcecapture_cafe_directory(tmp_path):
+    spec = importlib.util.spec_from_file_location("bc_dataset", TASK_ROOT / "bc_dataset.py")
+    bc_dataset = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(bc_dataset)
+    CafeRecordWriter = bc_dataset.CafeRecordWriter
+
+    record_dir = tmp_path / "record_000000"
+    writer = CafeRecordWriter(record_dir)
+
+    for index in range(6):
+        timestamp = index / 60.0
+        sample = {
+            "xyz": np.array([index, index + 1, index + 2], dtype=np.float32),
+            "quat": np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32),
+            "width": np.array([0.02], dtype=np.float32),
+            "ft": np.full((6,), float(index), dtype=np.float32),
+            "marker2d": np.full((14, 26, 2), float(index), dtype=np.float32),
+            "rgb": np.full((480, 640, 3), index, dtype=np.uint8),
+            "action": np.full((10,), float(index), dtype=np.float32),
+        }
+        writer.append_aligned_sample(timestamp, sample)
+        if index % 2 == 0:
+            writer.append_camera_sample(timestamp, sample["rgb"])
+        writer.append_ft_sample(timestamp, sample["ft"])
+        writer.append_tracker_sample(timestamp, sample["xyz"], sample["quat"])
+        writer.append_encoder_sample(timestamp, sample["width"])
+        writer.append_xense_sample(timestamp, sample["marker2d"])
+
+    writer.flush_episode(
+        success=True,
+        labware_reset_pos_w=np.array([0.1, 0.2, 0.3], dtype=np.float32),
+        labware_reset_quat_w=np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+    )
+
+    expected_files = [
+        "metadata.npz",
+        "encoder/width.npy",
+        "encoder/timestamps.npy",
+        "tracker/xyz.npy",
+        "tracker/quat.npy",
+        "tracker/timestamps.npy",
+        "ftsensor/ft.npy",
+        "ftsensor/ft_compensated.npy",
+        "ftsensor/timestamps.npy",
+        "xense/marker2d.npy",
+        "xense/marker2d_flatten.npy",
+        "xense/timestamps.npy",
+        "camera/color/timestamps.npy",
+        "aligned_60Hz/xyz.npy",
+        "aligned_60Hz/quat.npy",
+        "aligned_60Hz/width.npy",
+        "aligned_60Hz/ft.npy",
+        "aligned_60Hz/marker2d.npy",
+        "aligned_60Hz/rgb.npy",
+        "aligned_60Hz/action.npy",
+    ]
+    for relative_path in expected_files:
+        assert (record_dir / relative_path).exists(), relative_path
+
+    assert np.load(record_dir / "aligned_60Hz" / "xyz.npy").shape == (6, 3)
+    assert np.load(record_dir / "aligned_60Hz" / "quat.npy").shape == (6, 4)
+    assert np.load(record_dir / "aligned_60Hz" / "width.npy").shape == (6, 1)
+    assert np.load(record_dir / "aligned_60Hz" / "ft.npy").shape == (6, 6)
+    assert np.load(record_dir / "aligned_60Hz" / "marker2d.npy").shape == (6, 14 * 26 * 2)
+    assert np.load(record_dir / "aligned_60Hz" / "rgb.npy").shape == (6, 480, 640, 3)
+    assert np.load(record_dir / "ftsensor" / "ft.npy").shape == (6, 6)
+    assert np.load(record_dir / "camera" / "color" / "timestamps.npy").shape == (3,)
+
+    metadata = np.load(record_dir / "metadata.npz")
+    assert bool(metadata["success"]) is True
+    np.testing.assert_allclose(metadata["labware_reset_pos_w"], [0.1, 0.2, 0.3])

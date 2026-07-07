@@ -118,3 +118,167 @@ class CafeHdf5Writer:
         self.low_image.clear()
         self.low_action.clear()
         self.high_marker2d.clear()
+
+
+class CafeRecordWriter:
+    """Writer for ForceCapture-CAFE style raw record directories and aligned 60Hz arrays."""
+
+    def __init__(self, record_dir: str | Path):
+        self.record_dir = Path(record_dir)
+        self.aligned_samples: list[dict[str, np.ndarray | float]] = []
+        self.camera_timestamps: list[float] = []
+        self.camera_rgb: list[np.ndarray] = []
+        self.ft_timestamps: list[float] = []
+        self.ft: list[np.ndarray] = []
+        self.tracker_timestamps: list[float] = []
+        self.tracker_xyz: list[np.ndarray] = []
+        self.tracker_quat: list[np.ndarray] = []
+        self.encoder_timestamps: list[float] = []
+        self.encoder_width: list[np.ndarray] = []
+        self.xense_timestamps: list[float] = []
+        self.xense_marker2d: list[np.ndarray] = []
+
+    def append_aligned_sample(self, timestamp: float, sample: dict[str, np.ndarray]):
+        self.aligned_samples.append(
+            {
+                "timestamp": float(timestamp),
+                "xyz": np.asarray(sample["xyz"], dtype=np.float32).reshape(3),
+                "quat": np.asarray(sample["quat"], dtype=np.float32).reshape(4),
+                "width": np.asarray(sample["width"], dtype=np.float32).reshape(1),
+                "ft": np.asarray(sample["ft"], dtype=np.float32).reshape(6),
+                "marker2d": self._flatten_marker2d(sample["marker2d"]),
+                "rgb": np.asarray(sample["rgb"], dtype=np.uint8),
+                "action": np.asarray(sample["action"], dtype=np.float32).reshape(-1),
+            }
+        )
+
+    def append_camera_sample(self, timestamp: float, rgb: np.ndarray):
+        self.camera_timestamps.append(float(timestamp))
+        self.camera_rgb.append(np.asarray(rgb, dtype=np.uint8))
+
+    def append_ft_sample(self, timestamp: float, ft: np.ndarray):
+        self.ft_timestamps.append(float(timestamp))
+        self.ft.append(np.asarray(ft, dtype=np.float32).reshape(6))
+
+    def append_tracker_sample(self, timestamp: float, xyz: np.ndarray, quat: np.ndarray):
+        self.tracker_timestamps.append(float(timestamp))
+        self.tracker_xyz.append(np.asarray(xyz, dtype=np.float32).reshape(3))
+        self.tracker_quat.append(np.asarray(quat, dtype=np.float32).reshape(4))
+
+    def append_encoder_sample(self, timestamp: float, width: np.ndarray):
+        self.encoder_timestamps.append(float(timestamp))
+        self.encoder_width.append(np.asarray(width, dtype=np.float32).reshape(1))
+
+    def append_xense_sample(self, timestamp: float, marker2d: np.ndarray):
+        self.xense_timestamps.append(float(timestamp))
+        self.xense_marker2d.append(np.asarray(marker2d, dtype=np.float32))
+
+    def flush_episode(
+        self,
+        *,
+        success: bool,
+        labware_reset_pos_w: np.ndarray,
+        labware_reset_quat_w: np.ndarray,
+    ):
+        if not self.aligned_samples:
+            self.clear_episode()
+            return False
+
+        self._mkdirs()
+        aligned = self.record_dir / "aligned_60Hz"
+        np.save(aligned / "timestamps.npy", self._stack_aligned("timestamp", dtype=np.float64))
+        np.save(aligned / "xyz.npy", self._stack_aligned("xyz", dtype=np.float32))
+        np.save(aligned / "quat.npy", self._stack_aligned("quat", dtype=np.float32))
+        np.save(aligned / "width.npy", self._stack_aligned("width", dtype=np.float32))
+        np.save(aligned / "ft.npy", self._stack_aligned("ft", dtype=np.float32))
+        np.save(aligned / "marker2d.npy", self._stack_aligned("marker2d", dtype=np.float32))
+        np.save(aligned / "rgb.npy", self._stack_aligned("rgb", dtype=np.uint8))
+        np.save(aligned / "action.npy", self._stack_aligned("action", dtype=np.float32))
+
+        np.save(self.record_dir / "encoder" / "width.npy", self._stack_or_empty(self.encoder_width, (0, 1), np.float32))
+        np.save(
+            self.record_dir / "encoder" / "timestamps.npy",
+            np.asarray(self.encoder_timestamps, dtype=np.float64),
+        )
+
+        np.save(self.record_dir / "tracker" / "xyz.npy", self._stack_or_empty(self.tracker_xyz, (0, 3), np.float32))
+        np.save(self.record_dir / "tracker" / "quat.npy", self._stack_or_empty(self.tracker_quat, (0, 4), np.float32))
+        np.save(
+            self.record_dir / "tracker" / "timestamps.npy",
+            np.asarray(self.tracker_timestamps, dtype=np.float64),
+        )
+
+        ft = self._stack_or_empty(self.ft, (0, 6), np.float32)
+        np.save(self.record_dir / "ftsensor" / "ft.npy", ft)
+        np.save(self.record_dir / "ftsensor" / "ft_compensated.npy", ft.copy())
+        np.save(
+            self.record_dir / "ftsensor" / "timestamps.npy",
+            np.asarray(self.ft_timestamps, dtype=np.float64),
+        )
+
+        marker2d = self._stack_or_empty(self.xense_marker2d, (0, 14, 26, 2), np.float32)
+        np.save(self.record_dir / "xense" / "marker2d.npy", marker2d)
+        np.save(self.record_dir / "xense" / "marker2d_flatten.npy", marker2d.reshape(marker2d.shape[0], -1))
+        np.save(
+            self.record_dir / "xense" / "timestamps.npy",
+            np.asarray(self.xense_timestamps, dtype=np.float64),
+        )
+
+        np.save(
+            self.record_dir / "camera" / "color" / "timestamps.npy",
+            np.asarray(self.camera_timestamps, dtype=np.float64),
+        )
+        if self.camera_rgb:
+            np.save(self.record_dir / "camera" / "color" / "rgb.npy", np.stack(self.camera_rgb, axis=0))
+        else:
+            np.save(self.record_dir / "camera" / "color" / "rgb.npy", np.zeros((0, 480, 640, 3), dtype=np.uint8))
+
+        np.savez(
+            self.record_dir / "metadata.npz",
+            success=np.asarray(success, dtype=np.bool_),
+            labware_reset_pos_w=np.asarray(labware_reset_pos_w, dtype=np.float32).reshape(3),
+            labware_reset_quat_w=np.asarray(labware_reset_quat_w, dtype=np.float32).reshape(4),
+        )
+
+        self.clear_episode()
+        return True
+
+    def clear_episode(self):
+        self.aligned_samples.clear()
+        self.camera_timestamps.clear()
+        self.camera_rgb.clear()
+        self.ft_timestamps.clear()
+        self.ft.clear()
+        self.tracker_timestamps.clear()
+        self.tracker_xyz.clear()
+        self.tracker_quat.clear()
+        self.encoder_timestamps.clear()
+        self.encoder_width.clear()
+        self.xense_timestamps.clear()
+        self.xense_marker2d.clear()
+
+    def _mkdirs(self):
+        for relative_path in (
+            "encoder",
+            "tracker",
+            "ftsensor",
+            "xense",
+            "camera/color",
+            "aligned_60Hz",
+        ):
+            (self.record_dir / relative_path).mkdir(parents=True, exist_ok=True)
+
+    def _stack_aligned(self, key: str, dtype: np.dtype):
+        values = [sample[key] for sample in self.aligned_samples]
+        if key == "timestamp":
+            return np.asarray(values, dtype=dtype)
+        return np.stack(values, axis=0).astype(dtype, copy=False)
+
+    def _flatten_marker2d(self, marker2d: np.ndarray) -> np.ndarray:
+        marker = np.asarray(marker2d, dtype=np.float32)
+        return marker.reshape(-1)
+
+    def _stack_or_empty(self, values: list[np.ndarray], shape: tuple[int, ...], dtype: np.dtype):
+        if not values:
+            return np.zeros(shape, dtype=dtype)
+        return np.stack(values, axis=0).astype(dtype, copy=False)

@@ -22,6 +22,14 @@ class LabPickEnvCfg(DirectRLEnvCfg):
     terminate_object_drop_height: float = 0.010
     terminate_object_xy_distance: float = 0.30
     terminate_ee_workspace_margin: float = 0.05
+    terminate_break_force_threshold_n: float = 40.0
+    contact_force_n_per_mm: float = 8.0
+    contact_torque_arm_m: float = 0.018
+    marker2d_rows: int = 14
+    marker2d_cols: int = 26
+    marker2d_sigma: float = 0.22
+    marker2d_depth_scale: float = 0.35
+    marker2d_shear_scale: float = 45.0
     success_lift_height: float = 0.030
     tactile_threshold_mm: float = 0.0
     randomize_labware_position: bool = True
