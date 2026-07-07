@@ -22,7 +22,7 @@ class LabPickEnvCfg(DirectRLEnvCfg):
     terminate_object_drop_height: float = 0.010
     terminate_object_xy_distance: float = 0.30
     terminate_ee_workspace_margin: float = 0.05
-    terminate_break_force_threshold_n: float = 40.0
+    terminate_break_force_threshold_n: float = 6.0
     contact_force_n_per_mm: float = 8.0
     contact_torque_arm_m: float = 0.018
     marker2d_rows: int = 14

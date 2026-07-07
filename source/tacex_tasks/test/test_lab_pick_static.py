@@ -37,6 +37,7 @@ def test_lab_pick_cfg_defines_scene_assets_randomization_and_termination_thresho
     assert 'labware_name = "cup"' in source
     assert "terminate_object_drop_height: float = 0.010" in source
     assert "terminate_object_xy_distance: float = 0.30" in source
+    assert "terminate_break_force_threshold_n: float = 6.0" in source
     assert "success_lift_height: float = 0.200" in source
     assert "scripted_lift_assist_on_contact: bool = True" in source
     assert "randomize_labware_position: bool = True" in source
