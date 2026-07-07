@@ -30,7 +30,7 @@ class LabPickEnvCfg(DirectRLEnvCfg):
     marker2d_sigma: float = 0.22
     marker2d_depth_scale: float = 0.35
     marker2d_shear_scale: float = 45.0
-    success_lift_height: float = 0.030
+    success_lift_height: float = 0.200
     tactile_threshold_mm: float = 0.0
     randomize_labware_position: bool = True
     labware_pos_randomization_xy: tuple[float, float] = (0.020, 0.010)

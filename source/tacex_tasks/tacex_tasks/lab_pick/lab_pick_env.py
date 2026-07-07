@@ -332,7 +332,7 @@ class LabPickEnv(DirectRLEnv):
         elif self.labware_name == "slide":
             hover_height = 0.048
             grasp_height = 0.0006
-            lift_height = 0.07
+            lift_height = 0.25
             close_width = 0.0
             close_start = 120
             close_end = 240

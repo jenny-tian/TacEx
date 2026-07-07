@@ -37,7 +37,7 @@ def test_lab_pick_cfg_defines_scene_assets_randomization_and_termination_thresho
     assert 'labware_name = "cup"' in source
     assert "terminate_object_drop_height: float = 0.010" in source
     assert "terminate_object_xy_distance: float = 0.30" in source
-    assert "success_lift_height: float = 0.030" in source
+    assert "success_lift_height: float = 0.200" in source
     assert "randomize_labware_position: bool = True" in source
     assert "labware_pos_randomization_xy: tuple[float, float] = (0.020, 0.010)" in source
     assert "labware_yaw_randomization: float = 0.20" in source
@@ -74,6 +74,12 @@ def test_lab_pick_env_implements_dones_reset_randomization_and_cafe_io():
         "touch_left, touch_right = self.tactile_contact_depths()\n"
         "        touched = (touch_left > self.cfg.tactile_threshold_mm) | "
         "(touch_right > self.cfg.tactile_threshold_mm)"
+    ) in source
+    assert (
+        'elif self.labware_name == "slide":\n'
+        "            hover_height = 0.048\n"
+        "            grasp_height = 0.0006\n"
+        "            lift_height = 0.25"
     ) in source
 
 
