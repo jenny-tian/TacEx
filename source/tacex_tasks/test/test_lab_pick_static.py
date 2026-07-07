@@ -38,6 +38,7 @@ def test_lab_pick_cfg_defines_scene_assets_randomization_and_termination_thresho
     assert "terminate_object_drop_height: float = 0.010" in source
     assert "terminate_object_xy_distance: float = 0.30" in source
     assert "success_lift_height: float = 0.200" in source
+    assert "scripted_lift_assist_on_contact: bool = True" in source
     assert "randomize_labware_position: bool = True" in source
     assert "labware_pos_randomization_xy: tuple[float, float] = (0.020, 0.010)" in source
     assert "labware_yaw_randomization: float = 0.20" in source
@@ -46,6 +47,12 @@ def test_lab_pick_cfg_defines_scene_assets_randomization_and_termination_thresho
     assert "FRANKA_PANDA_ARM_GSMINI_GRIPPER_HIGH_PD_RIGID_CFG" in source
     assert "GelSightMiniCfg" in source
     assert "TiledCameraCfg" in source
+    assert "ContactSensorCfg" in source
+    assert "left_finger_contact_sensor = ContactSensorCfg(" in source
+    assert "right_finger_contact_sensor = ContactSensorCfg(" in source
+    assert 'prim_path="/World/envs/env_.*/Robot/gelpad_left"' in source
+    assert 'prim_path="/World/envs/env_.*/Robot/gelpad_right"' in source
+    assert 'filter_prim_paths_expr=["/World/envs/env_.*/labware"]' in source
 
 
 def test_lab_pick_env_implements_dones_reset_randomization_and_cafe_io():
@@ -79,8 +86,11 @@ def test_lab_pick_env_implements_dones_reset_randomization_and_cafe_io():
         'elif self.labware_name == "slide":\n'
         "            hover_height = 0.048\n"
         "            grasp_height = 0.0006\n"
-        "            lift_height = 0.25"
+        "            lift_height = 0.25\n"
+        "            close_width = 0.012"
     ) in source
+    assert "def _apply_scripted_lift_assist(self, target_object_pos_b: torch.Tensor):" in source
+    assert "self.labware.write_root_state_to_sim(root_state[env_ids], env_ids=env_ids)" in source
 
 
 def test_lab_pick_env_uses_six_axis_ft_for_cafe_force_and_break_failure():
@@ -89,6 +99,13 @@ def test_lab_pick_env_uses_six_axis_ft_for_cafe_force_and_break_failure():
     assert "terminate_break_force_threshold_n: float" in cfg_source
     assert "contact_force_n_per_mm: float" in cfg_source
     assert "contact_torque_arm_m: float" in cfg_source
+    assert "from isaaclab.sensors import ContactSensor" in env_source
+    assert "self.left_finger_contact_sensor = ContactSensor(self.cfg.left_finger_contact_sensor)" in env_source
+    assert "self.right_finger_contact_sensor = ContactSensor(self.cfg.right_finger_contact_sensor)" in env_source
+    assert 'self.scene.sensors["left_finger_contact_sensor"] = self.left_finger_contact_sensor' in env_source
+    assert 'self.scene.sensors["right_finger_contact_sensor"] = self.right_finger_contact_sensor' in env_source
+    assert "def _contact_force_from_sensor(self, sensor: ContactSensor) -> torch.Tensor:" in env_source
+    assert "def _contact_sensor_ft(self) -> torch.Tensor | None:" in env_source
     assert "def _estimate_contact_forces_from_tactile(self) -> tuple[torch.Tensor, torch.Tensor]:" in env_source
     assert "def get_cafe_ft(self) -> torch.Tensor:" in env_source
     assert "ft[:, :3]" in env_source
@@ -101,8 +118,10 @@ def test_lab_pick_env_uses_six_axis_ft_for_cafe_force_and_break_failure():
         "\n    def ", maxsplit=1
     )[0]
     assert "body_incoming_joint_wrench_b" not in get_cafe_ft_source
-    assert "left_force_n, right_force_n = self._estimate_contact_forces_from_tactile()" in get_cafe_ft_source
-    assert "torque_y = self.cfg.contact_torque_arm_m * (right_force_n - left_force_n)" in get_cafe_ft_source
+    assert "contact_ft = self._contact_sensor_ft()" in get_cafe_ft_source
+    assert "return self._indentation_ft()" in get_cafe_ft_source
+    assert "left_force_n, right_force_n = self._estimate_contact_forces_from_tactile()" in env_source
+    assert "torque_y = self.cfg.contact_torque_arm_m * (right_force_n - left_force_n)" in env_source
 
 
 def test_lab_pick_env_generates_gelsight_marker2d_displacement_field():
@@ -120,6 +139,23 @@ def test_lab_pick_env_generates_gelsight_marker2d_displacement_field():
     assert "left_touch, right_touch = self.tactile_contact_depths()" in env_source
     assert "object_delta_b = object_pos_b - self.last_object_pos_b" in env_source
     assert "marker2d = torch.stack((dx, dy), dim=-1)" in env_source
+
+
+def test_lab_pick_env_contact_sensor_ft_uses_filtered_force_vectors_and_base_frame():
+    env_source = read(TASK_ROOT / "lab_pick_env.py")
+    assert "sensor.data.force_matrix_w" in env_source
+    assert "sensor.data.net_forces_w" in env_source
+    assert "left_force_w = self._contact_force_from_sensor(self.left_finger_contact_sensor)" in env_source
+    assert "right_force_w = self._contact_force_from_sensor(self.right_finger_contact_sensor)" in env_source
+    assert "left_pos_w = self._robot.data.body_link_pos_w[:, self._left_finger_body_idx]" in env_source
+    assert "right_pos_w = self._robot.data.body_link_pos_w[:, self._right_finger_body_idx]" in env_source
+    assert "hand_pos_w = self._robot.data.body_link_pos_w[:, self._body_idx]" in env_source
+    assert "torque_w = torch.cross(left_pos_w - hand_pos_w, left_force_w, dim=1)" in env_source
+    assert "root_rot_b = math_utils.matrix_from_quat(math_utils.quat_inv(self._robot.data.root_link_quat_w))" in env_source
+    assert "force_b = torch.bmm(root_rot_b, force_w.unsqueeze(-1)).squeeze(-1)" in env_source
+    assert "contact_ft = self._contact_sensor_ft()" in env_source
+    assert "if contact_ft is not None:" in env_source
+    assert "return self._indentation_ft()" in env_source
 
 
 def test_lab_pick_cafe_dataset_writer_and_collection_script_exist():

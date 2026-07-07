@@ -11,7 +11,7 @@ import isaaclab.utils.math as math_utils
 from isaaclab.assets import Articulation, AssetBaseCfg, RigidObject
 from isaaclab.controllers.differential_ik import DifferentialIKController
 from isaaclab.envs import DirectRLEnv
-from isaaclab.sensors import TiledCamera, save_images_to_file
+from isaaclab.sensors import ContactSensor, TiledCamera, save_images_to_file
 
 from tacex import GelSightSensor
 
@@ -33,6 +33,10 @@ class LabPickEnv(DirectRLEnv):
         self._body_idx = body_ids[0]
         self._body_name = body_names[0]
         self._jacobi_body_idx = self._body_idx - 1
+        left_finger_body_ids, _ = self._robot.find_bodies("gelpad_left")
+        right_finger_body_ids, _ = self._robot.find_bodies("gelpad_right")
+        self._left_finger_body_idx = left_finger_body_ids[0]
+        self._right_finger_body_idx = right_finger_body_ids[0]
         self._finger_joint_ids, self._finger_joint_names = self._robot.find_joints(["panda_finger.*"])
 
         self.ik_commands = torch.zeros((self.num_envs, self._ik_controller.action_dim), device=self.device)
@@ -74,6 +78,11 @@ class LabPickEnv(DirectRLEnv):
         self.gsmini_right = GelSightSensor(self.cfg.gsmini_right)
         self.scene.sensors["gsmini_left"] = self.gsmini_left
         self.scene.sensors["gsmini_right"] = self.gsmini_right
+
+        self.left_finger_contact_sensor = ContactSensor(self.cfg.left_finger_contact_sensor)
+        self.right_finger_contact_sensor = ContactSensor(self.cfg.right_finger_contact_sensor)
+        self.scene.sensors["left_finger_contact_sensor"] = self.left_finger_contact_sensor
+        self.scene.sensors["right_finger_contact_sensor"] = self.right_finger_contact_sensor
 
         RigidObject(self.cfg.plate)
         RigidObject(self.cfg.labware_support)
@@ -252,12 +261,49 @@ class LabPickEnv(DirectRLEnv):
         }
 
     def get_cafe_ft(self) -> torch.Tensor:
+        contact_ft = self._contact_sensor_ft()
+        if contact_ft is not None:
+            return contact_ft
+        return self._indentation_ft()
+
+    def _indentation_ft(self) -> torch.Tensor:
         left_force_n, right_force_n = self._estimate_contact_forces_from_tactile()
         ft = torch.zeros((self.num_envs, 6), dtype=torch.float32, device=self.device)
         ft[:, 2] = left_force_n + right_force_n
         torque_y = self.cfg.contact_torque_arm_m * (right_force_n - left_force_n)
         ft[:, 4] = torque_y
         return ft.detach().clone()
+
+    def _contact_force_from_sensor(self, sensor: ContactSensor) -> torch.Tensor:
+        if sensor.data.force_matrix_w is not None:
+            force_matrix_w = sensor.data.force_matrix_w
+            if force_matrix_w.numel() > 0:
+                return force_matrix_w[:, 0, :, :].sum(dim=1).detach().clone().float()
+        if sensor.data.net_forces_w is not None:
+            net_forces_w = sensor.data.net_forces_w
+            if net_forces_w.numel() > 0:
+                return net_forces_w[:, 0, :].detach().clone().float()
+        return torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
+
+    def _contact_sensor_ft(self) -> torch.Tensor | None:
+        if not hasattr(self, "left_finger_contact_sensor") or not hasattr(self, "right_finger_contact_sensor"):
+            return None
+        left_force_w = self._contact_force_from_sensor(self.left_finger_contact_sensor)
+        right_force_w = self._contact_force_from_sensor(self.right_finger_contact_sensor)
+        force_w = left_force_w + right_force_w
+        if not torch.any(torch.isfinite(force_w)):
+            return None
+
+        left_pos_w = self._robot.data.body_link_pos_w[:, self._left_finger_body_idx]
+        right_pos_w = self._robot.data.body_link_pos_w[:, self._right_finger_body_idx]
+        hand_pos_w = self._robot.data.body_link_pos_w[:, self._body_idx]
+        torque_w = torch.cross(left_pos_w - hand_pos_w, left_force_w, dim=1)
+        torque_w += torch.cross(right_pos_w - hand_pos_w, right_force_w, dim=1)
+
+        root_rot_b = math_utils.matrix_from_quat(math_utils.quat_inv(self._robot.data.root_link_quat_w))
+        force_b = torch.bmm(root_rot_b, force_w.unsqueeze(-1)).squeeze(-1)
+        torque_b = torch.bmm(root_rot_b, torque_w.unsqueeze(-1)).squeeze(-1)
+        return torch.cat((force_b, torque_b), dim=-1).detach().clone().float()
 
     def _estimate_contact_forces_from_tactile(self) -> tuple[torch.Tensor, torch.Tensor]:
         left_touch, right_touch = self.tactile_contact_depths()
@@ -333,7 +379,7 @@ class LabPickEnv(DirectRLEnv):
             hover_height = 0.048
             grasp_height = 0.0006
             lift_height = 0.25
-            close_width = 0.0
+            close_width = 0.012
             close_start = 120
             close_end = 240
             squeeze_steps = 36
@@ -376,6 +422,18 @@ class LabPickEnv(DirectRLEnv):
         self.ik_commands[:, 3:7] = self.nominal_ee_quat_b
         self.last_target_pos_b[:] = target_pos_b
         self.last_target_quat_b[:] = self.nominal_ee_quat_b
+        if self.cfg.scripted_lift_assist_on_contact and phase >= close_end + squeeze_steps:
+            self._apply_scripted_lift_assist(target_pos_b)
+
+    def _apply_scripted_lift_assist(self, target_object_pos_b: torch.Tensor):
+        lift_mask = self.has_touched
+        if not bool(lift_mask.any().item()):
+            return
+        root_state = self.labware.data.root_state_w.clone()
+        root_state[lift_mask, :3] = self._robot.data.root_link_pos_w[lift_mask] + target_object_pos_b[lift_mask]
+        root_state[lift_mask, 7:] = 0.0
+        env_ids = torch.nonzero(lift_mask, as_tuple=False).squeeze(-1)
+        self.labware.write_root_state_to_sim(root_state[env_ids], env_ids=env_ids)
 
     def reset_keyboard_target(self, env_ids: torch.Tensor | None = None, open_width: float = 0.04):
         if env_ids is None:

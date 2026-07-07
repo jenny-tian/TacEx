@@ -5,7 +5,7 @@ from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
 from isaaclab.envs import DirectRLEnvCfg, ViewerCfg
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sensors import TiledCameraCfg
+from isaaclab.sensors import ContactSensorCfg, TiledCameraCfg
 from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.utils import configclass
 
@@ -31,6 +31,7 @@ class LabPickEnvCfg(DirectRLEnvCfg):
     marker2d_depth_scale: float = 0.35
     marker2d_shear_scale: float = 45.0
     success_lift_height: float = 0.200
+    scripted_lift_assist_on_contact: bool = True
     tactile_threshold_mm: float = 0.0
     randomize_labware_position: bool = True
     labware_pos_randomization_xy: tuple[float, float] = (0.020, 0.010)
@@ -248,6 +249,24 @@ class LabPickEnvCfg(DirectRLEnvCfg):
     )
     gsmini_right = gsmini_left.replace(
         prim_path="/World/envs/env_.*/Robot/gelsight_mini_case_right",
+    )
+
+    left_finger_contact_sensor = ContactSensorCfg(
+        prim_path="/World/envs/env_.*/Robot/gelpad_left",
+        update_period=0.0,
+        history_length=1,
+        track_pose=True,
+        debug_vis=False,
+        filter_prim_paths_expr=["/World/envs/env_.*/labware"],
+    )
+
+    right_finger_contact_sensor = ContactSensorCfg(
+        prim_path="/World/envs/env_.*/Robot/gelpad_right",
+        update_period=0.0,
+        history_length=1,
+        track_pose=True,
+        debug_vis=False,
+        filter_prim_paths_expr=["/World/envs/env_.*/labware"],
     )
 
     ik_controller_cfg = DifferentialIKControllerCfg(command_type="pose", use_relative_mode=False, ik_method="dls")
