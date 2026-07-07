@@ -106,7 +106,14 @@ The default stream rates follow the ForceCapture-CAFE collection setup:
 - tracker pose: `300 Hz`, `xyz + quat`
 - tactile marker displacement: `60 Hz`, raw `(14, 26, 2)` and flattened `728`
 
-In simulation, `ft` is generated from GelSight/fingertip contact indentation as an estimated contact wrench, and `marker2d` is generated as a nonuniform GelSight-derived displacement field. These are physically motivated simulation signals, not real hardware sensor readings.
+In simulation, `ft` is generated from Isaac Lab `ContactSensor` readings on the left and right GelSight/fingertip pads. The exported 6D wrench is the net fingertip contact force and torque transformed into the robot base frame. `marker2d` is generated as a nonuniform GelSight-derived displacement field. These are physically motivated simulation signals, not real hardware sensor readings.
+
+### Task criteria
+
+- Labware reset pose is randomized each episode for better behavior-cloning generalization.
+- A slide demonstration is marked successful when the labware is lifted at least `0.20 m` above its reset height.
+- The scripted slide expert trajectory lifts to `0.25 m`.
+- A demonstration is terminated as broken/failed if the net fingertip contact force exceeds `6 N`.
 
 ### Collect one slide demonstration
 
@@ -123,8 +130,9 @@ timeout 240s env \
   --labware slide \
   --num_envs 1 \
   --num_demos 1 \
-  --max_episode_steps 360 \
+  --max_episode_steps 960 \
   --record_dir /tmp/lab_pick_cafe_records \
+  --success_only \
   --headless
 ```
 
@@ -159,6 +167,36 @@ Syntax check:
 - `scripts/demos/lab_pick/collect_bc_dataset.py`: CAFE-compatible data collection.
 - `scripts/demos/lab_pick/pick_labware.py`: scripted LabPick demo.
 - `scripts/demos/lab_pick/pick_labware_keyboard.py`: keyboard-controlled LabPick demo.
+
+Scripted Isaac Lab demo:
+
+```bash
+env \
+  __GLX_VENDOR_LIBRARY_NAME=nvidia \
+  VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json \
+  PYTHONUNBUFFERED=1 \
+  PYTHONPATH=source/tacex:source/tacex_assets:source/tacex_tasks \
+  /home/tjx/miniforge3/envs/env_isaaclab/bin/python \
+  scripts/demos/lab_pick/pick_labware.py \
+  --labware slide \
+  --num_envs 1 \
+  --duration 6 \
+  --headless
+```
+
+Keyboard-controlled Isaac Lab demo:
+
+```bash
+env \
+  __GLX_VENDOR_LIBRARY_NAME=nvidia \
+  VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json \
+  PYTHONUNBUFFERED=1 \
+  PYTHONPATH=source/tacex:source/tacex_assets:source/tacex_tasks \
+  /home/tjx/miniforge3/envs/env_isaaclab/bin/python \
+  scripts/demos/lab_pick/pick_labware_keyboard.py \
+  --labware slide \
+  --num_envs 1
+```
 
 
 ## Contributing
