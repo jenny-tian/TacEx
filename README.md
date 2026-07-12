@@ -144,6 +144,12 @@ Useful options:
 - `--record_dir /path/to/output`
 - `--aligned_hz 60 --camera_hz 30 --ft_hz 90 --tracker_hz 300`
 
+Failed attempts are not stopped early. The script finishes the full `--max_episode_steps` episode, then writes a debug snapshot under `failed_attempts/attempt_xxxxxx/` with:
+
+- `last_frame_rgb.npy` and `last_frame_rgb.png`/`.ppm`
+- `last_frame_ft.npy`
+- `last_frame_info.txt`, including failure reason, final FT, force norm, torque norm, and the first failure step
+
 ### Verify the LabPick CAFE pipeline
 
 Static tests:

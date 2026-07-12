@@ -197,6 +197,13 @@ def test_lab_pick_collection_script_uses_forcecapture_cafe_record_layout():
     assert "while _due(next_ft_t, timestamp)" in script_source
     assert "while _due(next_tracker_t, timestamp)" in script_source
     assert "env.get_cafe_marker2d()" in script_source
+    assert "failed_attempts" in script_source
+    assert "last_frame_rgb.npy" in script_source
+    assert "last_frame_ft.npy" in script_source
+    assert "last_frame_info.txt" in script_source
+    assert "if terminated_now and not episode_failed:" in script_source
+    assert "if success and not episode_failed:" in script_source
+    assert "if done or success:" not in script_source
     assert "np.zeros((14, 26, 2)" not in script_source
 
 

@@ -65,6 +65,87 @@ def _due(next_timestamp: float, current_timestamp: float) -> bool:
     return next_timestamp <= current_timestamp + 1.0e-9
 
 
+def _failure_reasons(env: LabPickEnv) -> list[str]:
+    reasons: list[str] = []
+
+    object_drop_delta = env.labware.data.root_pos_w[:, 2] - env.initial_object_height
+    if bool((object_drop_delta < -env.cfg.terminate_object_drop_height)[0].item()):
+        reasons.append("object_drop")
+
+    object_pos_b = env.labware.data.root_pos_w - env._robot.data.root_link_pos_w
+    object_xy_delta = object_pos_b[:, :2] - env.initial_object_pos_b[:, :2]
+    if bool((torch.linalg.norm(object_xy_delta, dim=1) > env.cfg.terminate_object_xy_distance)[0].item()):
+        reasons.append("object_xy_distance")
+
+    ee_pos_b, _ = env._compute_frame_pose()
+    workspace_min = env.workspace_min_b - env.cfg.terminate_ee_workspace_margin
+    workspace_max = env.workspace_max_b + env.cfg.terminate_ee_workspace_margin
+    if bool(torch.any((ee_pos_b < workspace_min) | (ee_pos_b > workspace_max), dim=1)[0].item()):
+        reasons.append("ee_workspace")
+
+    force_norm = torch.linalg.norm(env.get_cafe_ft()[:, :3], dim=1)
+    if bool((env.has_touched & (force_norm > env.cfg.terminate_break_force_threshold_n))[0].item()):
+        reasons.append("break_force")
+
+    return reasons
+
+
+def _save_rgb_preview(rgb_path: Path, rgb: np.ndarray) -> Path:
+    rgb_u8 = np.asarray(rgb, dtype=np.uint8)
+    try:
+        from PIL import Image
+
+        Image.fromarray(rgb_u8).save(rgb_path)
+        return rgb_path
+    except Exception:
+        ppm_path = rgb_path.with_suffix(".ppm")
+        height, width = rgb_u8.shape[:2]
+        with ppm_path.open("wb") as stream:
+            stream.write(f"P6\n{width} {height}\n255\n".encode("ascii"))
+            stream.write(rgb_u8[:, :, :3].tobytes())
+        return ppm_path
+
+
+def _write_failure_debug(
+    debug_dir: Path,
+    *,
+    sample: dict[str, np.ndarray],
+    timestamp: float,
+    step: int,
+    first_failure_step: int,
+    failure_reason: str,
+    break_force_threshold_n: float,
+):
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    rgb = np.asarray(sample["rgb"], dtype=np.uint8)
+    ft = np.asarray(sample["ft"], dtype=np.float32).reshape(6)
+    force_norm = float(np.linalg.norm(ft[:3]))
+    torque_norm = float(np.linalg.norm(ft[3:]))
+
+    np.save(debug_dir / "last_frame_rgb.npy", rgb)
+    np.save(debug_dir / "last_frame_ft.npy", ft)
+    preview_path = _save_rgb_preview(debug_dir / "last_frame_rgb.png", rgb)
+    summary = (
+        f"failure_reason={failure_reason}\n"
+        f"last_step={step}\n"
+        f"first_failure_step={first_failure_step}\n"
+        f"timestamp={timestamp:.6f}\n"
+        f"ft=[{ft[0]:.6f}, {ft[1]:.6f}, {ft[2]:.6f}, {ft[3]:.6f}, {ft[4]:.6f}, {ft[5]:.6f}]\n"
+        f"force_norm_n={force_norm:.6f}\n"
+        f"torque_norm_nm={torque_norm:.6f}\n"
+        f"break_force_threshold_n={break_force_threshold_n:.6f}\n"
+        f"rgb_npy={debug_dir / 'last_frame_rgb.npy'}\n"
+        f"rgb_preview={preview_path}\n"
+        f"ft_npy={debug_dir / 'last_frame_ft.npy'}\n"
+    )
+    (debug_dir / "last_frame_info.txt").write_text(summary, encoding="utf-8")
+    print(
+        "[WARN] failed_attempt "
+        f"reason={failure_reason} last_step={step} first_failure_step={first_failure_step} "
+        f"force_norm_n={force_norm:.6f} ft={ft.round(6).tolist()} debug_dir={debug_dir}"
+    )
+
+
 def main():
     env_cfg = LabPickEnvCfg()
     env_cfg.scene.num_envs = args_cli.num_envs
@@ -77,17 +158,28 @@ def main():
     record_dir = _record_base_dir()
     record_dir.mkdir(parents=True, exist_ok=True)
     recorded = 0
+    attempted = 0
 
     try:
         while simulation_app.is_running() and recorded < args_cli.num_demos:
             env.reset()
+            attempt_index = attempted
+            attempted += 1
             writer = CafeRecordWriter(record_dir / f"record_{recorded:06d}")
+            failure_debug_dir = record_dir / "failed_attempts" / f"attempt_{attempt_index:06d}"
             next_aligned_t = 1.0 / args_cli.aligned_hz
             next_camera_t = 1.0 / args_cli.camera_hz
             next_ft_t = 1.0 / args_cli.ft_hz
             next_tracker_t = 1.0 / args_cli.tracker_hz
             next_encoder_t = 1.0 / args_cli.aligned_hz
             next_xense_t = 1.0 / args_cli.aligned_hz
+            episode_failed = False
+            first_failure_step = -1
+            failure_reason = ""
+            last_sample: dict[str, np.ndarray] | None = None
+            last_timestamp = 0.0
+            last_step = -1
+            exported = False
 
             for step in range(args_cli.max_episode_steps):
                 env.command_pick_state_machine()
@@ -102,6 +194,9 @@ def main():
 
                 timestamp = float((step + 1) * env.physics_dt)
                 sample = _make_cafe_sample(env, action)
+                last_sample = sample
+                last_timestamp = timestamp
+                last_step = step
 
                 while _due(next_aligned_t, timestamp):
                     writer.append_aligned_sample(next_aligned_t, sample)
@@ -122,35 +217,48 @@ def main():
                     writer.append_xense_sample(next_xense_t, sample["marker2d"])
                     next_xense_t += 1.0 / args_cli.aligned_hz
 
-                terminated, time_out = env._get_dones()
-                done = bool((terminated | time_out)[0].item())
+                terminated, _time_out = env._get_dones()
+                terminated_now = bool(terminated[0].item())
+                if terminated_now and not episode_failed:
+                    episode_failed = True
+                    first_failure_step = step
+                    failure_reason = "+".join(_failure_reasons(env)) or "terminated"
 
                 lift_delta = env.labware.data.root_pos_w[:, 2] - env.initial_object_height
                 success = bool((lift_delta[0] > env.cfg.success_lift_height).item())
-                if done or success:
-                    exported = False
-                    if success or not args_cli.success_only:
-                        exported = writer.flush_episode(
-                            success=success,
-                            labware_reset_pos_w=_to_numpy(env.labware_reset_pos_w).astype(np.float32),
-                            labware_reset_quat_w=_to_numpy(env.labware_reset_quat_w).astype(np.float32),
-                        )
-                    else:
-                        writer.clear_episode()
+                if success and not episode_failed:
+                    exported = writer.flush_episode(
+                        success=True,
+                        labware_reset_pos_w=_to_numpy(env.labware_reset_pos_w).astype(np.float32),
+                        labware_reset_quat_w=_to_numpy(env.labware_reset_quat_w).astype(np.float32),
+                    )
                     if exported:
                         recorded += 1
-                        print(f"[INFO] recorded_demo={recorded}/{args_cli.num_demos} success={success}")
+                        print(f"[INFO] recorded_demo={recorded}/{args_cli.num_demos} success=True")
                     break
-            else:
-                exported = False
-                if not args_cli.success_only:
+
+            if not exported:
+                if not episode_failed:
+                    failure_reason = "timeout_or_no_success"
+                    first_failure_step = last_step
+                if last_sample is not None:
+                    _write_failure_debug(
+                        failure_debug_dir,
+                        sample=last_sample,
+                        timestamp=last_timestamp,
+                        step=last_step,
+                        first_failure_step=first_failure_step,
+                        failure_reason=failure_reason,
+                        break_force_threshold_n=env.cfg.terminate_break_force_threshold_n,
+                    )
+                if args_cli.success_only:
+                    writer.clear_episode()
+                else:
                     exported = writer.flush_episode(
                         success=False,
                         labware_reset_pos_w=_to_numpy(env.labware_reset_pos_w).astype(np.float32),
                         labware_reset_quat_w=_to_numpy(env.labware_reset_quat_w).astype(np.float32),
                     )
-                else:
-                    writer.clear_episode()
                 if exported:
                     recorded += 1
                     print(f"[INFO] recorded_demo={recorded}/{args_cli.num_demos} success=False")
