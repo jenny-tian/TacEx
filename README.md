@@ -135,7 +135,18 @@ timeout 240s env \
   --success_only \
   --headless
 ```
-
+If you have already started your virtual environmrnt, you can use the following command
+```
+  env __GLX_VENDOR_LIBRARY_NAME=nvidia \
+    PYTHONUNBUFFERED=1 \
+    python scripts/demos/lab_pick/collect_bc_dataset.py \
+    --labware slide \
+    --num_envs 1 \
+    --num_demos 1 \
+    --max_episode_steps 960 \
+    --record_dir /tmp/lab_pick_cafe_records \
+    --success_only 
+```
 Useful options:
 
 - `--labware slide|coverslip|cup`

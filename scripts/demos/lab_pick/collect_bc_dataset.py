@@ -1,11 +1,66 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
+import sys
 from pathlib import Path
 
 import numpy as np
 import torch
+
+
+def _bootstrap_isaaclab_source_paths():
+    spec = importlib.util.find_spec("isaaclab")
+    if spec is None or spec.origin is None:
+        return
+
+    isaaclab_package_dir = Path(spec.origin).resolve().parent
+    source_root = isaaclab_package_dir / "source"
+    if not source_root.is_dir():
+        return
+
+    for package_name in ("isaaclab", "isaaclab_assets", "isaaclab_tasks", "isaaclab_rl", "isaaclab_mimic"):
+        package_source = source_root / package_name
+        if (package_source / package_name).is_dir():
+            package_source_str = str(package_source)
+            if package_source_str not in sys.path:
+                sys.path.insert(0, package_source_str)
+
+
+def _bootstrap_isaacsim_warp_path():
+    spec = importlib.util.find_spec("isaacsim")
+    if spec is None or spec.origin is None:
+        return
+
+    isaacsim_package_dir = Path(spec.origin).resolve().parent
+    extcache_dir = isaacsim_package_dir / "extscache"
+    if not extcache_dir.is_dir():
+        return
+
+    warp_core_paths = sorted(extcache_dir.glob("omni.warp.core-*"), reverse=True)
+    for warp_core_path in warp_core_paths:
+        if (warp_core_path / "warp" / "__init__.py").is_file():
+            warp_core_path_str = str(warp_core_path)
+            if warp_core_path_str not in sys.path:
+                sys.path.insert(0, warp_core_path_str)
+            return
+
+
+_bootstrap_isaaclab_source_paths()
+_bootstrap_isaacsim_warp_path()
+
 from isaaclab.app import AppLauncher
+
+
+def _patch_isaaclab_missing_exports():
+    import isaaclab.utils as isaaclab_utils
+    from isaaclab.utils.buffers.circular_buffer import CircularBuffer
+    from isaaclab.utils.buffers.delay_buffer import DelayBuffer
+    from isaaclab.utils.buffers.timestamped_buffer import TimestampedBuffer
+
+    isaaclab_utils.CircularBuffer = CircularBuffer
+    isaaclab_utils.DelayBuffer = DelayBuffer
+    isaaclab_utils.TimestampedBuffer = TimestampedBuffer
 
 
 parser = argparse.ArgumentParser(description="Collect ForceCapture-CAFE style LabPick records.")
@@ -24,6 +79,8 @@ parser.add_argument("--seed", type=int, default=0)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 args_cli.enable_cameras = True
+
+_patch_isaaclab_missing_exports()
 
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app

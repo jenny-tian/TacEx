@@ -7,6 +7,7 @@
 
 import os
 import toml
+import warnings
 
 # Conveniences to other module directories via relative paths
 ISAACLAB_TASKS_EXT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../"))
@@ -27,4 +28,7 @@ from isaaclab_tasks.utils import import_packages
 # The blacklist is used to prevent importing configs from sub-packages
 _BLACKLIST_PKGS = ["utils", ".mdp"]
 # Import all configs in this package
-import_packages(__name__, _BLACKLIST_PKGS)
+try:
+    import_packages(__name__, _BLACKLIST_PKGS)
+except ImportError as exc:
+    warnings.warn(f"Skipping automatic tacex_tasks package import because an optional task dependency failed: {exc}")

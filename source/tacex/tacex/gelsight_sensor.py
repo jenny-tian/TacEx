@@ -225,20 +225,25 @@ class GelSightSensor(SensorBase):
         self._indentation_depth = torch.zeros((self._num_envs), device=self._device)
 
         if self.cfg.sensor_camera_cfg is not None:
-            self.camera_cfg: TiledCameraCfg = TiledCameraCfg(
-                prim_path=self.cfg.prim_path + self.cfg.sensor_camera_cfg.prim_path_appendix,
-                update_period=self.cfg.sensor_camera_cfg.update_period,
-                height=self.cfg.sensor_camera_cfg.resolution[1],
-                width=self.cfg.sensor_camera_cfg.resolution[0],
-                data_types=self.cfg.sensor_camera_cfg.data_types,
-                update_latest_camera_pose=True,  # needed for FEM based marker sim
-                spawn=None,  # use camera which is part of the GelSight Mini Asset
+            camera_cfg_kwargs = {
+                "prim_path": self.cfg.prim_path + self.cfg.sensor_camera_cfg.prim_path_appendix,
+                "update_period": self.cfg.sensor_camera_cfg.update_period,
+                "height": self.cfg.sensor_camera_cfg.resolution[1],
+                "width": self.cfg.sensor_camera_cfg.resolution[0],
+                "data_types": self.cfg.sensor_camera_cfg.data_types,
+                "spawn": None,  # use camera which is part of the GelSight Mini Asset
                 # note: clipping range doesn't matter for existing camera prim -> only applied when camera is spawned # TODO fix?
-                # spawn=sim_utils.PinholeCameraCfg(
+                # "spawn": sim_utils.PinholeCameraCfg(
                 #    focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 1.0e5)
                 # ),
-                # depth_clipping_behavior="max", # doesn't work, cause "max" value is taking from spawn config, which we dont have
-            )
+                # "depth_clipping_behavior": "max", # doesn't work, cause "max" value is taking from spawn config, which we dont have
+            }
+            tiled_camera_fields = getattr(TiledCameraCfg, "__dataclass_fields__", {})
+            if "return_latest_camera_pose" in tiled_camera_fields:
+                camera_cfg_kwargs["return_latest_camera_pose"] = True  # needed for FEM based marker sim
+            elif "update_latest_camera_pose" in tiled_camera_fields:
+                camera_cfg_kwargs["update_latest_camera_pose"] = True  # needed for FEM based marker sim
+            self.camera_cfg: TiledCameraCfg = TiledCameraCfg(**camera_cfg_kwargs)
             self.camera = TiledCamera(cfg=self.camera_cfg)
 
             # use normal camera
