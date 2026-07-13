@@ -6,6 +6,9 @@
 .DS_Store
 **/*.egg-info/
 **/__pycache__/
+
+# Local BC model checkpoints (keep weights out of Git/GitHub).
+bc_policy/**/*.pt
 **/.pytest_cache/
 **/*.pyc
 **/*.pb

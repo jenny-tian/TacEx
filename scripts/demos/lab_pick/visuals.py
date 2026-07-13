@@ -1,0 +1,6 @@
+from __future__ import annotations
+
+
+SLIDE_VISUAL_DIFFUSE_COLOR = (0.25, 0.75, 1.0)
+SLIDE_VISUAL_OPACITY = 0.65
+SLIDE_VISUAL_ROUGHNESS = 0.18

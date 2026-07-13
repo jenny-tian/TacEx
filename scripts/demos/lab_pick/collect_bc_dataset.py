@@ -65,6 +65,16 @@ def _due(next_timestamp: float, current_timestamp: float) -> bool:
     return next_timestamp <= current_timestamp + 1.0e-9
 
 
+def _print_collection_stats(*, attempted: int, successful: int, recorded: int, final: bool = False):
+    failures = attempted - successful
+    success_rate = successful / attempted if attempted else 0.0
+    label = "SUMMARY" if final else "STATS"
+    print(
+        f"[{label}] attempts={attempted} successes={successful} failures={failures} "
+        f"success_rate={successful}/{attempted} ({success_rate:.2%}) recorded={recorded}/{args_cli.num_demos}"
+    )
+
+
 def _failure_reasons(env: LabPickEnv) -> list[str]:
     reasons: list[str] = []
 
@@ -159,6 +169,7 @@ def main():
     record_dir.mkdir(parents=True, exist_ok=True)
     recorded = 0
     attempted = 0
+    successful = 0
 
     try:
         while simulation_app.is_running() and recorded < args_cli.num_demos:
@@ -233,6 +244,7 @@ def main():
                         labware_reset_quat_w=_to_numpy(env.labware_reset_quat_w).astype(np.float32),
                     )
                     if exported:
+                        successful += 1
                         recorded += 1
                         print(f"[INFO] recorded_demo={recorded}/{args_cli.num_demos} success=True")
                     break
@@ -262,7 +274,9 @@ def main():
                 if exported:
                     recorded += 1
                     print(f"[INFO] recorded_demo={recorded}/{args_cli.num_demos} success=False")
+            _print_collection_stats(attempted=attempted, successful=successful, recorded=recorded)
     finally:
+        _print_collection_stats(attempted=attempted, successful=successful, recorded=recorded, final=True)
         env.close()
 
 
