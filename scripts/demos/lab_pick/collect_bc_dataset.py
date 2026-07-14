@@ -70,14 +70,19 @@ parser.add_argument("--labware", choices=("slide", "coverslip", "cup"), default=
 parser.add_argument("--record_dir", type=str, default="/home/tjx/TacEx/datasets/lab_pick_slide_cafe_records")
 parser.add_argument("--dataset_file", type=str, default="", help="Deprecated alias; parent directory is used.")
 parser.add_argument("--success_only", action="store_true")
+parser.add_argument("--failure_only", action="store_true")
+parser.add_argument("--max_attempts", type=int, default=0, help="Stop after this many attempts; 0 means no explicit cap.")
 parser.add_argument("--max_episode_steps", type=int, default=960)
 parser.add_argument("--aligned_hz", type=float, default=60.0)
 parser.add_argument("--camera_hz", type=float, default=30.0)
 parser.add_argument("--ft_hz", type=float, default=90.0)
 parser.add_argument("--tracker_hz", type=float, default=300.0)
 parser.add_argument("--seed", type=int, default=0)
+parser.add_argument("--break_force_threshold_n", type=float, default=0.0, help="Override break-force threshold; <=0 keeps env default.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+if args_cli.success_only and args_cli.failure_only:
+    parser.error("--success_only and --failure_only are mutually exclusive")
 args_cli.enable_cameras = True
 
 _patch_isaaclab_missing_exports()
@@ -254,6 +259,8 @@ def main():
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.labware_name = args_cli.labware
     env_cfg.seed = args_cli.seed
+    if args_cli.break_force_threshold_n > 0.0:
+        env_cfg.terminate_break_force_threshold_n = args_cli.break_force_threshold_n
     if args_cli.device is not None:
         env_cfg.sim.device = args_cli.device
 
@@ -265,7 +272,11 @@ def main():
     successful = 0
 
     try:
-        while simulation_app.is_running() and recorded < args_cli.num_demos:
+        while (
+            simulation_app.is_running()
+            and recorded < args_cli.num_demos
+            and (args_cli.max_attempts <= 0 or attempted < args_cli.max_attempts)
+        ):
             env.reset()
             attempt_index = attempted
             attempted += 1
@@ -337,15 +348,23 @@ def main():
                 lift_delta = env.labware.data.root_pos_w[:, 2] - env.initial_object_height
                 success = bool((lift_delta[0] > env.cfg.success_lift_height).item())
                 if success and not episode_failed:
-                    exported = writer.flush_episode(
-                        success=True,
-                        labware_reset_pos_w=_to_numpy(env.labware_reset_pos_w).astype(np.float32),
-                        labware_reset_quat_w=_to_numpy(env.labware_reset_quat_w).astype(np.float32),
-                    )
-                    if exported:
-                        successful += 1
-                        recorded += 1
-                        print(f"[INFO] recorded_demo={recorded}/{args_cli.num_demos} success=True")
+                    successful += 1
+                    if args_cli.failure_only:
+                        writer.clear_episode()
+                        exported = True
+                        print(
+                            f"[INFO] skipped_success attempt={attempted} "
+                            f"recorded={recorded}/{args_cli.num_demos} failure_only=True"
+                        )
+                    else:
+                        exported = writer.flush_episode(
+                            success=True,
+                            labware_reset_pos_w=_to_numpy(env.labware_reset_pos_w).astype(np.float32),
+                            labware_reset_quat_w=_to_numpy(env.labware_reset_quat_w).astype(np.float32),
+                        )
+                        if exported:
+                            recorded += 1
+                            print(f"[INFO] recorded_demo={recorded}/{args_cli.num_demos} success=True")
                     break
 
             if not exported:

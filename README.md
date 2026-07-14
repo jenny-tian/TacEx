@@ -152,6 +152,8 @@ Useful options:
 - `--labware slide|coverslip|cup`
 - `--num_demos 100`
 - `--success_only`
+- `--failure_only --max_attempts 10` to keep resetting until a failed attempt is recorded
+- `--break_force_threshold_n 6.0` to explicitly set the break-force threshold for a run
 - `--record_dir /path/to/output`
 - `--aligned_hz 60 --camera_hz 30 --ft_hz 90 --tracker_hz 300`
 

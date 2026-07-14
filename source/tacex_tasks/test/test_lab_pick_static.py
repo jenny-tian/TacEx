@@ -185,6 +185,10 @@ def test_lab_pick_collection_script_uses_forcecapture_cafe_record_layout():
     assert "--aligned_hz" in script_source
     assert "--ft_hz" in script_source
     assert "--tracker_hz" in script_source
+    assert "--failure_only" in script_source
+    assert "--max_attempts" in script_source
+    assert "--break_force_threshold_n" in script_source
+    assert "parser.error(\"--success_only and --failure_only are mutually exclusive\")" in script_source
     assert "append_aligned_sample" in script_source
     assert "append_camera_sample" in script_source
     assert "append_ft_sample" in script_source
