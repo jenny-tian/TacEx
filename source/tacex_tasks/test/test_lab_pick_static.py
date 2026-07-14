@@ -207,6 +207,23 @@ def test_lab_pick_collection_script_uses_forcecapture_cafe_record_layout():
     assert "np.zeros((14, 26, 2)" not in script_source
 
 
+def test_lab_pick_failed_attempt_vlm_analyzer_exists():
+    analyzer_source = read(SCRIPT_ROOT / "analyze_failed_attempts.py")
+    assert "last_frame_rgb.png" in analyzer_source
+    assert "last_frame_ft.npy" in analyzer_source
+    assert "last_frame_info.txt" in analyzer_source
+    assert "OPENAI_API_KEY" in analyzer_source
+    assert "OPENAI_API_BASE" in analyzer_source
+    assert "--api_mode" in analyzer_source
+    assert "chat_completions" in analyzer_source
+    assert "/responses" in analyzer_source
+    assert "/chat/completions" in analyzer_source
+    assert "--dry_run" in analyzer_source
+    assert "vlm_failure_analysis.json" in analyzer_source
+    assert "failure_summary.csv" in analyzer_source
+    assert "suggested_force_range_n" in analyzer_source
+
+
 def test_launch_scripts_are_thin_and_import_shared_env():
     scripted = read(SCRIPT_ROOT / "pick_labware.py")
     keyboard = read(SCRIPT_ROOT / "pick_labware_keyboard.py")

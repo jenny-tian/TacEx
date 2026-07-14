@@ -161,6 +161,61 @@ Failed attempts are not stopped early. The script finishes the full `--max_episo
 - `last_frame_ft.npy`
 - `last_frame_info.txt`, including failure reason, final FT, force norm, torque norm, and the first failure step
 
+### Analyze failed attempts with a VLM
+
+After collection, analyze failed attempts as a separate post-processing step. This keeps simulation collection independent from network/API availability.
+
+```bash
+export OPENAI_API_KEY=...
+export OPENAI_API_BASE=https://api.openai.com/v1
+
+python scripts/demos/lab_pick/analyze_failed_attempts.py \
+  --record_dir /tmp/lab_pick_cafe_records \
+  --model gpt-4.1-mini \
+  --break_force_threshold_n 6.0 \
+  --skip_existing
+```
+
+For an OpenAI-compatible relay/proxy, set the relay base URL and use `--api_mode chat_completions` if the relay does not support the Responses API:
+
+```bash
+export OPENAI_API_KEY=<your-api-key>
+export OPENAI_API_BASE=https://api.aiboys.xyz/v1
+
+python scripts/demos/lab_pick/analyze_failed_attempts.py \
+  --record_dir /tmp/lab_pick_cafe_records \
+  --model gpt-4.1-mini \
+  --api_mode chat_completions \
+  --break_force_threshold_n 6.0 \
+  --skip_existing
+```
+
+For an offline smoke test without calling the API:
+
+```bash
+python scripts/demos/lab_pick/analyze_failed_attempts.py \
+  --record_dir /tmp/lab_pick_cafe_records \
+  --break_force_threshold_n 6.0 \
+  --dry_run
+```
+
+Each analyzed attempt writes:
+
+```text
+failed_attempts/attempt_xxxxxx/
+  vlm_failure_analysis.json
+  vlm_failure_analysis.txt
+```
+
+The full failed-attempt batch also writes:
+
+```text
+failed_attempts/failure_summary.csv
+failed_attempts/failure_summary.json
+```
+
+The VLM receives the final RGB frame and final 6D FT vector, then returns a structured failure type, visual reason, force reason, combined reason, suggested safe force range, suggested next action, and confidence. Suggested force ranges are clamped below the configured break threshold.
+
 ### Verify the LabPick CAFE pipeline
 
 Static tests:
