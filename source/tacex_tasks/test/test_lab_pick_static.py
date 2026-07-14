@@ -198,9 +198,11 @@ def test_lab_pick_collection_script_uses_forcecapture_cafe_record_layout():
     assert "while _due(next_tracker_t, timestamp)" in script_source
     assert "env.get_cafe_marker2d()" in script_source
     assert "failed_attempts" in script_source
-    assert "last_frame_rgb.npy" in script_source
-    assert "last_frame_ft.npy" in script_source
-    assert "last_frame_info.txt" in script_source
+    assert 'prefix="failure_frame"' in script_source
+    assert 'prefix="last_frame"' in script_source
+    assert 'f"{prefix}_rgb.npy"' in script_source
+    assert 'f"{prefix}_ft.npy"' in script_source
+    assert 'f"{prefix}_info.txt"' in script_source
     assert "if terminated_now and not episode_failed:" in script_source
     assert "if success and not episode_failed:" in script_source
     assert "if done or success:" not in script_source
@@ -209,9 +211,13 @@ def test_lab_pick_collection_script_uses_forcecapture_cafe_record_layout():
 
 def test_lab_pick_failed_attempt_vlm_analyzer_exists():
     analyzer_source = read(SCRIPT_ROOT / "analyze_failed_attempts.py")
-    assert "last_frame_rgb.png" in analyzer_source
-    assert "last_frame_ft.npy" in analyzer_source
-    assert "last_frame_info.txt" in analyzer_source
+    assert "failure_frame" in analyzer_source
+    assert "last_frame" in analyzer_source
+    assert 'f"{frame_prefix}_rgb.{suffix}"' in analyzer_source
+    assert 'f"{frame_prefix}_ft.npy"' in analyzer_source
+    assert 'f"{frame_prefix}_info.txt"' in analyzer_source
+    assert "--frame" in analyzer_source
+    assert "analysis_frame" in analyzer_source
     assert "OPENAI_API_KEY" in analyzer_source
     assert "OPENAI_API_BASE" in analyzer_source
     assert "--api_mode" in analyzer_source

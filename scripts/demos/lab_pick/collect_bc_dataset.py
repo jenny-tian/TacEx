@@ -173,9 +173,10 @@ def _save_rgb_preview(rgb_path: Path, rgb: np.ndarray) -> Path:
         return ppm_path
 
 
-def _write_failure_debug(
+def _write_frame_debug(
     debug_dir: Path,
     *,
+    prefix: str,
     sample: dict[str, np.ndarray],
     timestamp: float,
     step: int,
@@ -189,27 +190,62 @@ def _write_failure_debug(
     force_norm = float(np.linalg.norm(ft[:3]))
     torque_norm = float(np.linalg.norm(ft[3:]))
 
-    np.save(debug_dir / "last_frame_rgb.npy", rgb)
-    np.save(debug_dir / "last_frame_ft.npy", ft)
-    preview_path = _save_rgb_preview(debug_dir / "last_frame_rgb.png", rgb)
+    np.save(debug_dir / f"{prefix}_rgb.npy", rgb)
+    np.save(debug_dir / f"{prefix}_ft.npy", ft)
+    preview_path = _save_rgb_preview(debug_dir / f"{prefix}_rgb.png", rgb)
     summary = (
         f"failure_reason={failure_reason}\n"
-        f"last_step={step}\n"
+        f"{prefix}_step={step}\n"
         f"first_failure_step={first_failure_step}\n"
         f"timestamp={timestamp:.6f}\n"
         f"ft=[{ft[0]:.6f}, {ft[1]:.6f}, {ft[2]:.6f}, {ft[3]:.6f}, {ft[4]:.6f}, {ft[5]:.6f}]\n"
         f"force_norm_n={force_norm:.6f}\n"
         f"torque_norm_nm={torque_norm:.6f}\n"
         f"break_force_threshold_n={break_force_threshold_n:.6f}\n"
-        f"rgb_npy={debug_dir / 'last_frame_rgb.npy'}\n"
+        f"rgb_npy={debug_dir / f'{prefix}_rgb.npy'}\n"
         f"rgb_preview={preview_path}\n"
-        f"ft_npy={debug_dir / 'last_frame_ft.npy'}\n"
+        f"ft_npy={debug_dir / f'{prefix}_ft.npy'}\n"
     )
-    (debug_dir / "last_frame_info.txt").write_text(summary, encoding="utf-8")
+    (debug_dir / f"{prefix}_info.txt").write_text(summary, encoding="utf-8")
     print(
-        "[WARN] failed_attempt "
-        f"reason={failure_reason} last_step={step} first_failure_step={first_failure_step} "
+        f"[WARN] failed_attempt_{prefix} "
+        f"reason={failure_reason} step={step} first_failure_step={first_failure_step} "
         f"force_norm_n={force_norm:.6f} ft={ft.round(6).tolist()} debug_dir={debug_dir}"
+    )
+
+
+def _write_failure_debug(
+    debug_dir: Path,
+    *,
+    failure_sample: dict[str, np.ndarray],
+    failure_timestamp: float,
+    failure_step: int,
+    last_sample: dict[str, np.ndarray],
+    last_timestamp: float,
+    last_step: int,
+    first_failure_step: int,
+    failure_reason: str,
+    break_force_threshold_n: float,
+):
+    _write_frame_debug(
+        debug_dir,
+        prefix="failure_frame",
+        sample=failure_sample,
+        timestamp=failure_timestamp,
+        step=failure_step,
+        first_failure_step=first_failure_step,
+        failure_reason=failure_reason,
+        break_force_threshold_n=break_force_threshold_n,
+    )
+    _write_frame_debug(
+        debug_dir,
+        prefix="last_frame",
+        sample=last_sample,
+        timestamp=last_timestamp,
+        step=last_step,
+        first_failure_step=first_failure_step,
+        failure_reason=failure_reason,
+        break_force_threshold_n=break_force_threshold_n,
     )
 
 
@@ -244,6 +280,9 @@ def main():
             episode_failed = False
             first_failure_step = -1
             failure_reason = ""
+            failure_sample: dict[str, np.ndarray] | None = None
+            failure_timestamp = 0.0
+            failure_step = -1
             last_sample: dict[str, np.ndarray] | None = None
             last_timestamp = 0.0
             last_step = -1
@@ -291,6 +330,9 @@ def main():
                     episode_failed = True
                     first_failure_step = step
                     failure_reason = "+".join(_failure_reasons(env)) or "terminated"
+                    failure_sample = sample
+                    failure_timestamp = timestamp
+                    failure_step = step
 
                 lift_delta = env.labware.data.root_pos_w[:, 2] - env.initial_object_height
                 success = bool((lift_delta[0] > env.cfg.success_lift_height).item())
@@ -310,12 +352,18 @@ def main():
                 if not episode_failed:
                     failure_reason = "timeout_or_no_success"
                     first_failure_step = last_step
-                if last_sample is not None:
+                    failure_sample = last_sample
+                    failure_timestamp = last_timestamp
+                    failure_step = last_step
+                if last_sample is not None and failure_sample is not None:
                     _write_failure_debug(
                         failure_debug_dir,
-                        sample=last_sample,
-                        timestamp=last_timestamp,
-                        step=last_step,
+                        failure_sample=failure_sample,
+                        failure_timestamp=failure_timestamp,
+                        failure_step=failure_step,
+                        last_sample=last_sample,
+                        last_timestamp=last_timestamp,
+                        last_step=last_step,
                         first_failure_step=first_failure_step,
                         failure_reason=failure_reason,
                         break_force_threshold_n=env.cfg.terminate_break_force_threshold_n,

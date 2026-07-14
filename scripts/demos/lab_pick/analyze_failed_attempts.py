@@ -46,6 +46,7 @@ parser.add_argument("--break_force_threshold_n", type=float, default=6.0)
 parser.add_argument("--skip_existing", action="store_true")
 parser.add_argument("--latest_only", action="store_true")
 parser.add_argument("--max_attempts", type=int, default=0, help="0 means analyze all attempts.")
+parser.add_argument("--frame", choices=("auto", "failure", "last"), default="auto")
 parser.add_argument("--dry_run", action="store_true", help="Use deterministic local heuristics instead of calling the VLM API.")
 args_cli = parser.parse_args()
 
@@ -67,8 +68,18 @@ def _parse_info_file(info_path: Path) -> dict[str, str]:
     return info
 
 
-def _load_ft(attempt_dir: Path) -> np.ndarray:
-    ft_path = attempt_dir / "last_frame_ft.npy"
+def _frame_prefix(attempt_dir: Path) -> str:
+    if args_cli.frame == "failure":
+        return "failure_frame"
+    if args_cli.frame == "last":
+        return "last_frame"
+    if (attempt_dir / "failure_frame_ft.npy").is_file():
+        return "failure_frame"
+    return "last_frame"
+
+
+def _load_ft(attempt_dir: Path, frame_prefix: str) -> np.ndarray:
+    ft_path = attempt_dir / f"{frame_prefix}_ft.npy"
     if not ft_path.is_file():
         raise FileNotFoundError(f"Missing {ft_path}")
     return np.load(ft_path).astype(np.float32).reshape(6)
@@ -85,23 +96,24 @@ def _image_mime(path: Path) -> str:
     raise ValueError(f"Unsupported image format for VLM input: {path}")
 
 
-def _ensure_image_path(attempt_dir: Path) -> Path:
-    for name in ("last_frame_rgb.png", "last_frame_rgb.jpg", "last_frame_rgb.jpeg", "last_frame_rgb.webp"):
+def _ensure_image_path(attempt_dir: Path, frame_prefix: str) -> Path:
+    for suffix in ("png", "jpg", "jpeg", "webp"):
+        name = f"{frame_prefix}_rgb.{suffix}"
         image_path = attempt_dir / name
         if image_path.is_file():
             return image_path
 
-    rgb_npy = attempt_dir / "last_frame_rgb.npy"
+    rgb_npy = attempt_dir / f"{frame_prefix}_rgb.npy"
     if not rgb_npy.is_file():
-        raise FileNotFoundError(f"Missing image file in {attempt_dir}")
+        raise FileNotFoundError(f"Missing {frame_prefix} image file in {attempt_dir}")
 
     try:
         from PIL import Image
     except Exception as exc:
-        raise RuntimeError(f"{attempt_dir} has only last_frame_rgb.npy; install Pillow or save PNG during collection.") from exc
+        raise RuntimeError(f"{attempt_dir} has only {frame_prefix}_rgb.npy; install Pillow or save PNG during collection.") from exc
 
     rgb = np.load(rgb_npy).astype(np.uint8)
-    image_path = attempt_dir / "last_frame_rgb.png"
+    image_path = attempt_dir / f"{frame_prefix}_rgb.png"
     Image.fromarray(rgb[:, :, :3]).save(image_path)
     return image_path
 
@@ -121,15 +133,20 @@ def _safe_float(value: str | None, default: float = 0.0) -> float:
 
 
 def _attempt_context(attempt_dir: Path, break_force_threshold_n: float) -> dict[str, Any]:
-    info = _parse_info_file(attempt_dir / "last_frame_info.txt")
-    ft = _load_ft(attempt_dir)
+    frame_prefix = _frame_prefix(attempt_dir)
+    info = _parse_info_file(attempt_dir / f"{frame_prefix}_info.txt")
+    if not info and frame_prefix != "last_frame":
+        info = _parse_info_file(attempt_dir / "last_frame_info.txt")
+    ft = _load_ft(attempt_dir, frame_prefix)
     force_norm = float(np.linalg.norm(ft[:3]))
     torque_norm = float(np.linalg.norm(ft[3:]))
+    frame_step_key = f"{frame_prefix}_step"
     return {
         "attempt_id": attempt_dir.name,
         "attempt_dir": str(attempt_dir),
+        "analysis_frame": frame_prefix,
         "script_failure_reason": info.get("failure_reason", "unknown"),
-        "last_step": int(_safe_float(info.get("last_step"), -1)),
+        "frame_step": int(_safe_float(info.get(frame_step_key), _safe_float(info.get("last_step"), -1))),
         "first_failure_step": int(_safe_float(info.get("first_failure_step"), -1)),
         "timestamp": _safe_float(info.get("timestamp")),
         "ft": [float(v) for v in ft.tolist()],
@@ -178,10 +195,12 @@ def _build_prompt(context: dict[str, Any]) -> str:
     soft_upper = 0.85 * float(context["break_force_threshold_n"])
     return (
         "你是机器人触觉抓取失败分析助手。请分析 Franka 夹爪在 IsaacLab 中抓取载玻片的失败原因。\n"
-        "你会看到失败轨迹最后一帧 RGB 图像，以及最后一帧 fingertip/contact sensor 的 6D 力/力矩。\n"
+        "你会看到失败轨迹中用于诊断的一帧 RGB 图像，以及该帧 fingertip/contact sensor 的 6D 力/力矩。\n"
+        "默认优先使用第一次触发失败判定的 failure_frame；如果旧数据没有 failure_frame，才使用 last_frame。\n"
         "FT 顺序为 [Fx, Fy, Fz, Tx, Ty, Tz]，力单位 N，力矩单位 N*m。\n\n"
+        f"当前分析帧: {context['analysis_frame']}\n"
         f"脚本记录的失败原因: {context['script_failure_reason']}\n"
-        f"last_step: {context['last_step']}\n"
+        f"frame_step: {context['frame_step']}\n"
         f"first_failure_step: {context['first_failure_step']}\n"
         f"timestamp: {context['timestamp']:.6f}\n"
         f"FT: {context['ft']}\n"
@@ -383,6 +402,7 @@ def _write_text_report(path: Path, context: dict[str, Any], analysis: dict[str, 
     force_range = analysis["suggested_force_range_n"]
     text = (
         f"Attempt: {context['attempt_id']}\n"
+        f"Analysis frame: {context['analysis_frame']}\n"
         f"Image: {image_path}\n"
         f"Script failure reason: {context['script_failure_reason']}\n"
         f"Failure type: {analysis['failure_type']}\n"
@@ -405,6 +425,7 @@ def _write_summary(failed_root: Path, rows: list[dict[str, Any]]):
 
     fieldnames = [
         "attempt_id",
+        "analysis_frame",
         "failure_type",
         "script_failure_reason",
         "force_norm_n",
@@ -457,7 +478,7 @@ def main():
             analysis = json.loads(output_json.read_text(encoding="utf-8"))
         else:
             context = _attempt_context(attempt_dir, args_cli.break_force_threshold_n)
-            image_path = _ensure_image_path(attempt_dir)
+            image_path = _ensure_image_path(attempt_dir, context["analysis_frame"])
             if args_cli.dry_run:
                 raw_analysis = _heuristic_analysis(context)
             else:
@@ -468,11 +489,12 @@ def main():
             print(f"[INFO] analyzed {attempt_dir} failure_type={analysis['failure_type']}")
 
         context = _attempt_context(attempt_dir, args_cli.break_force_threshold_n)
-        image_path = _ensure_image_path(attempt_dir)
+        image_path = _ensure_image_path(attempt_dir, context["analysis_frame"])
         force_range = analysis["suggested_force_range_n"]
         rows.append(
             {
                 "attempt_id": attempt_dir.name,
+                "analysis_frame": context["analysis_frame"],
                 "failure_type": analysis["failure_type"],
                 "script_failure_reason": context["script_failure_reason"],
                 "force_norm_n": f"{context['force_norm_n']:.6f}",

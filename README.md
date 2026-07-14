@@ -157,6 +157,9 @@ Useful options:
 
 Failed attempts are not stopped early. The script finishes the full `--max_episode_steps` episode, then writes a debug snapshot under `failed_attempts/attempt_xxxxxx/` with:
 
+- `failure_frame_rgb.npy` and `failure_frame_rgb.png`/`.ppm`
+- `failure_frame_ft.npy`
+- `failure_frame_info.txt`, captured at the first frame that triggers the failure condition
 - `last_frame_rgb.npy` and `last_frame_rgb.png`/`.ppm`
 - `last_frame_ft.npy`
 - `last_frame_info.txt`, including failure reason, final FT, force norm, torque norm, and the first failure step
@@ -172,6 +175,7 @@ export OPENAI_API_BASE=https://api.openai.com/v1
 python scripts/demos/lab_pick/analyze_failed_attempts.py \
   --record_dir /tmp/lab_pick_cafe_records \
   --model gpt-4.1-mini \
+  --frame auto \
   --break_force_threshold_n 6.0 \
   --skip_existing
 ```
@@ -186,6 +190,7 @@ python scripts/demos/lab_pick/analyze_failed_attempts.py \
   --record_dir /tmp/lab_pick_cafe_records \
   --model gpt-4.1-mini \
   --api_mode chat_completions \
+  --frame auto \
   --break_force_threshold_n 6.0 \
   --skip_existing
 ```
@@ -195,6 +200,7 @@ For an offline smoke test without calling the API:
 ```bash
 python scripts/demos/lab_pick/analyze_failed_attempts.py \
   --record_dir /tmp/lab_pick_cafe_records \
+  --frame auto \
   --break_force_threshold_n 6.0 \
   --dry_run
 ```
@@ -214,7 +220,7 @@ failed_attempts/failure_summary.csv
 failed_attempts/failure_summary.json
 ```
 
-The VLM receives the final RGB frame and final 6D FT vector, then returns a structured failure type, visual reason, force reason, combined reason, suggested safe force range, suggested next action, and confidence. Suggested force ranges are clamped below the configured break threshold.
+With `--frame auto`, the VLM receives the first failure-triggering RGB frame and 6D FT vector (`failure_frame_*`). Older records without `failure_frame_*` automatically fall back to `last_frame_*`. The VLM returns a structured failure type, visual reason, force reason, combined reason, suggested safe force range, suggested next action, and confidence. Suggested force ranges are clamped below the configured break threshold.
 
 ### Verify the LabPick CAFE pipeline
 
