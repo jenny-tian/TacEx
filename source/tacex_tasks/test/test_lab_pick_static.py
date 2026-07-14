@@ -228,6 +228,11 @@ def test_lab_pick_failed_attempt_vlm_analyzer_exists():
     assert "vlm_failure_analysis.json" in analyzer_source
     assert "failure_summary.csv" in analyzer_source
     assert "suggested_force_range_n" in analyzer_source
+    assert "contact_state" in analyzer_source
+    assert "force_assessment" in analyzer_source
+    assert "risk_level" in analyzer_source
+    assert "recommended_policy_change" in analyzer_source
+    assert "recommended_next_test" in analyzer_source
 
 
 def test_launch_scripts_are_thin_and_import_shared_env():

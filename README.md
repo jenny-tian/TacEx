@@ -220,7 +220,7 @@ failed_attempts/failure_summary.csv
 failed_attempts/failure_summary.json
 ```
 
-With `--frame auto`, the VLM receives the first failure-triggering RGB frame and 6D FT vector (`failure_frame_*`). Older records without `failure_frame_*` automatically fall back to `last_frame_*`. The VLM returns a structured failure type, visual reason, force reason, combined reason, suggested safe force range, suggested next action, and confidence. Suggested force ranges are clamped below the configured break threshold.
+With `--frame auto`, the VLM receives the first failure-triggering RGB frame and 6D FT vector (`failure_frame_*`). Older records without `failure_frame_*` automatically fall back to `last_frame_*`. The VLM returns a structured report with raw frame context, FT vector, force/torque norms, failure type, contact state, force assessment, risk level, visual reason, force reason, combined reason, evidence list, suggested safe force range, suggested next action, recommended policy change, recommended next test, and confidence. Suggested force ranges are clamped below the configured break threshold.
 
 ### Verify the LabPick CAFE pipeline
 

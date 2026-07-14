@@ -33,6 +33,28 @@ SUGGESTED_ACTIONS = {
     "keep_current",
     "unknown",
 }
+CONTACT_STATES = {
+    "no_contact",
+    "light_contact",
+    "stable_contact",
+    "slipping",
+    "over_force",
+    "unknown",
+}
+FORCE_ASSESSMENTS = {
+    "too_low",
+    "safe",
+    "near_limit",
+    "too_high",
+    "unknown",
+}
+RISK_LEVELS = {
+    "low",
+    "medium",
+    "high",
+    "critical",
+    "unknown",
+}
 
 
 parser = argparse.ArgumentParser(description="Analyze LabPick failed attempts with a VLM.")
@@ -162,10 +184,21 @@ def _analysis_schema() -> dict[str, Any]:
         "additionalProperties": False,
         "properties": {
             "failure_type": {"type": "string", "enum": sorted(FAILURE_TYPES)},
+            "scene_observation": {"type": "string"},
+            "contact_state": {"type": "string", "enum": sorted(CONTACT_STATES)},
+            "force_assessment": {"type": "string", "enum": sorted(FORCE_ASSESSMENTS)},
+            "risk_level": {"type": "string", "enum": sorted(RISK_LEVELS)},
             "visual_reason": {"type": "string"},
             "force_reason": {"type": "string"},
             "combined_reason": {"type": "string"},
+            "evidence": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "maxItems": 6,
+            },
             "observed_force_n": {"type": "number"},
+            "observed_torque_nm": {"type": "number"},
             "break_threshold_n": {"type": "number"},
             "suggested_force_range_n": {
                 "type": "array",
@@ -174,17 +207,27 @@ def _analysis_schema() -> dict[str, Any]:
                 "maxItems": 2,
             },
             "suggested_action": {"type": "string", "enum": sorted(SUGGESTED_ACTIONS)},
+            "recommended_policy_change": {"type": "string"},
+            "recommended_next_test": {"type": "string"},
             "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
         },
         "required": [
             "failure_type",
+            "scene_observation",
+            "contact_state",
+            "force_assessment",
+            "risk_level",
             "visual_reason",
             "force_reason",
             "combined_reason",
+            "evidence",
             "observed_force_n",
+            "observed_torque_nm",
             "break_threshold_n",
             "suggested_force_range_n",
             "suggested_action",
+            "recommended_policy_change",
+            "recommended_next_test",
             "confidence",
         ],
     }
@@ -212,7 +255,8 @@ def _build_prompt(context: dict[str, Any]) -> str:
         f"- 1.0N 到 {safe_upper:.2f}N 通常较安全。\n"
         f"- {safe_upper:.2f}N 到 {soft_upper:.2f}N 接近风险区，需要谨慎。\n"
         f"- 超过 {context['break_force_threshold_n']:.2f}N 判定为破碎失败。\n\n"
-        "请结合图像和力信息判断失败类型，并给出下一次采集建议。"
+        "请结合图像和力信息判断失败类型，并给出下一次采集建议。\n"
+        "输出需要足够详细，至少包括：图像中看到了什么、接触状态、力是否过低/安全/接近阈值/过高、风险等级、关键证据、建议修改的轨迹或夹爪策略、下一次验证实验。"
         "解释字段请用简洁中文；枚举字段必须使用 schema 中的英文枚举值。只输出 JSON。"
     )
 
@@ -328,48 +372,93 @@ def _heuristic_analysis(context: dict[str, Any]) -> dict[str, Any]:
 
     failure_type = "unknown"
     suggested_action = "unknown"
+    contact_state = "unknown"
+    force_assessment = "unknown"
+    risk_level = "unknown"
     visual_reason = "dry_run 未调用 VLM，无法从图像判断。"
-    force_reason = f"最后一帧 force_norm 为 {force_norm:.3f}N。"
+    force_reason = f"分析帧 force_norm 为 {force_norm:.3f}N。"
     combined_reason = "根据脚本失败原因和 FT 做本地启发式判断。"
+    recommended_policy_change = "需要结合真实 VLM 图像判断进一步细化。"
+    recommended_next_test = "用真实 VLM 模式重新分析，并采集一条相同参数的复现实验。"
 
     if "break_force" in reason or force_norm > threshold:
         failure_type = "over_force"
         suggested_action = "reduce_grip"
+        contact_state = "over_force"
+        force_assessment = "too_high" if force_norm > threshold else "near_limit"
+        risk_level = "critical" if force_norm > threshold else "high"
         combined_reason = "接触力超过或接近破碎阈值，需要减小闭合量或放慢闭合。"
+        recommended_policy_change = "减小夹爪闭合量，或在接触后降低闭合速度。"
     elif "object_drop" in reason:
         failure_type = "object_drop"
         suggested_action = "increase_grip" if force_norm < 1.0 else "adjust_xy"
+        contact_state = "no_contact" if force_norm < 1.0 else "slipping"
+        force_assessment = "too_low" if force_norm < 1.0 else "safe"
+        risk_level = "medium"
         combined_reason = "脚本检测到物体掉落，需要检查接触位置和夹持力。"
+        recommended_policy_change = "先修正接触位置；若接触位置正确但掉落，再小幅增加夹持力。"
     elif "object_xy_distance" in reason:
         failure_type = "bad_alignment"
         suggested_action = "adjust_xy"
+        contact_state = "unknown"
+        force_assessment = "safe" if 1.0 <= force_norm <= safe_upper else "too_low"
+        risk_level = "medium"
         combined_reason = "物体相对初始位置偏移过大，优先调整 approach XY。"
+        recommended_policy_change = "缩小 reset 随机化范围或增加 approach XY 校正。"
     elif "ee_workspace" in reason:
         failure_type = "workspace_error"
         suggested_action = "adjust_xy"
+        contact_state = "unknown"
+        force_assessment = "unknown"
+        risk_level = "high"
         combined_reason = "末端执行器越界，需限制轨迹目标或工作空间。"
+        recommended_policy_change = "限制 action/IK 目标到 workspace 内，检查 scripted lift target。"
     elif force_norm < 1.0:
         failure_type = "no_contact"
         suggested_action = "lower_approach_height"
+        contact_state = "no_contact"
+        force_assessment = "too_low"
+        risk_level = "low"
         combined_reason = "最后一帧接触力很小，可能未接触或夹持不足。"
+        recommended_policy_change = "降低 approach 高度或增加闭合前的对准时间。"
     elif force_norm > safe_upper:
         failure_type = "over_force"
         suggested_action = "slow_closing"
+        contact_state = "over_force"
+        force_assessment = "near_limit"
+        risk_level = "high"
         combined_reason = "最后一帧接触力处于风险区，建议降低闭合速度或闭合量。"
+        recommended_policy_change = "保持接触位置不变，降低闭合速度和最终闭合量。"
     else:
         failure_type = "timeout_or_no_success"
         suggested_action = "adjust_xy"
+        contact_state = "stable_contact"
+        force_assessment = "safe"
+        risk_level = "medium"
         combined_reason = "接触力在安全范围内但未成功，可能是位姿或轨迹问题。"
+        recommended_policy_change = "优先检查 lift 阶段轨迹和物体相对夹爪位置。"
 
     return {
         "failure_type": failure_type,
+        "scene_observation": visual_reason,
+        "contact_state": contact_state,
+        "force_assessment": force_assessment,
+        "risk_level": risk_level,
         "visual_reason": visual_reason,
         "force_reason": force_reason,
         "combined_reason": combined_reason,
+        "evidence": [
+            f"script_failure_reason={reason}",
+            f"force_norm_n={force_norm:.3f}",
+            f"break_threshold_n={threshold:.3f}",
+        ],
         "observed_force_n": force_norm,
+        "observed_torque_nm": float(context["torque_norm_nm"]),
         "break_threshold_n": threshold,
         "suggested_force_range_n": [1.0, safe_upper],
         "suggested_action": suggested_action,
+        "recommended_policy_change": recommended_policy_change,
+        "recommended_next_test": recommended_next_test,
         "confidence": 0.35,
     }
 
@@ -385,15 +474,38 @@ def _normalize_analysis(analysis: dict[str, Any], context: dict[str, Any]) -> di
 
     failure_type = str(analysis.get("failure_type", "unknown"))
     suggested_action = str(analysis.get("suggested_action", "unknown"))
+    contact_state = str(analysis.get("contact_state", "unknown"))
+    force_assessment = str(analysis.get("force_assessment", "unknown"))
+    risk_level = str(analysis.get("risk_level", "unknown"))
+    evidence = analysis.get("evidence", [])
+    if not isinstance(evidence, list):
+        evidence = [str(evidence)]
     return {
+        "attempt_id": context["attempt_id"],
+        "analysis_frame": context["analysis_frame"],
+        "script_failure_reason": context["script_failure_reason"],
+        "frame_step": int(context["frame_step"]),
+        "first_failure_step": int(context["first_failure_step"]),
+        "timestamp": float(context["timestamp"]),
+        "ft": [float(v) for v in context["ft"]],
+        "force_norm_n": float(context["force_norm_n"]),
+        "torque_norm_nm": float(context["torque_norm_nm"]),
         "failure_type": failure_type if failure_type in FAILURE_TYPES else "unknown",
+        "scene_observation": str(analysis.get("scene_observation", "")),
+        "contact_state": contact_state if contact_state in CONTACT_STATES else "unknown",
+        "force_assessment": force_assessment if force_assessment in FORCE_ASSESSMENTS else "unknown",
+        "risk_level": risk_level if risk_level in RISK_LEVELS else "unknown",
         "visual_reason": str(analysis.get("visual_reason", "")),
         "force_reason": str(analysis.get("force_reason", "")),
         "combined_reason": str(analysis.get("combined_reason", "")),
+        "evidence": [str(item) for item in evidence[:6]],
         "observed_force_n": float(analysis.get("observed_force_n", context["force_norm_n"])),
+        "observed_torque_nm": float(analysis.get("observed_torque_nm", context["torque_norm_nm"])),
         "break_threshold_n": float(analysis.get("break_threshold_n", threshold)),
         "suggested_force_range_n": [lo, hi],
         "suggested_action": suggested_action if suggested_action in SUGGESTED_ACTIONS else "unknown",
+        "recommended_policy_change": str(analysis.get("recommended_policy_change", "")),
+        "recommended_next_test": str(analysis.get("recommended_next_test", "")),
         "confidence": min(1.0, max(0.0, float(analysis.get("confidence", 0.0)))),
     }
 
@@ -405,14 +517,28 @@ def _write_text_report(path: Path, context: dict[str, Any], analysis: dict[str, 
         f"Analysis frame: {context['analysis_frame']}\n"
         f"Image: {image_path}\n"
         f"Script failure reason: {context['script_failure_reason']}\n"
+        f"Frame step: {context['frame_step']}\n"
+        f"First failure step: {context['first_failure_step']}\n"
+        f"Timestamp: {context['timestamp']:.6f} s\n"
+        f"FT: {context['ft']}\n"
+        f"Force norm: {context['force_norm_n']:.6f} N\n"
+        f"Torque norm: {context['torque_norm_nm']:.6f} N*m\n"
         f"Failure type: {analysis['failure_type']}\n"
+        f"Contact state: {analysis['contact_state']}\n"
+        f"Force assessment: {analysis['force_assessment']}\n"
+        f"Risk level: {analysis['risk_level']}\n"
+        f"Scene observation: {analysis['scene_observation']}\n"
         f"Visual reason: {analysis['visual_reason']}\n"
         f"Force reason: {analysis['force_reason']}\n"
         f"Combined reason: {analysis['combined_reason']}\n"
+        f"Evidence: {analysis['evidence']}\n"
         f"Observed force: {analysis['observed_force_n']:.6f} N\n"
+        f"Observed torque: {analysis['observed_torque_nm']:.6f} N*m\n"
         f"Break threshold: {analysis['break_threshold_n']:.6f} N\n"
         f"Suggested force range: {force_range[0]:.6f} N - {force_range[1]:.6f} N\n"
         f"Suggested action: {analysis['suggested_action']}\n"
+        f"Recommended policy change: {analysis['recommended_policy_change']}\n"
+        f"Recommended next test: {analysis['recommended_next_test']}\n"
         f"Confidence: {analysis['confidence']:.3f}\n"
     )
     path.write_text(text, encoding="utf-8")
@@ -427,6 +553,9 @@ def _write_summary(failed_root: Path, rows: list[dict[str, Any]]):
         "attempt_id",
         "analysis_frame",
         "failure_type",
+        "contact_state",
+        "force_assessment",
+        "risk_level",
         "script_failure_reason",
         "force_norm_n",
         "torque_norm_nm",
@@ -496,6 +625,9 @@ def main():
                 "attempt_id": attempt_dir.name,
                 "analysis_frame": context["analysis_frame"],
                 "failure_type": analysis["failure_type"],
+                "contact_state": analysis["contact_state"],
+                "force_assessment": analysis["force_assessment"],
+                "risk_level": analysis["risk_level"],
                 "script_failure_reason": context["script_failure_reason"],
                 "force_norm_n": f"{context['force_norm_n']:.6f}",
                 "torque_norm_nm": f"{context['torque_norm_nm']:.6f}",
