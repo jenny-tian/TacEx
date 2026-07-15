@@ -6,12 +6,14 @@ from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
 from isaaclab.envs import DirectRLEnvCfg, ViewerCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ContactSensorCfg, TiledCameraCfg
-from isaaclab.sim import PhysxCfg, SimulationCfg
+from isaaclab.sim import PhysxCfg, RenderCfg, SimulationCfg
 from isaaclab.utils import configclass
 
 from tacex_assets import TACEX_ASSETS_DATA_DIR
 from tacex_assets.robots.franka.franka_gsmini_gripper_rigid import FRANKA_PANDA_ARM_GSMINI_GRIPPER_HIGH_PD_RIGID_CFG
 from tacex_assets.sensors.gelsight_mini.gsmini_cfg import GelSightMiniCfg
+
+from .visuals import SLIDE_VISUAL_DIFFUSE_COLOR, SLIDE_VISUAL_OPACITY, SLIDE_VISUAL_ROUGHNESS
 
 
 @configclass
@@ -31,7 +33,9 @@ class LabPickEnvCfg(DirectRLEnvCfg):
     marker2d_depth_scale: float = 0.35
     marker2d_shear_scale: float = 45.0
     success_lift_height: float = 0.200
-    scripted_lift_assist_on_contact: bool = True
+    scripted_lift_assist_on_contact: bool = False
+    reset_hold_steps: int = 24
+    scripted_lift_steps: int = 180
     tactile_threshold_mm: float = 0.0
     randomize_labware_position: bool = True
     labware_pos_randomization_xy: tuple[float, float] = (0.020, 0.010)
@@ -72,6 +76,7 @@ class LabPickEnvCfg(DirectRLEnvCfg):
             dynamic_friction=1.5,
             restitution=0.0,
         ),
+        render=RenderCfg(enable_translucency=True),
     )
 
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
@@ -114,14 +119,22 @@ class LabPickEnvCfg(DirectRLEnvCfg):
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 solver_position_iteration_count=32,
                 solver_velocity_iteration_count=1,
-                max_depenetration_velocity=0.3,
+                max_depenetration_velocity=0.10,
                 disable_gravity=False,
             ),
             mass_props=sim_utils.MassPropertiesCfg(mass=0.005),
-            collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.0005, rest_offset=0.0),
-            physics_material=sim_utils.RigidBodyMaterialCfg(static_friction=2.5, dynamic_friction=2.0),
+            collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.0002, rest_offset=0.0),
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                friction_combine_mode="multiply",
+                restitution_combine_mode="multiply",
+                static_friction=1.8,
+                dynamic_friction=1.2,
+                restitution=0.0,
+            ),
             visual_material=sim_utils.PreviewSurfaceCfg(
-                diffuse_color=(0.0, 0.0, 0.0), opacity=0.0, roughness=0.18
+                diffuse_color=SLIDE_VISUAL_DIFFUSE_COLOR,
+                opacity=SLIDE_VISUAL_OPACITY,
+                roughness=SLIDE_VISUAL_ROUGHNESS,
             ),
         ),
     )
@@ -134,11 +147,17 @@ class LabPickEnvCfg(DirectRLEnvCfg):
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 solver_position_iteration_count=16,
                 solver_velocity_iteration_count=1,
-                max_depenetration_velocity=5.0,
+                max_depenetration_velocity=0.20,
                 kinematic_enabled=True,
             ),
-            collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.001, rest_offset=0.0),
-            physics_material=sim_utils.RigidBodyMaterialCfg(static_friction=0.8, dynamic_friction=0.6),
+            collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.0002, rest_offset=0.0),
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                friction_combine_mode="multiply",
+                restitution_combine_mode="multiply",
+                static_friction=0.7,
+                dynamic_friction=0.5,
+                restitution=0.0,
+            ),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.18, 0.18, 0.18), opacity=0.0, roughness=0.5),
         ),
     )
@@ -188,7 +207,7 @@ class LabPickEnvCfg(DirectRLEnvCfg):
     robot.spawn.articulation_props.enabled_self_collisions = False
     robot.spawn.articulation_props.solver_position_iteration_count = 128
     robot.spawn.articulation_props.solver_velocity_iteration_count = 1
-    robot.spawn.collision_props = sim_utils.CollisionPropertiesCfg(contact_offset=0.005, rest_offset=0.0)
+    robot.spawn.collision_props = sim_utils.CollisionPropertiesCfg(contact_offset=0.001, rest_offset=0.0)
 
     wrist_camera = TiledCameraCfg(
         prim_path="/World/envs/env_.*/Robot/panda_hand/wrist_camera",

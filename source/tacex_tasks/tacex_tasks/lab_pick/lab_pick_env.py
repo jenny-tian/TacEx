@@ -16,6 +16,7 @@ from isaaclab.sensors import ContactSensor, TiledCamera, save_images_to_file
 from tacex import GelSightSensor
 
 from .lab_pick_env_cfg import LabPickEnvCfg
+from .visuals import SLIDE_VISUAL_DIFFUSE_COLOR, SLIDE_VISUAL_OPACITY, SLIDE_VISUAL_ROUGHNESS
 
 
 class LabPickEnv(DirectRLEnv):
@@ -58,6 +59,8 @@ class LabPickEnv(DirectRLEnv):
         self.labware_reset_quat_w = torch.zeros((self.num_envs, 4), device=self.device)
         self.labware_reset_quat_w[:, 0] = 1.0
         self.last_object_pos_b = self.initial_object_pos_b.clone()
+        self.reset_hold_remaining_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._reset_hold_root_state = torch.zeros_like(self.labware.data.default_root_state)
 
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
@@ -65,9 +68,14 @@ class LabPickEnv(DirectRLEnv):
 
         self.labware = RigidObject(self.labware_cfg)
         self.scene.rigid_objects["labware"] = self.labware
+        self.plate = RigidObject(self.cfg.plate)
+        self.scene.rigid_objects["plate"] = self.plate
+        self.labware_support = RigidObject(self.cfg.labware_support)
+        self.scene.rigid_objects["labware_support"] = self.labware_support
 
         self.scene.clone_environments(copy_from_source=False)
         self._spawn_labware_visuals()
+        self._force_non_labware_visuals_opaque()
 
         self.wrist_camera = TiledCamera(self.cfg.wrist_camera)
         self.third_person_camera = TiledCamera(self.cfg.third_person_camera)
@@ -84,8 +92,6 @@ class LabPickEnv(DirectRLEnv):
         self.scene.sensors["left_finger_contact_sensor"] = self.left_finger_contact_sensor
         self.scene.sensors["right_finger_contact_sensor"] = self.right_finger_contact_sensor
 
-        RigidObject(self.cfg.plate)
-        RigidObject(self.cfg.labware_support)
         ground = AssetBaseCfg(
             prim_path=self.cfg.ground.prim_path,
             init_state=self.cfg.ground.init_state,
@@ -103,9 +109,9 @@ class LabPickEnv(DirectRLEnv):
         glass_visual = sim_utils.MeshCuboidCfg(
             size=(0.076, 0.026, 0.0012),
             visual_material=sim_utils.PreviewSurfaceCfg(
-                diffuse_color=(0.0, 0.0, 0.0),
-                opacity=1.0,
-                roughness=0.18,
+                diffuse_color=SLIDE_VISUAL_DIFFUSE_COLOR,
+                opacity=SLIDE_VISUAL_OPACITY,
+                roughness=SLIDE_VISUAL_ROUGHNESS,
                 metallic=0.0,
             ),
         )
@@ -116,6 +122,109 @@ class LabPickEnv(DirectRLEnv):
             orientation=(1.0, 0.0, 0.0, 0.0),
         )
 
+    def _force_non_labware_visuals_opaque(self):
+        try:
+            import omni.usd
+            from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade, Vt
+        except Exception:
+            return
+
+        stage = omni.usd.get_context().get_stage()
+        if stage is None:
+            return
+
+        opaque_robot_material = self._create_opaque_override_material(
+            stage,
+            material_path="/World/Looks/LabPickOpaqueRobotMaterial",
+            color=Gf.Vec3f(0.86, 0.86, 0.84),
+            roughness=0.55,
+        )
+        visited_materials = set()
+        for prim in stage.Traverse():
+            prim_path = prim.GetPath().pathString
+            if self._is_labware_visual_path(prim_path):
+                continue
+
+            if "/Robot" in prim_path:
+                self._bind_opaque_material(prim, opaque_robot_material)
+            self._set_prim_opacity_attr(prim, opaque=True, vt_module=Vt)
+            material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()
+            if not material or not material.GetPrim().IsValid():
+                continue
+
+            material_path = material.GetPath().pathString
+            if material_path in visited_materials:
+                continue
+            visited_materials.add(material_path)
+
+            for shader_prim in Usd.PrimRange(material.GetPrim()):
+                if not shader_prim.IsA(UsdShade.Shader):
+                    continue
+                shader = UsdShade.Shader(shader_prim)
+                for input_name in ("opacity", "opacity_constant"):
+                    shader_input = shader.GetInput(input_name)
+                    if shader_input:
+                        shader_input.Set(1.0)
+                for input_name in ("enable_opacity", "enable_opacity_texture"):
+                    shader_input = shader.GetInput(input_name)
+                    if shader_input:
+                        shader_input.Set(False)
+
+                for attr in shader_prim.GetAttributes():
+                    attr_name = attr.GetName()
+                    if attr_name in {"inputs:opacity", "inputs:opacity_constant"}:
+                        attr.Set(1.0)
+                    elif attr_name in {"inputs:enable_opacity", "inputs:enable_opacity_texture"}:
+                        attr.Set(False)
+                    elif attr.GetTypeName() in {Sdf.ValueTypeNames.Float, Sdf.ValueTypeNames.Double}:
+                        if attr_name.endswith(":opacity") or attr_name.endswith(":opacity_constant"):
+                            attr.Set(1.0)
+
+    def _create_opaque_override_material(self, stage, *, material_path: str, color, roughness: float):
+        from pxr import Sdf, UsdShade
+
+        material = UsdShade.Material.Define(stage, material_path)
+        shader = UsdShade.Shader.Define(stage, f"{material_path}/PreviewSurface")
+        shader.CreateIdAttr("UsdPreviewSurface")
+        shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(color)
+        shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(float(roughness))
+        shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
+        shader.CreateInput("opacity", Sdf.ValueTypeNames.Float).Set(1.0)
+        material.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
+        return material
+
+    def _bind_opaque_material(self, prim, material):
+        from pxr import UsdGeom, UsdShade
+
+        if not material or not material.GetPrim().IsValid():
+            return
+        if not prim.IsA(UsdGeom.Imageable):
+            return
+        UsdShade.MaterialBindingAPI(prim).Bind(material, UsdShade.Tokens.strongerThanDescendants)
+
+    def _is_labware_visual_path(self, prim_path: str) -> bool:
+        return "labware" in prim_path.split("/")
+
+    def _set_prim_opacity_attr(self, prim, *, opaque: bool, vt_module=None):
+        attr = prim.GetAttribute("primvars:displayOpacity")
+        if not attr:
+            return
+        current_value = attr.Get()
+        opacity = 1.0 if opaque else SLIDE_VISUAL_OPACITY
+        type_name = str(attr.GetTypeName())
+        if vt_module is not None and type_name == "float[]":
+            length = len(current_value) if current_value is not None else 1
+            attr.Set(vt_module.FloatArray([float(opacity)] * max(length, 1)))
+            return
+        if vt_module is not None and type_name == "double[]":
+            length = len(current_value) if current_value is not None else 1
+            attr.Set(vt_module.DoubleArray([float(opacity)] * max(length, 1)))
+            return
+        if isinstance(current_value, (list, tuple)):
+            attr.Set([float(opacity) for _ in current_value])
+            return
+        attr.Set(float(opacity))
+
     def _pre_physics_step(self, actions: torch.Tensor | None):
         if actions is not None and actions.numel() > 0:
             target_pos_b = torch.minimum(torch.maximum(actions[:, :3], self.workspace_min_b), self.workspace_max_b)
@@ -124,6 +233,7 @@ class LabPickEnv(DirectRLEnv):
             self.gripper_width[:] = actions[:, 9:10].clamp(0.0, 0.04)
             self.last_target_pos_b[:] = target_pos_b
             self.last_target_quat_b[:] = self.nominal_ee_quat_b
+        self._hold_labware_at_reset_pose()
         self._ik_controller.set_command(self.ik_commands)
 
     def _apply_action(self):
@@ -139,6 +249,18 @@ class LabPickEnv(DirectRLEnv):
         joint_pos_des[:, self._finger_joint_ids] = self.gripper_width
         self._robot.set_joint_position_target(joint_pos_des)
         self.step_count += 1
+
+    def _hold_labware_at_reset_pose(self):
+        hold_env_ids = torch.nonzero(self.reset_hold_remaining_steps > 0, as_tuple=False).squeeze(-1)
+        if hold_env_ids.numel() == 0:
+            return
+
+        root_state = self._reset_hold_root_state[hold_env_ids].clone()
+        root_state[:, :3] = self.labware_reset_pos_w[hold_env_ids]
+        root_state[:, 3:7] = self.labware_reset_quat_w[hold_env_ids]
+        root_state[:, 7:] = 0.0
+        self.labware.write_root_state_to_sim(root_state, env_ids=hold_env_ids)
+        self.reset_hold_remaining_steps[hold_env_ids] -= 1
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         object_pos_b = self.labware.data.root_pos_w - self._robot.data.root_link_pos_w
@@ -181,14 +303,17 @@ class LabPickEnv(DirectRLEnv):
         root_state = self.labware.data.default_root_state[env_ids].clone()
         root_state[:, :3] += self.scene.env_origins[env_ids]
         root_state[:, 7:] = 0.0
+        support_state = self.labware_support.data.default_root_state[env_ids].clone()
+        support_state[:, :3] += self.scene.env_origins[env_ids]
+        support_state[:, 7:] = 0.0
 
         if self.cfg.randomize_labware_position:
-            xy_range = torch.tensor(self.cfg.labware_pos_randomization_xy, device=self.device)
-            xy_noise = (2.0 * torch.rand((len(env_ids), 2), device=self.device) - 1.0) * xy_range
+            xy_range = torch.tensor(self.cfg.labware_pos_randomization_xy, dtype=root_state.dtype, device=self.device)
+            xy_noise = (2.0 * torch.rand((len(env_ids), 2), dtype=root_state.dtype, device=self.device) - 1.0) * xy_range
             root_state[:, 0:2] += xy_noise
 
             yaw_range = self.cfg.labware_yaw_randomization
-            yaw = (2.0 * torch.rand((len(env_ids),), device=self.device) - 1.0) * yaw_range
+            yaw = (2.0 * torch.rand((len(env_ids),), dtype=root_state.dtype, device=self.device) - 1.0) * yaw_range
             yaw_quat = math_utils.quat_from_euler_xyz(
                 torch.zeros_like(yaw),
                 torch.zeros_like(yaw),
@@ -196,6 +321,9 @@ class LabPickEnv(DirectRLEnv):
             )
             root_state[:, 3:7] = math_utils.quat_mul(yaw_quat, root_state[:, 3:7])
 
+        support_state[:, 0:2] = root_state[:, 0:2]
+        support_state[:, 3:7] = root_state[:, 3:7]
+        self.labware_support.write_root_state_to_sim(support_state, env_ids=env_ids)
         self.labware.write_root_state_to_sim(root_state, env_ids=env_ids)
 
         joint_pos = self._robot.data.default_joint_pos[env_ids].clone()
@@ -211,6 +339,8 @@ class LabPickEnv(DirectRLEnv):
         self.labware_reset_pos_w[env_ids] = root_state[:, :3]
         self.labware_reset_quat_w[env_ids] = root_state[:, 3:7]
         self.last_object_pos_b[env_ids] = self.initial_object_pos_b[env_ids]
+        self._reset_hold_root_state[env_ids] = root_state
+        self.reset_hold_remaining_steps[env_ids] = max(int(self.cfg.reset_hold_steps), 0)
 
         _, ee_quat_b = self._compute_frame_pose()
         self.nominal_ee_quat_b[env_ids] = ee_quat_b[env_ids]
@@ -393,6 +523,7 @@ class LabPickEnv(DirectRLEnv):
             squeeze_steps = 60
 
         phase = int(self.step_count[0].item())
+        lift_start = close_end + squeeze_steps
         if phase < 90:
             target_pos_b[:, 2] += hover_height
             self.gripper_width[:] = 0.04
@@ -412,10 +543,11 @@ class LabPickEnv(DirectRLEnv):
             self.gripper_width[:] = close_width
         else:
             target_pos_b[:] = self.initial_object_pos_b
+            lift_progress = min(max((phase - lift_start) / max(self.cfg.scripted_lift_steps, 1), 0.0), 1.0)
+            target_lift = torch.full((self.num_envs,), grasp_height, dtype=target_pos_b.dtype, device=self.device)
             if bool(self.has_touched.any().item()):
-                target_pos_b[:, 2] += lift_height
-            else:
-                target_pos_b[:, 2] += grasp_height
+                target_lift[self.has_touched] = grasp_height + (lift_height - grasp_height) * lift_progress
+            target_pos_b[:, 2] += target_lift
             self.gripper_width[:] = close_width
 
         self.ik_commands[:, :3] = target_pos_b

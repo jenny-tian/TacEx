@@ -12,7 +12,7 @@ SPEC.loader.exec_module(visuals)
 class TestLabPickVisuals(unittest.TestCase):
     def test_slide_visual_material_is_visible_in_previews(self):
         self.assertEqual(visuals.SLIDE_VISUAL_DIFFUSE_COLOR, (0.25, 0.75, 1.0))
-        self.assertEqual(visuals.SLIDE_VISUAL_OPACITY, 0.65)
+        self.assertEqual(visuals.SLIDE_VISUAL_OPACITY, 0.9)
         self.assertEqual(visuals.SLIDE_VISUAL_ROUGHNESS, 0.18)
 
 

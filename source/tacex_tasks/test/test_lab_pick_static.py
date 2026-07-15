@@ -39,16 +39,23 @@ def test_lab_pick_cfg_defines_scene_assets_randomization_and_termination_thresho
     assert "terminate_object_xy_distance: float = 0.30" in source
     assert "terminate_break_force_threshold_n: float = 6.0" in source
     assert "success_lift_height: float = 0.200" in source
-    assert "scripted_lift_assist_on_contact: bool = True" in source
+    assert "scripted_lift_assist_on_contact: bool = False" in source
+    assert "reset_hold_steps: int = 24" in source
+    assert "scripted_lift_steps: int = 180" in source
     assert "randomize_labware_position: bool = True" in source
     assert "labware_pos_randomization_xy: tuple[float, float] = (0.020, 0.010)" in source
     assert "labware_yaw_randomization: float = 0.20" in source
+    assert "SLIDE_VISUAL_DIFFUSE_COLOR" in source
+    assert "SLIDE_VISUAL_OPACITY" in source
+    assert "SLIDE_VISUAL_ROUGHNESS" in source
     assert "action_space = 10" in source
     assert "observation_space = 14" in source
     assert "FRANKA_PANDA_ARM_GSMINI_GRIPPER_HIGH_PD_RIGID_CFG" in source
     assert "GelSightMiniCfg" in source
     assert "TiledCameraCfg" in source
     assert "ContactSensorCfg" in source
+    assert "RenderCfg" in source
+    assert "render=RenderCfg(enable_translucency=True)" in source
     assert "left_finger_contact_sensor = ContactSensorCfg(" in source
     assert "right_finger_contact_sensor = ContactSensorCfg(" in source
     assert 'prim_path="/World/envs/env_.*/Robot/gelpad_left"' in source
@@ -69,8 +76,25 @@ def test_lab_pick_env_implements_dones_reset_randomization_and_cafe_io():
     assert "self.gsmini_left.reset(env_ids=env_ids)" in source
     assert "self.gsmini_right.reset(env_ids=env_ids)" in source
     assert "self.step_count[env_ids] = 0" in source
-    assert "torch.rand((len(env_ids), 2), device=self.device)" in source
+    assert "torch.rand((len(env_ids), 2), dtype=root_state.dtype, device=self.device)" in source
     assert "self.labware_reset_pos_w[env_ids]" in source
+    assert 'self.scene.rigid_objects["labware_support"] = self.labware_support' in source
+    assert "support_state[:, 0:2] = root_state[:, 0:2]" in source
+    assert "support_state[:, 3:7] = root_state[:, 3:7]" in source
+    assert "self.labware_support.write_root_state_to_sim(support_state, env_ids=env_ids)" in source
+    assert "self.reset_hold_remaining_steps[env_ids] = max(int(self.cfg.reset_hold_steps), 0)" in source
+    assert "def _hold_labware_at_reset_pose(self):" in source
+    assert "self.reset_hold_remaining_steps[hold_env_ids] -= 1" in source
+    assert "def _force_non_labware_visuals_opaque(self):" in source
+    assert "LabPickOpaqueRobotMaterial" in source
+    assert "def _create_opaque_override_material(self, stage" in source
+    assert "def _bind_opaque_material(self, prim, material):" in source
+    assert "UsdShade.Tokens.strongerThanDescendants" in source
+    assert "def _is_labware_visual_path(self, prim_path: str) -> bool:" in source
+    assert "if self._is_labware_visual_path(prim_path):" in source
+    assert 'shader.GetInput("opacity")' in source or 'for input_name in ("opacity", "opacity_constant")' in source
+    assert "shader_input.Set(1.0)" in source
+    assert "shader_input.Set(False)" in source
     assert "def _quat_to_rot6d(" in source
     assert "def get_cafe_observation(self) -> dict[str, torch.Tensor]:" in source
     assert "def get_cafe_action(self) -> torch.Tensor:" in source
@@ -92,6 +116,8 @@ def test_lab_pick_env_implements_dones_reset_randomization_and_cafe_io():
     ) in source
     assert "def _apply_scripted_lift_assist(self, target_object_pos_b: torch.Tensor):" in source
     assert "self.labware.write_root_state_to_sim(root_state[env_ids], env_ids=env_ids)" in source
+    assert "lift_progress = min(max((phase - lift_start) / max(self.cfg.scripted_lift_steps, 1), 0.0), 1.0)" in source
+    assert "target_lift[self.has_touched] = grasp_height + (lift_height - grasp_height) * lift_progress" in source
 
 
 def test_lab_pick_env_uses_six_axis_ft_for_cafe_force_and_break_failure():
