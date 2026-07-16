@@ -400,11 +400,12 @@ def test_cafe_record_writer_outputs_forcecapture_cafe_directory(tmp_path):
             "ft": np.full((6,), float(index), dtype=np.float32),
             "marker2d": np.full((14, 26, 2), float(index), dtype=np.float32),
             "rgb": np.full((480, 640, 3), index, dtype=np.uint8),
+            "third_rgb": np.full((72, 128, 3), index + 10, dtype=np.uint8),
             "action": np.full((10,), float(index), dtype=np.float32),
         }
         writer.append_aligned_sample(timestamp, sample)
         if index % 2 == 0:
-            writer.append_camera_sample(timestamp, sample["rgb"])
+            writer.append_camera_sample(timestamp, sample["rgb"], sample["third_rgb"])
         writer.append_ft_sample(timestamp, sample["ft"])
         writer.append_tracker_sample(timestamp, sample["xyz"], sample["quat"])
         writer.append_encoder_sample(timestamp, sample["width"])
@@ -429,13 +430,17 @@ def test_cafe_record_writer_outputs_forcecapture_cafe_directory(tmp_path):
         "xense/marker2d.npy",
         "xense/marker2d_flatten.npy",
         "xense/timestamps.npy",
+        "camera/color/rgb.npy",
         "camera/color/timestamps.npy",
+        "camera/third/color/rgb.npy",
+        "camera/third/color/timestamps.npy",
         "aligned_60Hz/xyz.npy",
         "aligned_60Hz/quat.npy",
         "aligned_60Hz/width.npy",
         "aligned_60Hz/ft.npy",
         "aligned_60Hz/marker2d.npy",
         "aligned_60Hz/rgb.npy",
+        "aligned_60Hz/third_rgb.npy",
         "aligned_60Hz/action.npy",
     ]
     for relative_path in expected_files:
@@ -447,8 +452,13 @@ def test_cafe_record_writer_outputs_forcecapture_cafe_directory(tmp_path):
     assert np.load(record_dir / "aligned_60Hz" / "ft.npy").shape == (6, 6)
     assert np.load(record_dir / "aligned_60Hz" / "marker2d.npy").shape == (6, 14 * 26 * 2)
     assert np.load(record_dir / "aligned_60Hz" / "rgb.npy").shape == (6, 480, 640, 3)
+    assert np.load(record_dir / "aligned_60Hz" / "third_rgb.npy").shape == (6, 72, 128, 3)
     assert np.load(record_dir / "ftsensor" / "ft.npy").shape == (6, 6)
     assert np.load(record_dir / "camera" / "color" / "timestamps.npy").shape == (3,)
+    assert np.load(record_dir / "camera" / "third" / "color" / "rgb.npy").shape == (3, 72, 128, 3)
+    assert np.load(record_dir / "camera" / "third" / "color" / "timestamps.npy").shape == (3,)
+    assert writer.camera_rgb == []
+    assert writer.third_camera_rgb == []
 
     metadata = np.load(record_dir / "metadata.npz")
     assert bool(metadata["success"]) is True

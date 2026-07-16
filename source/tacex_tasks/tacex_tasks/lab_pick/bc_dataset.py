@@ -128,6 +128,8 @@ class CafeRecordWriter:
         self.aligned_samples: list[dict[str, np.ndarray | float]] = []
         self.camera_timestamps: list[float] = []
         self.camera_rgb: list[np.ndarray] = []
+        self.third_camera_timestamps: list[float] = []
+        self.third_camera_rgb: list[np.ndarray] = []
         self.ft_timestamps: list[float] = []
         self.ft: list[np.ndarray] = []
         self.tracker_timestamps: list[float] = []
@@ -148,13 +150,16 @@ class CafeRecordWriter:
                 "ft": np.asarray(sample["ft"], dtype=np.float32).reshape(6),
                 "marker2d": self._flatten_marker2d(sample["marker2d"]),
                 "rgb": np.asarray(sample["rgb"], dtype=np.uint8),
+                "third_rgb": np.asarray(sample["third_rgb"], dtype=np.uint8),
                 "action": np.asarray(sample["action"], dtype=np.float32).reshape(-1),
             }
         )
 
-    def append_camera_sample(self, timestamp: float, rgb: np.ndarray):
+    def append_camera_sample(self, timestamp: float, rgb: np.ndarray, third_rgb: np.ndarray):
         self.camera_timestamps.append(float(timestamp))
         self.camera_rgb.append(np.asarray(rgb, dtype=np.uint8))
+        self.third_camera_timestamps.append(float(timestamp))
+        self.third_camera_rgb.append(np.asarray(third_rgb, dtype=np.uint8))
 
     def append_ft_sample(self, timestamp: float, ft: np.ndarray):
         self.ft_timestamps.append(float(timestamp))
@@ -193,6 +198,7 @@ class CafeRecordWriter:
         np.save(aligned / "ft.npy", self._stack_aligned("ft", dtype=np.float32))
         np.save(aligned / "marker2d.npy", self._stack_aligned("marker2d", dtype=np.float32))
         np.save(aligned / "rgb.npy", self._stack_aligned("rgb", dtype=np.uint8))
+        np.save(aligned / "third_rgb.npy", self._stack_aligned("third_rgb", dtype=np.uint8))
         np.save(aligned / "action.npy", self._stack_aligned("action", dtype=np.float32))
 
         np.save(self.record_dir / "encoder" / "width.npy", self._stack_or_empty(self.encoder_width, (0, 1), np.float32))
@@ -233,6 +239,13 @@ class CafeRecordWriter:
         else:
             np.save(self.record_dir / "camera" / "color" / "rgb.npy", np.zeros((0, 480, 640, 3), dtype=np.uint8))
 
+        third_color = self.record_dir / "camera" / "third" / "color"
+        np.save(third_color / "timestamps.npy", np.asarray(self.third_camera_timestamps, dtype=np.float64))
+        if self.third_camera_rgb:
+            np.save(third_color / "rgb.npy", np.stack(self.third_camera_rgb, axis=0))
+        else:
+            np.save(third_color / "rgb.npy", np.zeros((0, 720, 1280, 3), dtype=np.uint8))
+
         np.savez(
             self.record_dir / "metadata.npz",
             success=np.asarray(success, dtype=np.bool_),
@@ -247,6 +260,8 @@ class CafeRecordWriter:
         self.aligned_samples.clear()
         self.camera_timestamps.clear()
         self.camera_rgb.clear()
+        self.third_camera_timestamps.clear()
+        self.third_camera_rgb.clear()
         self.ft_timestamps.clear()
         self.ft.clear()
         self.tracker_timestamps.clear()
@@ -264,6 +279,7 @@ class CafeRecordWriter:
             "ftsensor",
             "xense",
             "camera/color",
+            "camera/third/color",
             "aligned_60Hz",
         ):
             (self.record_dir / relative_path).mkdir(parents=True, exist_ok=True)
