@@ -217,6 +217,9 @@ def test_lab_pick_cafe_dataset_writer_and_collection_script_exist():
 
 def test_lab_pick_collection_script_uses_forcecapture_cafe_record_layout():
     script_source = read(SCRIPT_ROOT / "collect_bc_dataset.py")
+    app_launch_index = script_source.index("app_launcher = AppLauncher(args_cli)")
+    patch_call_index = script_source.index("\n_patch_isaaclab_missing_exports()\n")
+    assert app_launch_index < patch_call_index
     assert "CafeRecordWriter" in script_source
     assert "--record_dir" in script_source
     assert "--camera_hz" in script_source

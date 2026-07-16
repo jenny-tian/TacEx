@@ -85,10 +85,10 @@ if args_cli.success_only and args_cli.failure_only:
     parser.error("--success_only and --failure_only are mutually exclusive")
 args_cli.enable_cameras = True
 
-_patch_isaaclab_missing_exports()
-
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
+
+_patch_isaaclab_missing_exports()
 
 from tacex_tasks.lab_pick.bc_dataset import CafeRecordWriter
 from tacex_tasks.lab_pick.lab_pick_env import LabPickEnv
