@@ -87,6 +87,9 @@ record_xxxxxx/
   camera/color/
     rgb.npy
     timestamps.npy
+  camera/third/color/
+    rgb.npy
+    timestamps.npy
   aligned_60Hz/
     xyz.npy
     quat.npy
@@ -94,19 +97,21 @@ record_xxxxxx/
     ft.npy
     marker2d.npy
     rgb.npy
+    third_rgb.npy
     action.npy
     timestamps.npy
 ```
 
 The default stream rates follow the ForceCapture-CAFE collection setup:
 
-- RGB color: `30 Hz`, `480 x 640 x 3`, `uint8`
+- wrist camera RGB: `30 Hz`, `480 x 640 x 3`, `uint8`, stored under `camera/color/`
+- third-person camera RGB: `30 Hz`, `720 x 1280 x 3`, `uint8`, stored under `camera/third/color/`
 - aligned observations: `60 Hz`
 - force/torque: `90 Hz`, 6D `Fx,Fy,Fz,Tx,Ty,Tz`
 - tracker pose: `300 Hz`, `xyz + quat`
 - tactile marker displacement: `60 Hz`, raw `(14, 26, 2)` and flattened `728`
 
-In simulation, `ft` is generated from Isaac Lab `ContactSensor` readings on the left and right GelSight/fingertip pads. The exported 6D wrench is the net fingertip contact force and torque transformed into the robot base frame. `marker2d` is generated as a nonuniform GelSight-derived displacement field. These are physically motivated simulation signals, not real hardware sensor readings.
+In `aligned_60Hz/`, `rgb.npy` retains the wrist camera for backward compatibility and `third_rgb.npy` contains the synchronized third-person view. In simulation, `ft` is generated from Isaac Lab `ContactSensor` readings on the left and right GelSight/fingertip pads. The exported 6D wrench is the net fingertip contact force and torque transformed into the robot base frame. `marker2d` is generated as a nonuniform GelSight-derived displacement field. These are physically motivated simulation signals, not real hardware sensor readings.
 
 ### Task criteria
 
@@ -125,7 +130,7 @@ timeout 240s env \
   VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json \
   PYTHONUNBUFFERED=1 \
   PYTHONPATH=source/tacex:source/tacex_assets:source/tacex_tasks \
-  /home/tjx/miniforge3/envs/env_isaaclab/bin/python \
+  /home/tjx/anaconda3/envs/env_isaaclab/bin/python \
   scripts/demos/lab_pick/collect_bc_dataset.py \
   --labware slide \
   --num_envs 1 \
@@ -171,11 +176,17 @@ Useful options:
 Failed attempts are not stopped early. The script finishes the full `--max_episode_steps` episode, then writes a debug snapshot under `failed_attempts/attempt_xxxxxx/` with:
 
 - `failure_frame_rgb.npy` and `failure_frame_rgb.png`/`.ppm`
+- `failure_frame_wrist_rgb.npy` and `failure_frame_wrist_rgb.png`/`.ppm`
+- `failure_frame_third_rgb.npy` and `failure_frame_third_rgb.png`/`.ppm`
 - `failure_frame_ft.npy`
 - `failure_frame_info.txt`, captured at the first frame that triggers the failure condition
 - `last_frame_rgb.npy` and `last_frame_rgb.png`/`.ppm`
+- `last_frame_wrist_rgb.npy` and `last_frame_wrist_rgb.png`/`.ppm`
+- `last_frame_third_rgb.npy` and `last_frame_third_rgb.png`/`.ppm`
 - `last_frame_ft.npy`
 - `last_frame_info.txt`, including failure reason, final FT, force norm, torque norm, and the first failure step
+
+The generic `failure_frame_rgb` and `last_frame_rgb` files contain the third-person camera view used by the VLM analyzer. The explicitly named files preserve both wrist and third-person images from the same rendered step.
 
 ### Analyze failed attempts with a VLM
 

@@ -283,6 +283,16 @@ def test_lab_pick_failed_attempt_vlm_analyzer_exists():
     assert "recommended_next_test" in analyzer_source
 
 
+def test_readme_documents_lab_pick_dual_camera_records():
+    readme = read(ROOT / "README.md")
+    assert "camera/third/color/" in readme
+    assert "third_rgb.npy" in readme
+    assert "wrist camera" in readme.lower()
+    assert "third-person camera" in readme.lower()
+    assert "failure_frame_wrist_rgb" in readme
+    assert "failure_frame_third_rgb" in readme
+
+
 def test_launch_scripts_are_thin_and_import_shared_env():
     scripted = read(SCRIPT_ROOT / "pick_labware.py")
     keyboard = read(SCRIPT_ROOT / "pick_labware_keyboard.py")
