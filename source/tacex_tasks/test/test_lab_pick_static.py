@@ -120,6 +120,18 @@ def test_lab_pick_env_implements_dones_reset_randomization_and_cafe_io():
     assert "target_lift[self.has_touched] = grasp_height + (lift_height - grasp_height) * lift_progress" in source
 
 
+def test_lab_pick_scripted_grasp_targets_physical_pad_center_and_labware_yaw():
+    env_source = read(TASK_ROOT / "lab_pick_env.py")
+    assert "self.gripper_center_offset_tool" in env_source
+    assert "def _calibrate_gripper_center_offset(" in env_source
+    assert "left_pos_w = self._robot.data.body_link_pos_w[:, self._left_finger_body_idx]" in env_source
+    assert "right_pos_w = self._robot.data.body_link_pos_w[:, self._right_finger_body_idx]" in env_source
+    assert "yaw_aligned_gripper_quat(" in env_source
+    assert "centered_tool_target(" in env_source
+    assert "center_target_b = self.initial_object_pos_b.clone()" in env_source
+    assert "target_pos_b = object_pos_b.clone()" not in env_source
+
+
 def test_lab_pick_env_uses_six_axis_ft_for_cafe_force_and_break_failure():
     cfg_source = read(TASK_ROOT / "lab_pick_env_cfg.py")
     env_source = read(TASK_ROOT / "lab_pick_env.py")
