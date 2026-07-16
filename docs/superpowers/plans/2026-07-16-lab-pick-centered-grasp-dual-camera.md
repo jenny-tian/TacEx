@@ -100,7 +100,7 @@ def test_yaw_aligned_gripper_quat_rotates_slide_about_base_z():
 Run:
 
 ```bash
-/home/tjx/miniforge3/envs/env_isaaclab/bin/python -m pytest \
+/home/tjx/anaconda3/envs/env_isaaclab/bin/python -m pytest \
   source/tacex_tasks/test/test_lab_pick_grasp_geometry.py -q
 ```
 
@@ -215,7 +215,7 @@ def test_lab_pick_scripted_grasp_targets_physical_pad_center_and_labware_yaw():
 Run:
 
 ```bash
-/home/tjx/miniforge3/envs/env_isaaclab/bin/python -m pytest \
+/home/tjx/anaconda3/envs/env_isaaclab/bin/python -m pytest \
   source/tacex_tasks/test/test_lab_pick_static.py::test_lab_pick_scripted_grasp_targets_physical_pad_center_and_labware_yaw -q
 ```
 
@@ -299,7 +299,7 @@ if self.cfg.scripted_lift_assist_on_contact and phase >= close_end + squeeze_ste
 - [ ] **Step 6: Run geometry and static tests**
 
 ```bash
-/home/tjx/miniforge3/envs/env_isaaclab/bin/python -m pytest \
+/home/tjx/anaconda3/envs/env_isaaclab/bin/python -m pytest \
   source/tacex_tasks/test/test_lab_pick_grasp_geometry.py \
   source/tacex_tasks/test/test_lab_pick_static.py::test_lab_pick_scripted_grasp_targets_physical_pad_center_and_labware_yaw -q
 ```
@@ -353,7 +353,7 @@ assert writer.third_camera_rgb == []
 - [ ] **Step 2: Run the writer test and verify RED**
 
 ```bash
-/home/tjx/miniforge3/envs/env_isaaclab/bin/python -m pytest \
+/home/tjx/anaconda3/envs/env_isaaclab/bin/python -m pytest \
   source/tacex_tasks/test/test_lab_pick_static.py::test_cafe_record_writer_outputs_forcecapture_cafe_directory -q
 ```
 
@@ -408,7 +408,7 @@ Add `camera/third/color` to `_mkdirs` and clear both new lists in `clear_episode
 - [ ] **Step 5: Run the writer test and full geometry tests**
 
 ```bash
-/home/tjx/miniforge3/envs/env_isaaclab/bin/python -m pytest \
+/home/tjx/anaconda3/envs/env_isaaclab/bin/python -m pytest \
   source/tacex_tasks/test/test_lab_pick_static.py::test_cafe_record_writer_outputs_forcecapture_cafe_directory \
   source/tacex_tasks/test/test_lab_pick_grasp_geometry.py -q
 ```
@@ -447,7 +447,7 @@ assert 'f"{prefix}_third_rgb.npy"' in script_source
 - [ ] **Step 2: Run the collector static test and verify RED**
 
 ```bash
-/home/tjx/miniforge3/envs/env_isaaclab/bin/python -m pytest \
+/home/tjx/anaconda3/envs/env_isaaclab/bin/python -m pytest \
   source/tacex_tasks/test/test_lab_pick_static.py::test_lab_pick_collection_script_uses_forcecapture_cafe_record_layout -q
 ```
 
@@ -495,7 +495,7 @@ Add the explicit NPY and preview paths to the info text. Keep FT handling unchan
 - [ ] **Step 5: Run collector and writer tests**
 
 ```bash
-/home/tjx/miniforge3/envs/env_isaaclab/bin/python -m pytest \
+/home/tjx/anaconda3/envs/env_isaaclab/bin/python -m pytest \
   source/tacex_tasks/test/test_lab_pick_static.py::test_lab_pick_collection_script_uses_forcecapture_cafe_record_layout \
   source/tacex_tasks/test/test_lab_pick_static.py::test_cafe_record_writer_outputs_forcecapture_cafe_directory -q
 ```
@@ -535,7 +535,7 @@ def test_readme_documents_lab_pick_dual_camera_records():
 - [ ] **Step 2: Run the README test and verify RED**
 
 ```bash
-/home/tjx/miniforge3/envs/env_isaaclab/bin/python -m pytest \
+/home/tjx/anaconda3/envs/env_isaaclab/bin/python -m pytest \
   source/tacex_tasks/test/test_lab_pick_static.py::test_readme_documents_lab_pick_dual_camera_records -q
 ```
 
@@ -557,13 +557,13 @@ Document explicit failure frame files and state that generic `failure_frame_rgb`
 - [ ] **Step 4: Run all focused tests and syntax checks**
 
 ```bash
-/home/tjx/miniforge3/envs/env_isaaclab/bin/python -m pytest \
+/home/tjx/anaconda3/envs/env_isaaclab/bin/python -m pytest \
   source/tacex_tasks/test/test_lab_pick_grasp_geometry.py \
   source/tacex_tasks/test/test_lab_pick_static.py -q
 ```
 
 ```bash
-/home/tjx/miniforge3/envs/env_isaaclab/bin/python -m py_compile \
+/home/tjx/anaconda3/envs/env_isaaclab/bin/python -m py_compile \
   source/tacex_tasks/tacex_tasks/lab_pick/grasp_geometry.py \
   source/tacex_tasks/tacex_tasks/lab_pick/bc_dataset.py \
   source/tacex_tasks/tacex_tasks/lab_pick/lab_pick_env.py \
@@ -594,7 +594,7 @@ timeout 240s env \
   VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json \
   PYTHONUNBUFFERED=1 \
   PYTHONPATH=source/tacex:source/tacex_assets:source/tacex_tasks \
-  /home/tjx/miniforge3/envs/env_isaaclab/bin/python \
+  /home/tjx/anaconda3/envs/env_isaaclab/bin/python \
   scripts/demos/lab_pick/collect_bc_dataset.py \
   --labware slide \
   --num_envs 1 \
@@ -611,7 +611,7 @@ Expected: one completed attempt with either a record or a failure debug director
 - [ ] **Step 2: Verify record shapes when a record was written**
 
 ```bash
-/home/tjx/miniforge3/envs/env_isaaclab/bin/python -c '
+/home/tjx/anaconda3/envs/env_isaaclab/bin/python -c '
 from pathlib import Path
 import numpy as np
 root = Path("/tmp/lab_pick_centered_dual_camera_smoke/record_000000")
@@ -647,7 +647,7 @@ timeout 1800s env \
   VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json \
   PYTHONUNBUFFERED=1 \
   PYTHONPATH=source/tacex:source/tacex_assets:source/tacex_tasks \
-  /home/tjx/miniforge3/envs/env_isaaclab/bin/python \
+  /home/tjx/anaconda3/envs/env_isaaclab/bin/python \
   scripts/demos/lab_pick/collect_bc_dataset.py \
   --labware slide \
   --num_envs 1 \
@@ -667,7 +667,7 @@ timeout 1800s env \
   VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json \
   PYTHONUNBUFFERED=1 \
   PYTHONPATH=source/tacex:source/tacex_assets:source/tacex_tasks \
-  /home/tjx/miniforge3/envs/env_isaaclab/bin/python \
+  /home/tjx/anaconda3/envs/env_isaaclab/bin/python \
   scripts/demos/lab_pick/collect_bc_dataset.py \
   --labware slide \
   --num_envs 1 \
