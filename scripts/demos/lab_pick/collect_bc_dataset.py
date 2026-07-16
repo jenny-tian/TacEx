@@ -105,14 +105,16 @@ def _quat_wxyz_to_xyzw(quat_wxyz: np.ndarray) -> np.ndarray:
 
 def _make_cafe_sample(env: LabPickEnv, action: torch.Tensor) -> dict[str, np.ndarray]:
     tool_pos_b, tool_quat_b = env._compute_frame_pose()
-    rgb = env.wrist_camera.data.output["rgb"][0, :, :, :3].detach().cpu().numpy().astype(np.uint8)
+    wrist_rgb = env.wrist_camera.data.output["rgb"][0, :, :, :3].detach().cpu().numpy().astype(np.uint8)
+    third_rgb = env.third_person_camera.data.output["rgb"][0, :, :, :3].detach().cpu().numpy().astype(np.uint8)
     return {
         "xyz": _to_numpy(tool_pos_b).astype(np.float32),
         "quat": _quat_wxyz_to_xyzw(_to_numpy(tool_quat_b)),
         "width": _to_numpy(env.gripper_width[:, :1]).astype(np.float32),
         "ft": _to_numpy(env.get_cafe_ft()).astype(np.float32),
         "marker2d": _to_numpy(env.get_cafe_marker2d()).astype(np.float32),
-        "rgb": rgb,
+        "rgb": wrist_rgb,
+        "third_rgb": third_rgb,
         "action": _to_numpy(action).astype(np.float32),
     }
 
@@ -190,14 +192,20 @@ def _write_frame_debug(
     break_force_threshold_n: float,
 ):
     debug_dir.mkdir(parents=True, exist_ok=True)
-    rgb = np.asarray(sample["rgb"], dtype=np.uint8)
+    wrist_rgb = np.asarray(sample["rgb"], dtype=np.uint8)
+    third_rgb = np.asarray(sample["third_rgb"], dtype=np.uint8)
+    primary_rgb = np.asarray(sample["third_rgb"], dtype=np.uint8)
     ft = np.asarray(sample["ft"], dtype=np.float32).reshape(6)
     force_norm = float(np.linalg.norm(ft[:3]))
     torque_norm = float(np.linalg.norm(ft[3:]))
 
-    np.save(debug_dir / f"{prefix}_rgb.npy", rgb)
+    np.save(debug_dir / f"{prefix}_rgb.npy", primary_rgb)
+    np.save(debug_dir / f"{prefix}_wrist_rgb.npy", wrist_rgb)
+    np.save(debug_dir / f"{prefix}_third_rgb.npy", third_rgb)
     np.save(debug_dir / f"{prefix}_ft.npy", ft)
-    preview_path = _save_rgb_preview(debug_dir / f"{prefix}_rgb.png", rgb)
+    preview_path = _save_rgb_preview(debug_dir / f"{prefix}_rgb.png", primary_rgb)
+    wrist_preview = _save_rgb_preview(debug_dir / f"{prefix}_wrist_rgb.png", wrist_rgb)
+    third_preview = _save_rgb_preview(debug_dir / f"{prefix}_third_rgb.png", third_rgb)
     summary = (
         f"failure_reason={failure_reason}\n"
         f"{prefix}_step={step}\n"
@@ -209,6 +217,10 @@ def _write_frame_debug(
         f"break_force_threshold_n={break_force_threshold_n:.6f}\n"
         f"rgb_npy={debug_dir / f'{prefix}_rgb.npy'}\n"
         f"rgb_preview={preview_path}\n"
+        f"wrist_rgb_npy={debug_dir / f'{prefix}_wrist_rgb.npy'}\n"
+        f"wrist_rgb_preview={wrist_preview}\n"
+        f"third_rgb_npy={debug_dir / f'{prefix}_third_rgb.npy'}\n"
+        f"third_rgb_preview={third_preview}\n"
         f"ft_npy={debug_dir / f'{prefix}_ft.npy'}\n"
     )
     (debug_dir / f"{prefix}_info.txt").write_text(summary, encoding="utf-8")
@@ -320,7 +332,7 @@ def main():
                     writer.append_aligned_sample(next_aligned_t, sample)
                     next_aligned_t += 1.0 / args_cli.aligned_hz
                 while _due(next_camera_t, timestamp):
-                    writer.append_camera_sample(next_camera_t, sample["rgb"])
+                    writer.append_camera_sample(next_camera_t, sample["rgb"], sample["third_rgb"])
                     next_camera_t += 1.0 / args_cli.camera_hz
                 while _due(next_ft_t, timestamp):
                     writer.append_ft_sample(next_ft_t, sample["ft"])

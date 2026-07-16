@@ -234,7 +234,13 @@ def test_lab_pick_collection_script_uses_forcecapture_cafe_record_layout():
     assert "append_encoder_sample" in script_source
     assert "append_xense_sample" in script_source
     assert "record_dir / f\"record_{recorded:06d}\"" in script_source
-    assert "env.wrist_camera.data.output" in script_source
+    assert 'env.wrist_camera.data.output["rgb"]' in script_source
+    assert 'env.third_person_camera.data.output["rgb"]' in script_source
+    assert '"third_rgb": third_rgb' in script_source
+    assert 'writer.append_camera_sample(next_camera_t, sample["rgb"], sample["third_rgb"])' in script_source
+    assert 'primary_rgb = np.asarray(sample["third_rgb"], dtype=np.uint8)' in script_source
+    assert 'f"{prefix}_wrist_rgb.npy"' in script_source
+    assert 'f"{prefix}_third_rgb.npy"' in script_source
     assert "def _due(next_timestamp: float, current_timestamp: float) -> bool:" in script_source
     assert "while _due(next_ft_t, timestamp)" in script_source
     assert "while _due(next_tracker_t, timestamp)" in script_source
