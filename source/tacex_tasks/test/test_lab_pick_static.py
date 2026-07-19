@@ -40,11 +40,12 @@ def test_lab_pick_cfg_defines_scene_assets_randomization_and_termination_thresho
     assert "terminate_break_force_threshold_n: float = 6.0" in source
     assert "success_lift_height: float = 0.200" in source
     assert "scripted_lift_assist_on_contact: bool = False" in source
+    assert "scripted_nominal_ee_quat_b: tuple[float, float, float, float] = (0.0, 1.0, 0.0, 0.0)" in source
     assert "reset_hold_steps: int = 24" in source
     assert "scripted_lift_steps: int = 180" in source
     assert "randomize_labware_position: bool = True" in source
     assert "labware_pos_randomization_xy: tuple[float, float] = (0.020, 0.010)" in source
-    assert "labware_yaw_randomization: float = 0.20" in source
+    assert "labware_yaw_randomization: float = 0.05" in source
     assert "SLIDE_VISUAL_DIFFUSE_COLOR" in source
     assert "SLIDE_VISUAL_OPACITY" in source
     assert "SLIDE_VISUAL_ROUGHNESS" in source
@@ -112,12 +113,27 @@ def test_lab_pick_env_implements_dones_reset_randomization_and_cafe_io():
         "            hover_height = 0.048\n"
         "            grasp_height = 0.0006\n"
         "            lift_height = 0.25\n"
-        "            close_width = 0.012"
+        "            close_width = 0.006"
     ) in source
+    assert "            close_start = 300" in source
+    assert "            close_end = 420" in source
+    assert "            squeeze_steps = 180" in source
     assert "def _apply_scripted_lift_assist(self, target_object_pos_b: torch.Tensor):" in source
     assert "self.labware.write_root_state_to_sim(root_state[env_ids], env_ids=env_ids)" in source
     assert "lift_progress = min(max((phase - lift_start) / max(self.cfg.scripted_lift_steps, 1), 0.0), 1.0)" in source
     assert "target_lift[self.has_touched] = grasp_height + (lift_height - grasp_height) * lift_progress" in source
+
+
+def test_lab_pick_scripted_grasp_targets_physical_pad_center_and_labware_yaw():
+    env_source = read(TASK_ROOT / "lab_pick_env.py")
+    assert "self.gripper_center_offset_tool" in env_source
+    assert "def _calibrate_gripper_center_offset(" in env_source
+    assert "left_pos_w = self._robot.data.body_link_pos_w[:, self._left_finger_body_idx]" in env_source
+    assert "right_pos_w = self._robot.data.body_link_pos_w[:, self._right_finger_body_idx]" in env_source
+    assert "yaw_aligned_gripper_quat(" in env_source
+    assert "centered_tool_target(" in env_source
+    assert "center_target_b = self.initial_object_pos_b.clone()" in env_source
+    assert "target_pos_b = object_pos_b.clone()" not in env_source
 
 
 def test_lab_pick_env_uses_six_axis_ft_for_cafe_force_and_break_failure():

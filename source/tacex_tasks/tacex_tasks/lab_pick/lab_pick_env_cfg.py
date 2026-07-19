@@ -34,12 +34,13 @@ class LabPickEnvCfg(DirectRLEnvCfg):
     marker2d_shear_scale: float = 45.0
     success_lift_height: float = 0.200
     scripted_lift_assist_on_contact: bool = False
+    scripted_nominal_ee_quat_b: tuple[float, float, float, float] = (0.0, 1.0, 0.0, 0.0)
     reset_hold_steps: int = 24
     scripted_lift_steps: int = 180
     tactile_threshold_mm: float = 0.0
     randomize_labware_position: bool = True
     labware_pos_randomization_xy: tuple[float, float] = (0.020, 0.010)
-    labware_yaw_randomization: float = 0.20
+    labware_yaw_randomization: float = 0.05
 
     viewer: ViewerCfg = ViewerCfg(
         eye=(1.15, -1.15, 0.65),

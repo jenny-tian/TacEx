@@ -15,6 +15,7 @@ from isaaclab.sensors import ContactSensor, TiledCamera, save_images_to_file
 
 from tacex import GelSightSensor
 
+from .grasp_geometry import centered_tool_target, vector_in_local_frame, yaw_aligned_gripper_quat
 from .lab_pick_env_cfg import LabPickEnvCfg
 from .visuals import SLIDE_VISUAL_DIFFUSE_COLOR, SLIDE_VISUAL_OPACITY, SLIDE_VISUAL_ROUGHNESS
 
@@ -48,8 +49,13 @@ class LabPickEnv(DirectRLEnv):
         self.last_target_pos_b = torch.zeros((self.num_envs, 3), device=self.device)
         self.last_target_quat_b = torch.zeros((self.num_envs, 4), device=self.device)
         self.last_target_quat_b[:, 0] = 1.0
-        self.nominal_ee_quat_b = torch.zeros((self.num_envs, 4), device=self.device)
-        self.nominal_ee_quat_b[:, 0] = 1.0
+        self.nominal_ee_quat_b = torch.tensor(
+            self.cfg.scripted_nominal_ee_quat_b,
+            dtype=torch.float32,
+            device=self.device,
+        ).repeat(self.num_envs, 1)
+        self.scripted_target_quat_b = self.nominal_ee_quat_b.clone()
+        self.gripper_center_offset_tool = torch.zeros((self.num_envs, 3), device=self.device)
         self._offset_pos = torch.tensor([0.0, 0.0, 0.11841], device=self.device).repeat(self.num_envs, 1)
         self._offset_rot = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).repeat(self.num_envs, 1)
         self.workspace_min_b = torch.tensor([0.25, -0.35, 0.015], device=self.device)
@@ -342,11 +348,35 @@ class LabPickEnv(DirectRLEnv):
         self._reset_hold_root_state[env_ids] = root_state
         self.reset_hold_remaining_steps[env_ids] = max(int(self.cfg.reset_hold_steps), 0)
 
-        _, ee_quat_b = self._compute_frame_pose()
-        self.nominal_ee_quat_b[env_ids] = ee_quat_b[env_ids]
+        self.nominal_ee_quat_b[env_ids] = torch.tensor(
+            self.cfg.scripted_nominal_ee_quat_b,
+            dtype=torch.float32,
+            device=self.device,
+        )
+        labware_quat_b = math_utils.quat_mul(
+            math_utils.quat_inv(self._robot.data.root_link_quat_w[env_ids]),
+            self.labware_reset_quat_w[env_ids],
+        )
+        self.scripted_target_quat_b[env_ids] = yaw_aligned_gripper_quat(
+            self.nominal_ee_quat_b[env_ids],
+            labware_quat_b,
+            self.labware_name,
+        )
+        self._calibrate_gripper_center_offset(env_ids)
         self.reset_keyboard_target(env_ids)
         self.gsmini_left.reset(env_ids=env_ids)
         self.gsmini_right.reset(env_ids=env_ids)
+
+    def _calibrate_gripper_center_offset(self, env_ids: torch.Tensor):
+        left_pos_w = self._robot.data.body_link_pos_w[:, self._left_finger_body_idx]
+        right_pos_w = self._robot.data.body_link_pos_w[:, self._right_finger_body_idx]
+        midpoint_w = 0.5 * (left_pos_w + right_pos_w)
+        root_pos_w = self._robot.data.root_link_pos_w
+        root_quat_w = self._robot.data.root_link_quat_w
+        midpoint_b = math_utils.quat_apply(math_utils.quat_inv(root_quat_w), midpoint_w - root_pos_w)
+        tool_pos_b, tool_quat_b = self._compute_frame_pose()
+        offset_b = midpoint_b - tool_pos_b
+        self.gripper_center_offset_tool[env_ids] = vector_in_local_frame(offset_b, tool_quat_b)[env_ids]
 
     @property
     def jacobian_w(self) -> torch.Tensor:
@@ -490,9 +520,8 @@ class LabPickEnv(DirectRLEnv):
         return rgb.detach().clone()
 
     def command_pick_state_machine(self):
-        object_pos_w = self.labware.data.root_pos_w
-        object_pos_b = object_pos_w - self._robot.data.root_link_pos_w
-        target_pos_b = object_pos_b.clone()
+        center_target_b = self.initial_object_pos_b.clone()
+        target_quat_b = self.scripted_target_quat_b
         touch_left, touch_right = self.tactile_contact_depths()
         touched = (touch_left > self.cfg.tactile_threshold_mm) | (touch_right > self.cfg.tactile_threshold_mm)
         self.has_touched |= touched
@@ -509,10 +538,10 @@ class LabPickEnv(DirectRLEnv):
             hover_height = 0.048
             grasp_height = 0.0006
             lift_height = 0.25
-            close_width = 0.012
-            close_start = 120
-            close_end = 240
-            squeeze_steps = 36
+            close_width = 0.006
+            close_start = 300
+            close_end = 420
+            squeeze_steps = 180
         else:
             hover_height = 0.046
             grasp_height = 0.010
@@ -525,37 +554,41 @@ class LabPickEnv(DirectRLEnv):
         phase = int(self.step_count[0].item())
         lift_start = close_end + squeeze_steps
         if phase < 90:
-            target_pos_b[:, 2] += hover_height
+            center_target_b[:, 2] += hover_height
             self.gripper_width[:] = 0.04
         elif phase < close_start:
             approach_progress = min((phase - 90) * 0.0005, hover_height - grasp_height)
-            target_pos_b[:, 2] += hover_height - approach_progress
+            center_target_b[:, 2] += hover_height - approach_progress
             self.gripper_width[:] = 0.04
         elif phase < close_end:
             close_progress = min(max((phase - close_start) / max(close_end - close_start, 1), 0.0), 1.0)
             if self.labware_name == "cup":
-                target_pos_b[:, 2] += max(grasp_height - 0.0015 * close_progress, 0.0)
+                center_target_b[:, 2] += max(grasp_height - 0.0015 * close_progress, 0.0)
             else:
-                target_pos_b[:, 2] += grasp_height
+                center_target_b[:, 2] += grasp_height
             self.gripper_width[:] = 0.04 - (0.04 - close_width) * close_progress
         elif phase < close_end + squeeze_steps:
-            target_pos_b[:, 2] += grasp_height
+            center_target_b[:, 2] += grasp_height
             self.gripper_width[:] = close_width
         else:
-            target_pos_b[:] = self.initial_object_pos_b
             lift_progress = min(max((phase - lift_start) / max(self.cfg.scripted_lift_steps, 1), 0.0), 1.0)
-            target_lift = torch.full((self.num_envs,), grasp_height, dtype=target_pos_b.dtype, device=self.device)
+            target_lift = torch.full((self.num_envs,), grasp_height, dtype=center_target_b.dtype, device=self.device)
             if bool(self.has_touched.any().item()):
                 target_lift[self.has_touched] = grasp_height + (lift_height - grasp_height) * lift_progress
-            target_pos_b[:, 2] += target_lift
+            center_target_b[:, 2] += target_lift
             self.gripper_width[:] = close_width
 
+        target_pos_b = centered_tool_target(
+            center_target_b,
+            target_quat_b,
+            self.gripper_center_offset_tool,
+        )
         self.ik_commands[:, :3] = target_pos_b
-        self.ik_commands[:, 3:7] = self.nominal_ee_quat_b
+        self.ik_commands[:, 3:7] = target_quat_b
         self.last_target_pos_b[:] = target_pos_b
-        self.last_target_quat_b[:] = self.nominal_ee_quat_b
+        self.last_target_quat_b[:] = target_quat_b
         if self.cfg.scripted_lift_assist_on_contact and phase >= close_end + squeeze_steps:
-            self._apply_scripted_lift_assist(target_pos_b)
+            self._apply_scripted_lift_assist(center_target_b)
 
     def _apply_scripted_lift_assist(self, target_object_pos_b: torch.Tensor):
         lift_mask = self.has_touched

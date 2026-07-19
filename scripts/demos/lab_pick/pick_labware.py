@@ -8,6 +8,7 @@ from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="Pick labware with a Franka/GelSight gripper and two RGB-D cameras.")
 parser.add_argument("--num_envs", type=int, default=1, help="Number of parallel environments.")
+parser.add_argument("--seed", type=int, default=0, help="Random seed for repeatable labware reset poses.")
 parser.add_argument(
     "--labware",
     choices=("slide", "coverslip", "cup"),
@@ -91,6 +92,7 @@ def main():
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.labware_name = args_cli.labware
     env_cfg.episode_length_s = args_cli.duration
+    env_cfg.seed = args_cli.seed
     if args_cli.device is not None:
         env_cfg.sim.device = args_cli.device
 
