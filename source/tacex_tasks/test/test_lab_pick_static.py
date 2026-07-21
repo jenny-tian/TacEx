@@ -232,13 +232,16 @@ def test_lab_pick_collection_script_uses_forcecapture_cafe_record_layout():
     assert "--break_force_threshold_n" in script_source
     assert "parser.error(\"--success_only and --failure_only are mutually exclusive\")" in script_source
     assert "append_aligned_sample" in script_source
-    assert "append_camera_sample" in script_source
+    assert "append_camera_sample" not in script_source
     assert "append_ft_sample" in script_source
     assert "append_tracker_sample" in script_source
     assert "append_encoder_sample" in script_source
     assert "append_xense_sample" in script_source
     assert "record_dir / f\"record_{recorded:06d}\"" in script_source
     assert "env.wrist_camera.data.output" in script_source
+    assert "env.third_person_camera.data.output" in script_source
+    assert "rgb_third" in script_source
+    assert "F.interpolate" in script_source
     assert "def _due(next_timestamp: float, current_timestamp: float) -> bool:" in script_source
     assert "while _due(next_ft_t, timestamp)" in script_source
     assert "while _due(next_tracker_t, timestamp)" in script_source
@@ -247,6 +250,7 @@ def test_lab_pick_collection_script_uses_forcecapture_cafe_record_layout():
     assert 'prefix="failure_frame"' in script_source
     assert 'prefix="last_frame"' in script_source
     assert 'f"{prefix}_rgb.npy"' in script_source
+    assert 'f"{prefix}_rgb_third.npy"' in script_source
     assert 'f"{prefix}_ft.npy"' in script_source
     assert 'f"{prefix}_info.txt"' in script_source
     assert "if terminated_now and not episode_failed:" in script_source
@@ -403,12 +407,11 @@ def test_cafe_record_writer_outputs_forcecapture_cafe_directory(tmp_path):
             "width": np.array([0.02], dtype=np.float32),
             "ft": np.full((6,), float(index), dtype=np.float32),
             "marker2d": np.full((14, 26, 2), float(index), dtype=np.float32),
-            "rgb": np.full((480, 640, 3), index, dtype=np.uint8),
+            "rgb": np.full((224, 224, 3), index, dtype=np.uint8),
+            "rgb_third": np.full((224, 224, 3), index + 10, dtype=np.uint8),
             "action": np.full((10,), float(index), dtype=np.float32),
         }
         writer.append_aligned_sample(timestamp, sample)
-        if index % 2 == 0:
-            writer.append_camera_sample(timestamp, sample["rgb"])
         writer.append_ft_sample(timestamp, sample["ft"])
         writer.append_tracker_sample(timestamp, sample["xyz"], sample["quat"])
         writer.append_encoder_sample(timestamp, sample["width"])
@@ -433,26 +436,28 @@ def test_cafe_record_writer_outputs_forcecapture_cafe_directory(tmp_path):
         "xense/marker2d.npy",
         "xense/marker2d_flatten.npy",
         "xense/timestamps.npy",
-        "camera/color/timestamps.npy",
-        "aligned_60Hz/xyz.npy",
-        "aligned_60Hz/quat.npy",
-        "aligned_60Hz/width.npy",
-        "aligned_60Hz/ft.npy",
-        "aligned_60Hz/marker2d.npy",
-        "aligned_60Hz/rgb.npy",
-        "aligned_60Hz/action.npy",
+        "aligned/xyz.npy",
+        "aligned/quat.npy",
+        "aligned/width.npy",
+        "aligned/ft.npy",
+        "aligned/marker2d.npy",
+        "aligned/rgb.npy",
+        "aligned/rgb_third.npy",
+        "aligned/action.npy",
     ]
     for relative_path in expected_files:
         assert (record_dir / relative_path).exists(), relative_path
 
-    assert np.load(record_dir / "aligned_60Hz" / "xyz.npy").shape == (6, 3)
-    assert np.load(record_dir / "aligned_60Hz" / "quat.npy").shape == (6, 4)
-    assert np.load(record_dir / "aligned_60Hz" / "width.npy").shape == (6, 1)
-    assert np.load(record_dir / "aligned_60Hz" / "ft.npy").shape == (6, 6)
-    assert np.load(record_dir / "aligned_60Hz" / "marker2d.npy").shape == (6, 14 * 26 * 2)
-    assert np.load(record_dir / "aligned_60Hz" / "rgb.npy").shape == (6, 480, 640, 3)
+    assert not (record_dir / "camera").exists()
+    assert not (record_dir / "aligned_60Hz").exists()
+    assert np.load(record_dir / "aligned" / "xyz.npy").shape == (6, 3)
+    assert np.load(record_dir / "aligned" / "quat.npy").shape == (6, 4)
+    assert np.load(record_dir / "aligned" / "width.npy").shape == (6, 1)
+    assert np.load(record_dir / "aligned" / "ft.npy").shape == (6, 6)
+    assert np.load(record_dir / "aligned" / "marker2d.npy").shape == (6, 14 * 26 * 2)
+    assert np.load(record_dir / "aligned" / "rgb.npy").shape == (6, 224, 224, 3)
+    assert np.load(record_dir / "aligned" / "rgb_third.npy").shape == (6, 224, 224, 3)
     assert np.load(record_dir / "ftsensor" / "ft.npy").shape == (6, 6)
-    assert np.load(record_dir / "camera" / "color" / "timestamps.npy").shape == (3,)
 
     metadata = np.load(record_dir / "metadata.npz")
     assert bool(metadata["success"]) is True

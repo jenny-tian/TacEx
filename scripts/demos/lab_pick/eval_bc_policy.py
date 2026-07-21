@@ -352,8 +352,8 @@ class LabPickEnvCfg(DirectRLEnvCfg):
             horizontal_aperture=20.955,
             clipping_range=(0.05, 5.0),
         ),
-        width=1280,
-        height=720,
+        width=640,
+        height=480,
     )
 
     gsmini_left = GelSightMiniCfg(
@@ -718,11 +718,18 @@ class LabPickEnv(DirectRLEnv):
             "ft": self.cafe_force_torque()[0].detach().cpu().numpy(),
             "marker2d": np.zeros((14, 26, 2), dtype=np.float32),
             "rgb": self.wrist_image_224()[0].detach().cpu().numpy(),
+            "rgb_third": self.third_image_224()[0].detach().cpu().numpy(),
             "action": self.action_vector()[0].detach().cpu().numpy(),
         }
 
     def wrist_image_224(self) -> torch.Tensor:
         rgb = self.wrist_camera.data.output["rgb"][:, :, :, :3]
+        rgb = rgb.permute(0, 3, 1, 2).float()
+        image = F.interpolate(rgb, size=(224, 224), mode="bilinear", align_corners=False)
+        return image.clamp(0, 255).byte().permute(0, 2, 3, 1)
+
+    def third_image_224(self) -> torch.Tensor:
+        rgb = self.third_person_camera.data.output["rgb"][:, :, :, :3]
         rgb = rgb.permute(0, 3, 1, 2).float()
         image = F.interpolate(rgb, size=(224, 224), mode="bilinear", align_corners=False)
         return image.clamp(0, 255).byte().permute(0, 2, 3, 1)

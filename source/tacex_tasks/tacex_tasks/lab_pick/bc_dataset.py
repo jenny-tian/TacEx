@@ -121,13 +121,11 @@ class CafeHdf5Writer:
 
 
 class CafeRecordWriter:
-    """Writer for ForceCapture-CAFE style raw record directories and aligned 60Hz arrays."""
+    """Writer for ForceCapture-CAFE style raw record directories and aligned arrays."""
 
     def __init__(self, record_dir: str | Path):
         self.record_dir = Path(record_dir)
         self.aligned_samples: list[dict[str, np.ndarray | float]] = []
-        self.camera_timestamps: list[float] = []
-        self.camera_rgb: list[np.ndarray] = []
         self.ft_timestamps: list[float] = []
         self.ft: list[np.ndarray] = []
         self.tracker_timestamps: list[float] = []
@@ -148,13 +146,10 @@ class CafeRecordWriter:
                 "ft": np.asarray(sample["ft"], dtype=np.float32).reshape(6),
                 "marker2d": self._flatten_marker2d(sample["marker2d"]),
                 "rgb": np.asarray(sample["rgb"], dtype=np.uint8),
+                "rgb_third": np.asarray(sample["rgb_third"], dtype=np.uint8),
                 "action": np.asarray(sample["action"], dtype=np.float32).reshape(-1),
             }
         )
-
-    def append_camera_sample(self, timestamp: float, rgb: np.ndarray):
-        self.camera_timestamps.append(float(timestamp))
-        self.camera_rgb.append(np.asarray(rgb, dtype=np.uint8))
 
     def append_ft_sample(self, timestamp: float, ft: np.ndarray):
         self.ft_timestamps.append(float(timestamp))
@@ -185,7 +180,7 @@ class CafeRecordWriter:
             return False
 
         self._mkdirs()
-        aligned = self.record_dir / "aligned_60Hz"
+        aligned = self.record_dir / "aligned"
         np.save(aligned / "timestamps.npy", self._stack_aligned("timestamp", dtype=np.float64))
         np.save(aligned / "xyz.npy", self._stack_aligned("xyz", dtype=np.float32))
         np.save(aligned / "quat.npy", self._stack_aligned("quat", dtype=np.float32))
@@ -193,6 +188,7 @@ class CafeRecordWriter:
         np.save(aligned / "ft.npy", self._stack_aligned("ft", dtype=np.float32))
         np.save(aligned / "marker2d.npy", self._stack_aligned("marker2d", dtype=np.float32))
         np.save(aligned / "rgb.npy", self._stack_aligned("rgb", dtype=np.uint8))
+        np.save(aligned / "rgb_third.npy", self._stack_aligned("rgb_third", dtype=np.uint8))
         np.save(aligned / "action.npy", self._stack_aligned("action", dtype=np.float32))
 
         np.save(self.record_dir / "encoder" / "width.npy", self._stack_or_empty(self.encoder_width, (0, 1), np.float32))
@@ -224,15 +220,6 @@ class CafeRecordWriter:
             np.asarray(self.xense_timestamps, dtype=np.float64),
         )
 
-        np.save(
-            self.record_dir / "camera" / "color" / "timestamps.npy",
-            np.asarray(self.camera_timestamps, dtype=np.float64),
-        )
-        if self.camera_rgb:
-            np.save(self.record_dir / "camera" / "color" / "rgb.npy", np.stack(self.camera_rgb, axis=0))
-        else:
-            np.save(self.record_dir / "camera" / "color" / "rgb.npy", np.zeros((0, 480, 640, 3), dtype=np.uint8))
-
         np.savez(
             self.record_dir / "metadata.npz",
             success=np.asarray(success, dtype=np.bool_),
@@ -245,8 +232,6 @@ class CafeRecordWriter:
 
     def clear_episode(self):
         self.aligned_samples.clear()
-        self.camera_timestamps.clear()
-        self.camera_rgb.clear()
         self.ft_timestamps.clear()
         self.ft.clear()
         self.tracker_timestamps.clear()
@@ -263,8 +248,7 @@ class CafeRecordWriter:
             "tracker",
             "ftsensor",
             "xense",
-            "camera/color",
-            "aligned_60Hz",
+            "aligned",
         ):
             (self.record_dir / relative_path).mkdir(parents=True, exist_ok=True)
 

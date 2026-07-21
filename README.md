@@ -84,16 +84,14 @@ record_xxxxxx/
     marker2d.npy
     marker2d_flatten.npy
     timestamps.npy
-  camera/color/
-    rgb.npy
-    timestamps.npy
-  aligned_60Hz/
+  aligned/
     xyz.npy
     quat.npy
     width.npy
     ft.npy
     marker2d.npy
     rgb.npy
+    rgb_third.npy
     action.npy
     timestamps.npy
 ```
@@ -149,14 +147,14 @@ If you have already started your virtual environmrnt, you can use the following 
 ```
 or
 ```
-  python scripts/demos/lab_pick/collect_bc_dataset.py \
-    --labware slide \
-    --num_envs 1 \
-    --num_demos 10 \
-    --record_dir /tmp/lab_pick_cafe_records \
-    --failure_only \
-    --max_attempts 100 \
-    --break_force_threshold_n 6.0
+python scripts/demos/lab_pick/collect_bc_dataset.py \
+  --labware slide \
+  --num_envs 1 \
+  --num_demos 2 \
+  --record_dir ./dataset/ \
+  --max_attempts 100 \
+  --break_force_threshold_n 6.0 \
+  --aligned_hz 30
 ```
 Useful options:
 

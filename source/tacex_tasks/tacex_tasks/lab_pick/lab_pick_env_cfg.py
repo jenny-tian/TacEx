@@ -39,8 +39,8 @@ class LabPickEnvCfg(DirectRLEnvCfg):
     scripted_lift_steps: int = 180
     tactile_threshold_mm: float = 0.0
     randomize_labware_position: bool = True
-    labware_pos_randomization_xy: tuple[float, float] = (0.020, 0.010)
-    labware_yaw_randomization: float = 0.05
+    labware_pos_randomization_xy: tuple[float, float] = (0.05, 0.05)
+    labware_yaw_randomization: float = 3.1415/180*30
 
     viewer: ViewerCfg = ViewerCfg(
         eye=(1.15, -1.15, 0.65),
@@ -244,8 +244,8 @@ class LabPickEnvCfg(DirectRLEnvCfg):
             horizontal_aperture=20.955,
             clipping_range=(0.05, 5.0),
         ),
-        width=1280,
-        height=720,
+        width=640,
+        height=480,
     )
 
     gsmini_left = GelSightMiniCfg(

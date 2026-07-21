@@ -25,6 +25,7 @@ ACTION_LABELS = [
 ]
 
 REQUIRED_ALIGNED_FILES = ("timestamps.npy", "rgb.npy", "action.npy")
+ALIGNED_DIR_CANDIDATES = ("aligned", "aligned_60Hz")
 
 
 @dataclass(frozen=True)
@@ -76,12 +77,20 @@ def discover_record_dirs(record_dir: Path) -> list[Path]:
     return records
 
 
+def get_aligned_dir(record: Path) -> Path:
+    for name in ALIGNED_DIR_CANDIDATES:
+        aligned = record / name
+        if aligned.is_dir():
+            return aligned
+    return record / ALIGNED_DIR_CANDIDATES[0]
+
+
 def validate_record(record: Path) -> None:
-    aligned = record / "aligned_60Hz"
+    aligned = get_aligned_dir(record)
     missing = [name for name in REQUIRED_ALIGNED_FILES if not (aligned / name).is_file()]
     if missing:
         missing_text = ", ".join(missing)
-        raise SystemExit(f"{record} is missing required aligned_60Hz files: {missing_text}")
+        raise SystemExit(f"{record} is missing required aligned files: {missing_text}")
 
 
 def load_mmap(path: Path) -> np.ndarray:
@@ -266,15 +275,15 @@ def collect_record_manifest(
     overwrite: bool,
 ) -> tuple[dict[str, Any], ExportStats]:
     validate_record(record)
-    aligned = record / "aligned_60Hz"
+    aligned = get_aligned_dir(record)
     timestamps = load_mmap(aligned / "timestamps.npy")
     rgb = load_mmap(aligned / "rgb.npy")
     actions = load_mmap(aligned / "action.npy")
 
     if rgb.ndim != 4:
-        raise SystemExit(f"{record} aligned_60Hz/rgb.npy must have shape (T, H, W, C), got {rgb.shape}")
+        raise SystemExit(f"{record} {aligned.name}/rgb.npy must have shape (T, H, W, C), got {rgb.shape}")
     if actions.ndim != 2:
-        raise SystemExit(f"{record} aligned_60Hz/action.npy must have shape (T, D), got {actions.shape}")
+        raise SystemExit(f"{record} {aligned.name}/action.npy must have shape (T, D), got {actions.shape}")
     frame_count = min(int(timestamps.shape[0]), int(rgb.shape[0]), int(actions.shape[0]))
     if frame_count == 0:
         raise SystemExit(f"{record} has zero aligned frames")
@@ -1249,5 +1258,5 @@ def main() -> int:
 if __name__ == "__main__":
     raise SystemExit(main())
 """
-python scripts/vis/vis_traj.py --record_dir ./dataset/success
+python scripts/vis/vis_traj.py --record_dir ./dataset
 """

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 
 def _bootstrap_isaaclab_source_paths():
@@ -74,7 +75,7 @@ parser.add_argument("--failure_only", action="store_true")
 parser.add_argument("--max_attempts", type=int, default=0, help="Stop after this many attempts; 0 means no explicit cap.")
 parser.add_argument("--max_episode_steps", type=int, default=960)
 parser.add_argument("--aligned_hz", type=float, default=60.0)
-parser.add_argument("--camera_hz", type=float, default=30.0)
+parser.add_argument("--camera_hz", type=float, default=30.0, help="Deprecated; camera streams are saved only in aligned.")
 parser.add_argument("--ft_hz", type=float, default=90.0)
 parser.add_argument("--tracker_hz", type=float, default=300.0)
 parser.add_argument("--seed", type=int, default=0)
@@ -103,9 +104,17 @@ def _quat_wxyz_to_xyzw(quat_wxyz: np.ndarray) -> np.ndarray:
     return np.asarray([quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]], dtype=np.float32)
 
 
+def _camera_rgb_224(camera_rgb: torch.Tensor) -> np.ndarray:
+    rgb = camera_rgb[0, :, :, :3].permute(2, 0, 1).unsqueeze(0).float()
+    rgb = F.interpolate(rgb, size=(224, 224), mode="bilinear", align_corners=False)
+    rgb = rgb.squeeze(0).permute(1, 2, 0).clamp(0, 255).byte()
+    return rgb.detach().cpu().numpy()
+
+
 def _make_cafe_sample(env: LabPickEnv, action: torch.Tensor) -> dict[str, np.ndarray]:
     tool_pos_b, tool_quat_b = env._compute_frame_pose()
-    rgb = env.wrist_camera.data.output["rgb"][0, :, :, :3].detach().cpu().numpy().astype(np.uint8)
+    rgb = _camera_rgb_224(env.wrist_camera.data.output["rgb"])
+    rgb_third = _camera_rgb_224(env.third_person_camera.data.output["rgb"])
     return {
         "xyz": _to_numpy(tool_pos_b).astype(np.float32),
         "quat": _quat_wxyz_to_xyzw(_to_numpy(tool_quat_b)),
@@ -113,6 +122,7 @@ def _make_cafe_sample(env: LabPickEnv, action: torch.Tensor) -> dict[str, np.nda
         "ft": _to_numpy(env.get_cafe_ft()).astype(np.float32),
         "marker2d": _to_numpy(env.get_cafe_marker2d()).astype(np.float32),
         "rgb": rgb,
+        "rgb_third": rgb_third,
         "action": _to_numpy(action).astype(np.float32),
     }
 
@@ -191,13 +201,16 @@ def _write_frame_debug(
 ):
     debug_dir.mkdir(parents=True, exist_ok=True)
     rgb = np.asarray(sample["rgb"], dtype=np.uint8)
+    rgb_third = np.asarray(sample["rgb_third"], dtype=np.uint8)
     ft = np.asarray(sample["ft"], dtype=np.float32).reshape(6)
     force_norm = float(np.linalg.norm(ft[:3]))
     torque_norm = float(np.linalg.norm(ft[3:]))
 
     np.save(debug_dir / f"{prefix}_rgb.npy", rgb)
+    np.save(debug_dir / f"{prefix}_rgb_third.npy", rgb_third)
     np.save(debug_dir / f"{prefix}_ft.npy", ft)
     preview_path = _save_rgb_preview(debug_dir / f"{prefix}_rgb.png", rgb)
+    third_preview_path = _save_rgb_preview(debug_dir / f"{prefix}_rgb_third.png", rgb_third)
     summary = (
         f"failure_reason={failure_reason}\n"
         f"{prefix}_step={step}\n"
@@ -209,6 +222,8 @@ def _write_frame_debug(
         f"break_force_threshold_n={break_force_threshold_n:.6f}\n"
         f"rgb_npy={debug_dir / f'{prefix}_rgb.npy'}\n"
         f"rgb_preview={preview_path}\n"
+        f"rgb_third_npy={debug_dir / f'{prefix}_rgb_third.npy'}\n"
+        f"rgb_third_preview={third_preview_path}\n"
         f"ft_npy={debug_dir / f'{prefix}_ft.npy'}\n"
     )
     (debug_dir / f"{prefix}_info.txt").write_text(summary, encoding="utf-8")
@@ -283,7 +298,6 @@ def main():
             writer = CafeRecordWriter(record_dir / f"record_{recorded:06d}")
             failure_debug_dir = record_dir / "failed_attempts" / f"attempt_{attempt_index:06d}"
             next_aligned_t = 1.0 / args_cli.aligned_hz
-            next_camera_t = 1.0 / args_cli.camera_hz
             next_ft_t = 1.0 / args_cli.ft_hz
             next_tracker_t = 1.0 / args_cli.tracker_hz
             next_encoder_t = 1.0 / args_cli.aligned_hz
@@ -319,9 +333,6 @@ def main():
                 while _due(next_aligned_t, timestamp):
                     writer.append_aligned_sample(next_aligned_t, sample)
                     next_aligned_t += 1.0 / args_cli.aligned_hz
-                while _due(next_camera_t, timestamp):
-                    writer.append_camera_sample(next_camera_t, sample["rgb"])
-                    next_camera_t += 1.0 / args_cli.camera_hz
                 while _due(next_ft_t, timestamp):
                     writer.append_ft_sample(next_ft_t, sample["ft"])
                     next_ft_t += 1.0 / args_cli.ft_hz

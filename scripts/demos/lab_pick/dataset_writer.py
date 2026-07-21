@@ -105,6 +105,7 @@ class CafeRecordWriter:
                 "marker2d": marker2d.reshape(-1),
                 "marker2d_grid": marker2d.reshape(14, 26, 2),
                 "rgb": np.asarray(sample["rgb"], dtype=np.uint8),
+                "rgb_third": np.asarray(sample.get("rgb_third", sample["rgb"]), dtype=np.uint8),
                 "action": np.asarray(sample["action"], dtype=np.float32).reshape(-1),
             }
         )
@@ -132,9 +133,10 @@ class CafeRecordWriter:
         marker2d = self._stack("marker2d", np.float32)
         marker2d_grid = self._stack("marker2d_grid", np.float32)
         rgb = self._stack("rgb", np.uint8)
+        rgb_third = self._stack("rgb_third", np.uint8)
         action = self._stack("action", np.float32)
 
-        aligned = self.record_dir / "aligned_60Hz"
+        aligned = self.record_dir / "aligned"
         np.save(aligned / "timestamps.npy", timestamps)
         np.save(aligned / "xyz.npy", xyz)
         np.save(aligned / "quat.npy", quat)
@@ -142,6 +144,7 @@ class CafeRecordWriter:
         np.save(aligned / "ft.npy", ft)
         np.save(aligned / "marker2d.npy", marker2d)
         np.save(aligned / "rgb.npy", rgb)
+        np.save(aligned / "rgb_third.npy", rgb_third)
         np.save(aligned / "action.npy", action)
 
         np.save(self.record_dir / "encoder" / "timestamps.npy", timestamps)
@@ -155,8 +158,6 @@ class CafeRecordWriter:
         np.save(self.record_dir / "xense" / "timestamps.npy", timestamps)
         np.save(self.record_dir / "xense" / "marker2d.npy", marker2d_grid)
         np.save(self.record_dir / "xense" / "marker2d_flatten.npy", marker2d)
-        np.save(self.record_dir / "camera" / "color" / "timestamps.npy", timestamps)
-        np.save(self.record_dir / "camera" / "color" / "rgb.npy", rgb)
         np.savez(
             self.record_dir / "metadata.npz",
             success=np.asarray(success, dtype=np.bool_),
@@ -170,7 +171,7 @@ class CafeRecordWriter:
         return True
 
     def _mkdirs(self):
-        for relative in ("aligned_60Hz", "encoder", "tracker", "ftsensor", "xense", "camera/color"):
+        for relative in ("aligned", "encoder", "tracker", "ftsensor", "xense"):
             (self.record_dir / relative).mkdir(parents=True, exist_ok=True)
 
     def _stack(self, key: str, dtype: np.dtype) -> np.ndarray:
