@@ -1,0 +1,14 @@
+{
+  "exposure_us": 20000.0,
+  "gain_db": 0.0,
+  "gamma": 2.2,
+  "wb_r": 1455.0,
+  "wb_g": 1024.0,
+  "wb_b": 2755.0,
+  "sw_blue": 1.0,
+  "saturation": 1.7,
+  "width": 1440,
+  "height": 1080,
+  "pub_img_width": 640,
+  "pub_img_height": 480
+}
