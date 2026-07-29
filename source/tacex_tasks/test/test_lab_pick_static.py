@@ -41,6 +41,7 @@ def test_lab_pick_cfg_defines_scene_assets_randomization_and_termination_thresho
     assert "success_lift_height: float = 0.200" in source
     assert "scripted_lift_assist_on_contact: bool = False" in source
     assert "scripted_nominal_ee_quat_b: tuple[float, float, float, float] = (0.0, 1.0, 0.0, 0.0)" in source
+    assert "scripted_grasp_width_noise_fraction: float = 0.10" in source
     assert "reset_hold_steps: int = 24" in source
     assert "scripted_lift_steps: int = 180" in source
     assert "randomize_labware_position: bool = True" in source
@@ -112,9 +113,15 @@ def test_lab_pick_env_implements_dones_reset_randomization_and_cafe_io():
         'elif self.labware_name == "slide":\n'
         "            hover_height = 0.048\n"
         "            grasp_height = 0.0006\n"
-        "            lift_height = 0.25\n"
-        "            close_width = 0.006"
+        "            lift_height = 0.25"
     ) in source
+    assert "def _nominal_scripted_close_width(self) -> float:" in source
+    assert "return 0.006" in source
+    assert "def _sample_scripted_close_width(self, count: int) -> torch.Tensor:" in source
+    assert "noise_fraction = float(self.cfg.scripted_grasp_width_noise_fraction)" in source
+    assert "width = width * (1.0 + noise_fraction * noise)" in source
+    assert "self.scripted_close_width[env_ids] = self._sample_scripted_close_width(len(env_ids))" in source
+    assert "close_width = self.scripted_close_width" in source
     assert "            close_start = 300" in source
     assert "            close_end = 420" in source
     assert "            squeeze_steps = 180" in source

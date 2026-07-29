@@ -35,6 +35,7 @@ class LabPickEnvCfg(DirectRLEnvCfg):
     success_lift_height: float = 0.200
     scripted_lift_assist_on_contact: bool = False
     scripted_nominal_ee_quat_b: tuple[float, float, float, float] = (0.0, 1.0, 0.0, 0.0)
+    scripted_grasp_width_noise_fraction: float = 0.10
     reset_hold_steps: int = 24
     scripted_lift_steps: int = 180
     tactile_threshold_mm: float = 0.0

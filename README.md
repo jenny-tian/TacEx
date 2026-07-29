@@ -147,10 +147,12 @@ If you have already started your virtual environmrnt, you can use the following 
 ```
 or
 ```
+env __GLX_VENDOR_LIBRARY_NAME=nvidia \
+PYTHONUNBUFFERED=1 \
 python scripts/demos/lab_pick/collect_bc_dataset.py \
   --labware slide \
   --num_envs 1 \
-  --num_demos 2 \
+  --num_demos 50 \
   --record_dir ./dataset/ \
   --max_attempts 100 \
   --break_force_threshold_n 6.0 \
@@ -174,6 +176,47 @@ Failed attempts are not stopped early. The script finishes the full `--max_episo
 - `last_frame_rgb.npy` and `last_frame_rgb.png`/`.ppm`
 - `last_frame_ft.npy`
 - `last_frame_info.txt`, including failure reason, final FT, force norm, torque norm, and the first failure step
+
+### Training BC Policy Using Collected Dataset
+After you run the above command, you will generate a dataset in hdf5 format in `dataset` direct. Then, we will gernerate a dataset in lerobot format using the gernated dataset.
+
+
+```bash
+python scripts/bc_training/create_lerobot_dataset.py \
+  --input /home/limx/github_repo/TacEx/dataset \
+  --output-root /home/limx/github_repo/TacEx/dataset_lerobot \
+  --repo-id tacex/lab_pick \
+  --overwrite
+```
+
+
+You can visualize generated dataset using 
+```bash
+lerobot-dataset-viz     --repo-id /home/limx/github_repo/TacEx/dataset_lerobot    --episode-index 0
+```
+
+You can train your bc policy using 
+```
+python scripts/bc_training/train_bc.py \
+  --data-root /home/limx/github_repo/TacEx/dataset \
+  --output-dir /home/limx/github_repo/TacEx/checkpoints/tacex_dinov3_fm_bc \
+  --epochs 200 \
+  --batch-size 32
+```
+
+Then, you can visulize your bc result using 
+```
+python scripts/bc_training/bc_open_loop_test.py \
+  --checkpoint checkpoints/tacex_dinov3_fm_bc/best.pt \
+  --output-dir outputs/bc_open_loop_smoke \
+  --split val \
+  --max-episodes 1 \
+  --max-frames-per-episode 300 \
+  --num-inference-steps 50 \
+  --dims xyz,rot6d,width \
+  --batch-size 64
+```
+
 
 ### Analyze failed attempts with a VLM
 

@@ -165,6 +165,8 @@ from visuals import SLIDE_VISUAL_DIFFUSE_COLOR, SLIDE_VISUAL_OPACITY, SLIDE_VISU
 class LabPickEnvCfg(DirectRLEnvCfg):
     """Minimal direct environment for scripted labware grasping."""
 
+    scripted_grasp_width_noise_fraction: float = 0.10
+
     viewer: ViewerCfg = ViewerCfg(
         eye=(1.15, -1.15, 0.65),
         lookat=(0.52, 0.0, 0.05),
@@ -419,6 +421,12 @@ class LabPickEnv(DirectRLEnv):
 
         self.ik_commands = torch.zeros((self.num_envs, self._ik_controller.action_dim), device=self.device)
         self.gripper_width = torch.full((self.num_envs, 2), 0.04, device=self.device)
+        self.scripted_close_width = torch.full(
+            (self.num_envs, 1),
+            self._nominal_scripted_close_width(),
+            dtype=torch.float32,
+            device=self.device,
+        )
         self.initial_object_height = self.labware.data.root_pos_w[:, 2].clone()
         self.initial_object_pos_b = self.labware.data.root_pos_w - self._robot.data.root_link_pos_w
         self.tactile_threshold_mm = 0.0
@@ -567,6 +575,7 @@ class LabPickEnv(DirectRLEnv):
         self.ik_commands[env_ids] = 0.0
         self.ik_commands[env_ids, :3] = ee_pos_b[env_ids]
         self.gripper_width[env_ids] = 0.04
+        self.scripted_close_width[env_ids] = self._sample_scripted_close_width(len(env_ids))
         self.last_target_pos_b[env_ids] = ee_pos_b[env_ids]
         self.last_target_quat_b[env_ids] = ee_quat_b[env_ids]
         self.step_count = 0
@@ -598,6 +607,22 @@ class LabPickEnv(DirectRLEnv):
         jacobian[:, 3:, :] = torch.bmm(math_utils.matrix_from_quat(self._offset_rot), jacobian[:, 3:, :])
         return jacobian
 
+    def _nominal_scripted_close_width(self) -> float:
+        if self.labware_name == "cup":
+            return 0.020
+        if self.labware_name == "slide":
+            return 0.0
+        return 0.0
+
+    def _sample_scripted_close_width(self, count: int) -> torch.Tensor:
+        nominal_width = self._nominal_scripted_close_width()
+        width = torch.full((count, 1), nominal_width, dtype=torch.float32, device=self.device)
+        noise_fraction = float(self.cfg.scripted_grasp_width_noise_fraction)
+        if noise_fraction > 0.0 and nominal_width > 0.0:
+            noise = 2.0 * torch.rand((count, 1), dtype=torch.float32, device=self.device) - 1.0
+            width = width * (1.0 + noise_fraction * noise)
+        return width.clamp(0.0, 0.04)
+
     def command_pick_state_machine(self, return_home: bool = False):
         object_pos_w = self.labware.data.root_pos_w
         object_pos_b = object_pos_w - self._robot.data.root_link_pos_w
@@ -605,12 +630,12 @@ class LabPickEnv(DirectRLEnv):
         touch_left, touch_right = self.tactile_contact_depths()
         touched = (touch_left > self.tactile_threshold_mm) | (touch_right > self.tactile_threshold_mm)
         self.has_touched |= touched
+        close_width = self.scripted_close_width
 
         if self.labware_name == "cup":
             hover_height = 0.040
             grasp_height = 0.030
             lift_height = 0.08
-            close_width = 0.020
             close_start = 220
             close_end = 500
             squeeze_steps = 40
@@ -618,7 +643,6 @@ class LabPickEnv(DirectRLEnv):
             hover_height = 0.048
             grasp_height = 0.0006
             lift_height = 0.25
-            close_width = 0.0
             close_start = 120
             close_end = 240
             squeeze_steps = 36
@@ -626,7 +650,6 @@ class LabPickEnv(DirectRLEnv):
             hover_height = 0.046
             grasp_height = 0.010
             lift_height = 0.08
-            close_width = 0.0
             close_start = 180
             close_end = 600
             squeeze_steps = 60
@@ -655,17 +678,17 @@ class LabPickEnv(DirectRLEnv):
                 target_pos_b[:, 2] += max(grasp_height - 0.0015 * close_progress, 0.0)
             else:
                 target_pos_b[:, 2] += grasp_height
-            self.gripper_width[:] = 0.04 - (0.04 - close_width) * close_progress
+            self.gripper_width[:] = (0.04 - (0.04 - close_width) * close_progress).expand_as(self.gripper_width)
         elif phase < close_end + squeeze_steps:
             target_pos_b[:, 2] += grasp_height
-            self.gripper_width[:] = close_width
+            self.gripper_width[:] = close_width.expand_as(self.gripper_width)
         elif phase < return_start or not return_home:
             target_pos_b[:] = lifted_target_pos_b
-            self.gripper_width[:] = close_width
+            self.gripper_width[:] = close_width.expand_as(self.gripper_width)
         else:
             return_progress = min(max((phase - return_start) / max(return_steps, 1), 0.0), 1.0)
             target_pos_b[:] = lifted_target_pos_b * (1.0 - return_progress) + self.initial_ee_pos_b * return_progress
-            self.gripper_width[:] = close_width
+            self.gripper_width[:] = close_width.expand_as(self.gripper_width)
 
         self.ik_commands[:, :3] = target_pos_b
         self.last_target_pos_b[:] = target_pos_b

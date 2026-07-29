@@ -68,3 +68,7 @@ tests/
 #dataset
 dataset
 dataset_lerobot
+
+#model
+trained_model
+checkpoints
