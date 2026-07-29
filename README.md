@@ -217,6 +217,10 @@ python scripts/bc_training/bc_open_loop_test.py \
   --batch-size 64
 ```
 
+You can test your training result using 
+```
+bash scripts/bc_training/run_bc_inference_sim.sh 
+```
 
 ### Analyze failed attempts with a VLM
 
