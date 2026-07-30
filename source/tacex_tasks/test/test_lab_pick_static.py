@@ -15,7 +15,7 @@ def read(path: Path) -> str:
     return path.read_text()
 
 
-def test_lab_pick_package_registers_three_labware_tasks():
+def test_lab_pick_package_registers_labware_and_sac_tasks():
     source = read(TASK_ROOT / "__init__.py")
     assert 'id="TacEx-LabPick-Slide-Direct-v0"' in source
     assert 'id="TacEx-LabPick-Coverslip-Direct-v0"' in source
@@ -45,13 +45,13 @@ def test_lab_pick_cfg_defines_scene_assets_randomization_and_termination_thresho
     assert "reset_hold_steps: int = 24" in source
     assert "scripted_lift_steps: int = 180" in source
     assert "randomize_labware_position: bool = True" in source
-    assert "labware_pos_randomization_xy: tuple[float, float] = (0.020, 0.010)" in source
-    assert "labware_yaw_randomization: float = 0.05" in source
+    assert "labware_pos_randomization_xy: tuple[float, float] = (0.05, 0.05)" in source
+    assert "labware_yaw_randomization: float = 3.1415/180*30" in source
     assert "SLIDE_VISUAL_DIFFUSE_COLOR" in source
     assert "SLIDE_VISUAL_OPACITY" in source
     assert "SLIDE_VISUAL_ROUGHNESS" in source
     assert "action_space = 10" in source
-    assert "observation_space = 14" in source
+    assert "observation_space = 16" in source
     assert "FRANKA_PANDA_ARM_GSMINI_GRIPPER_HIGH_PD_RIGID_CFG" in source
     assert "GelSightMiniCfg" in source
     assert "TiledCameraCfg" in source
@@ -69,7 +69,11 @@ def test_lab_pick_env_implements_dones_reset_randomization_and_cafe_io():
     source = read(TASK_ROOT / "lab_pick_env.py")
     assert "class LabPickEnv(DirectRLEnv):" in source
     assert "def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:" in source
-    assert "terminated = object_dropped | object_too_far | ee_outside_workspace" in source
+    assert "def _get_termination_flags(self) -> dict[str, torch.Tensor]:" in source
+    assert 'flags["object_dropped"]' in source
+    assert 'flags["object_too_far"]' in source
+    assert 'flags["ee_outside_workspace"]' in source
+    assert 'flags["object_broken"]' in source
     assert "time_out = self.episode_length_buf >= self.max_episode_length - 1" in source
     assert "return terminated, time_out" in source
     assert "def _reset_idx(self, env_ids: torch.Tensor | None):" in source
@@ -143,7 +147,7 @@ def test_lab_pick_scripted_grasp_targets_physical_pad_center_and_labware_yaw():
     assert "target_pos_b = object_pos_b.clone()" not in env_source
 
 
-def test_lab_pick_env_uses_six_axis_ft_for_cafe_force_and_break_failure():
+def test_lab_pick_env_uses_six_axis_ft_and_non_cancelling_break_force():
     cfg_source = read(TASK_ROOT / "lab_pick_env_cfg.py")
     env_source = read(TASK_ROOT / "lab_pick_env.py")
     assert "terminate_break_force_threshold_n: float" in cfg_source
@@ -159,9 +163,13 @@ def test_lab_pick_env_uses_six_axis_ft_for_cafe_force_and_break_failure():
     assert "def _estimate_contact_forces_from_tactile(self) -> tuple[torch.Tensor, torch.Tensor]:" in env_source
     assert "def get_cafe_ft(self) -> torch.Tensor:" in env_source
     assert "ft[:, :3]" in env_source
-    assert "force_norm = torch.linalg.norm(ft[:, :3], dim=1)" in env_source
-    assert "object_broken = self.has_touched & (force_norm > self.cfg.terminate_break_force_threshold_n)" in env_source
-    assert "terminated = object_dropped | object_too_far | ee_outside_workspace | object_broken" in env_source
+    assert "def get_contact_force_metrics(self) -> dict[str, torch.Tensor]:" in env_source
+    assert 'force_norm = contact_forces["net_force_n"]' in env_source
+    assert 'break_force_n = contact_forces["max_finger_force_n"]' in env_source
+    assert "object_broken = self.has_touched & (break_force_n > self.cfg.terminate_break_force_threshold_n)" in env_source
+    assert '"grip_force_n": 0.5 * (left_force_n + right_force_n)' in env_source
+    assert '"max_finger_force_n": torch.maximum(left_force_n, right_force_n)' in env_source
+    assert 'flags["object_broken"]' in env_source
     assert '"robot0_force": self.get_cafe_ft()' in env_source
     assert "CAFE: Fx,Fy,Fz,Tx,Ty,Tz" in env_source
     get_cafe_ft_source = env_source.split("def get_cafe_ft(self) -> torch.Tensor:", maxsplit=1)[1].split(
@@ -172,6 +180,20 @@ def test_lab_pick_env_uses_six_axis_ft_for_cafe_force_and_break_failure():
     assert "return self._indentation_ft()" in get_cafe_ft_source
     assert "left_force_n, right_force_n = self._estimate_contact_forces_from_tactile()" in env_source
     assert "torque_y = self.cfg.contact_torque_arm_m * (right_force_n - left_force_n)" in env_source
+
+
+def test_flow_matching_eval_records_contact_timing_errors_and_per_finger_forces():
+    script_source = read(SCRIPT_ROOT / "eval_flow_matching_policy.py")
+    assert "--close_onset_width_m" in script_source
+    assert '"min_center_distance_m": min_center_distance_m' in script_source
+    assert '"first_contact_xy_error_m": first_contact_xy_error_m' in script_source
+    assert '"bilateral_contact_xy_error_m": bilateral_contact_xy_error_m' in script_source
+    assert '"peak_net_force_n": peak_net_force_n' in script_source
+    assert '"peak_left_finger_force_n": peak_left_finger_force_n' in script_source
+    assert '"peak_right_finger_force_n": peak_right_finger_force_n' in script_source
+    assert '"peak_grip_force_n": peak_grip_force_n' in script_source
+    assert '"peak_break_force_n": peak_break_force_n' in script_source
+    assert '"peak_force_n": peak_break_force_n' in script_source
 
 
 def test_lab_pick_env_generates_gelsight_marker2d_displacement_field():
@@ -244,7 +266,7 @@ def test_lab_pick_collection_script_uses_forcecapture_cafe_record_layout():
     assert "append_tracker_sample" in script_source
     assert "append_encoder_sample" in script_source
     assert "append_xense_sample" in script_source
-    assert "record_dir / f\"record_{recorded:06d}\"" in script_source
+    assert 'f"record_{next_record_index + recorded:06d}"' in script_source
     assert "env.wrist_camera.data.output" in script_source
     assert "env.third_person_camera.data.output" in script_source
     assert "rgb_third" in script_source
@@ -469,3 +491,121 @@ def test_cafe_record_writer_outputs_forcecapture_cafe_directory(tmp_path):
     metadata = np.load(record_dir / "metadata.npz")
     assert bool(metadata["success"]) is True
     np.testing.assert_allclose(metadata["labware_reset_pos_w"], [0.1, 0.2, 0.3])
+
+
+def test_lab_pick_sac_baseline_has_task_config_actions_rewards_and_skrl_entrypoint():
+    package_source = read(TASK_ROOT / "__init__.py")
+    cfg_source = read(TASK_ROOT / "lab_pick_env_cfg.py")
+    env_source = read(TASK_ROOT / "lab_pick_env.py")
+    agent_source = read(TASK_ROOT / "agents" / "skrl_sac_cfg.yaml")
+    trainer_source = read(ROOT / "scripts" / "reinforcement_learning" / "skrl" / "train_sac.py")
+
+    assert 'id="TacEx-LabPick-Slide-SAC-v0"' in package_source
+    assert '"env_cfg_entry_point": LabPickSlideSACEnvCfg' in package_source
+    assert '"skrl_sac_cfg_entry_point": SAC_CFG_ENTRY_POINT' in package_source
+
+    assert "class LabPickSlideSACEnvCfg(LabPickSlideEnvCfg):" in cfg_source
+    assert "action_space = 4" in cfg_source
+    assert "observation_space = 23" in cfg_source
+    assert "rl_normalized_actions = True" in cfg_source
+    assert "rl_privileged_observation = True" in cfg_source
+    assert "rl_shaped_reward = True" in cfg_source
+    assert "rl_terminate_on_success = True" in cfg_source
+
+    assert "normalized_actions = actions.clamp(-1.0, 1.0)" in env_source
+    assert "self.cfg.rl_position_action_scale_m" in env_source
+    assert "def _get_rl_observation(self) -> torch.Tensor:" in env_source
+    assert "Return a normalized 23-D privileged state" in env_source
+    assert "self.cfg.rl_success_reward" in env_source
+    assert "self.cfg.rl_force_penalty_scale" in env_source
+    assert 'terminated |= flags["success"]' in env_source
+
+    assert "hidden_dims: [256, 256, 256]" in agent_source
+    assert "memory_size: 200000" in agent_source
+    assert "target_entropy: -4.0" in agent_source
+    assert "timesteps: 1000000" in agent_source
+
+    assert "from skrl.agents.torch.sac import SAC, SAC_CFG" in trainer_source
+    assert "cfg = SAC_CFG(**_process_cfg(agent_cfg[\"agent\"]))" in trainer_source
+    assert "from isaaclab_rl.skrl import SkrlVecEnvWrapper" in trainer_source
+    assert "args_cli.timesteps" in trainer_source
+    assert 'return self.net(inputs["observations"]), {"log_std": self.log_std_parameter}' in trainer_source
+    assert 'torch.cat([inputs["observations"], inputs["taken_actions"]], dim=1)' in trainer_source
+    assert 'return self.net(inputs["states"]), self.log_std_parameter, {}' not in trainer_source
+
+
+def test_lab_pick_dsrl_pipeline_has_ddim_adapter_wrapper_launcher_and_config():
+    package_source = read(TASK_ROOT / "__init__.py")
+    cfg_source = read(TASK_ROOT / "lab_pick_env_cfg.py")
+    env_source = read(TASK_ROOT / "lab_pick_env.py")
+    dsrl_root = ROOT / "scripts" / "reinforcement_learning" / "dsrl"
+    adapter_source = read(dsrl_root / "diffusion_noise_adapter.py")
+    flow_adapter_source = read(dsrl_root / "flow_matching_noise_adapter.py")
+    wrapper_source = read(dsrl_root / "lab_pick_dsrl_wrapper.py")
+    launcher_source = read(dsrl_root / "train_lab_pick_dsrl_sac.py")
+    evaluator_source = read(dsrl_root / "eval_lab_pick_diffusion_bc_runtime.py")
+    runtime_source = read(dsrl_root / "runtime.py")
+    trainer_source = read(ROOT / "scripts" / "reinforcement_learning" / "skrl" / "train_sac.py")
+    agent_source = read(TASK_ROOT / "agents" / "skrl_dsrl_sac_cfg.yaml")
+
+    assert 'id="TacEx-LabPick-Slide-DSRL-Base-v0"' in package_source
+    assert '"env_cfg_entry_point": LabPickSlideDSRLBaseEnvCfg' in package_source
+    assert '"skrl_sac_cfg_entry_point": DSRL_SAC_CFG_ENTRY_POINT' in package_source
+    assert "class LabPickSlideDSRLBaseEnvCfg(LabPickSlideEnvCfg):" in cfg_source
+    assert "rl_align_cafe_action_yaw = True" in cfg_source
+    assert "self.cfg.rl_align_cafe_action_yaw" in env_source
+    assert "if self.cfg.rl_shaped_reward:" in env_source
+
+    assert "class DiffusionNoiseAdapter:" in adapter_source
+    assert 'policy.config.noise_scheduler_type != "DDIM"' in adapter_source
+    assert "self.noise_dim = self.horizon * self.action_dim" in adapter_source
+    assert "generate_actions(processed_batch, noise=noise)" in adapter_source
+
+    assert "class FlowMatchingNoiseAdapter:" in flow_adapter_source
+    assert "SimActionChunkPolicyRunner" in flow_adapter_source
+    assert "self.noise_dim = self.horizon * self.action_dim" in flow_adapter_source
+    assert "initial_noise=noise" in flow_adapter_source
+
+    assert "class LabPickDSRLWrapper(gym.Wrapper):" in wrapper_source
+    assert "self.action_space = gym.spaces.Box(" in wrapper_source
+    assert "env.unwrapped.single_action_space = self.action_space" in wrapper_source
+    assert "self.adapter.policy.select_action(batch, noise=noise)" in wrapper_source
+    assert "self.chunk_discount**action_step" in wrapper_source
+    assert "action_repeat: int = 2" in wrapper_source
+    assert "for _ in range(self.action_repeat):" in wrapper_source
+    assert "def step_bc(self):" in wrapper_source
+    assert "requires --num_envs 1" in wrapper_source
+    assert "disable_optional_transformers_discovery()" in wrapper_source
+    assert wrapper_source.count("self.adapter.reset()") >= 2
+
+    assert 'env.pop("LD_PRELOAD", None)' in launcher_source
+    assert 'repo_root / ".cache" / "lerobot_inference"' in launcher_source
+    assert '"TacEx-LabPick-Slide-DSRL-Base-v0"' in launcher_source
+    assert "libdlfaker" in runtime_source
+    assert "disable_optional_transformers_discovery" in runtime_source
+
+    assert 'parser.add_argument("--dsrl_policy"' in trainer_source
+    assert "\"--dsrl_action_repeat\"" in trainer_source
+    assert "LabPickDSRLWrapper(" in trainer_source
+    assert "action_repeat=args_cli.dsrl_action_repeat" in trainer_source
+    assert "initialize_bc_prior" in trainer_source
+    assert 'agent_cfg["agent"]["random_timesteps"] = 0' in trainer_source
+    assert 'policy_type=args_cli.dsrl_policy_type' in trainer_source
+    assert "env.step_bc()" in evaluator_source
+    assert "\"action_hz\": action_hz" in evaluator_source
+    assert "hidden_dims: [512, 512, 512]" in agent_source
+    assert "target_entropy: null" in agent_source
+    assert "timesteps: 200000" in agent_source
+
+    assert (ROOT / "scripts" / "bc_training" / "train_lab_pick_diffusion.py").is_file()
+    assert (dsrl_root / "check_dsrl_ready.py").is_file()
+    assert (dsrl_root / "smoke_diffusion_noise.py").is_file()
+    assert (dsrl_root / "eval_lab_pick_diffusion_bc.py").is_file()
+    assert (dsrl_root / "README.md").is_file()
+
+
+def test_lab_pick_collector_appends_without_overwriting_existing_records():
+    collector_source = read(ROOT / "scripts" / "demos" / "lab_pick" / "collect_bc_dataset.py")
+    assert "next_record_index = max(existing_record_indices, default=-1) + 1" in collector_source
+    assert 'f"record_{next_record_index + recorded:06d}"' in collector_source
+    assert 'f"attempt_{next_record_index + attempt_index:06d}"' in collector_source
