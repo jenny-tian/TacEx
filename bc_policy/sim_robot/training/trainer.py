@@ -9,11 +9,12 @@ from typing import Any
 
 import torch
 from torch.utils.data import DataLoader
+from torchvision.models import ResNet50_Weights, resnet50
 from tqdm import tqdm
 
 from sim_robot.common.ema import EMAModel
 from sim_robot.data.sequence_dataset import build_datasets
-from sim_robot.policy.flow_matching_policy import SimFlowMatchingConfig, SimFlowMatchingPolicy
+from sim_robot.policy.flow_matching_policy import SimFlowMatchingConfig, SimFlowMatchingPolicy, load_checkpoint
 
 
 def move_to_device(batch: Any, device: torch.device) -> Any:
@@ -60,7 +61,7 @@ def run_epoch(
     global_step: int = 0,
 ) -> tuple[dict[str, float], int]:
     model.train(train)
-    sums = {"loss": 0.0}
+    sums: dict[str, float] = {}
     n_batches = 0
     desc = f"epoch {epoch:04d} train" if train else f"epoch {epoch:04d} val"
     iterator = tqdm(loader, desc=desc, leave=False)
@@ -95,8 +96,8 @@ def run_epoch(
         if train and ema is not None:
             ema.step(model)
         values = {key: float(value.detach().cpu()) for key, value in loss_dict.items()}
-        for key in sums:
-            sums[key] += values[key]
+        for key, value in values.items():
+            sums[key] = sums.get(key, 0.0) + value
         n_batches += 1
         iterator.set_postfix(loss=f"{values['loss']:.5f}")
         if train:
@@ -131,6 +132,98 @@ def save_checkpoint(
     torch.save(checkpoint, path)
 
 
+def initialize_from_checkpoint(model: SimFlowMatchingPolicy, checkpoint_path: Path) -> None:
+    checkpoint = load_checkpoint(checkpoint_path, map_location="cpu")
+    source = checkpoint.get("ema", {}).get("averaged_model", checkpoint["model"])
+    target = model.state_dict()
+    compatible = {}
+    adapted = []
+    skipped = []
+    for name, value in source.items():
+        if name.startswith("obs_encoder.image_projector.") and len(model.config.image_keys) > 1:
+            suffix = name.removeprefix("obs_encoder.image_projector.")
+            mapped = []
+            for camera_index in range(len(model.config.image_keys)):
+                target_name = f"obs_encoder.image_projectors.{camera_index}.{suffix}"
+                if target_name in target and target[target_name].shape == value.shape:
+                    compatible[target_name] = value
+                    mapped.append(target_name)
+            if mapped:
+                adapted.extend(mapped)
+                continue
+        if name not in target:
+            skipped.append(name)
+            continue
+        if value.shape == target[name].shape:
+            compatible[name] = value
+            continue
+        if (
+            name == "obs_encoder.state_projector.0.weight"
+            and value.ndim == 2
+            and target[name].shape[0] == value.shape[0]
+            and target[name].shape[1] == value.shape[1] + 1
+        ):
+            expanded = target[name].clone()
+            expanded[:, : value.shape[1]] = value
+            expanded[:, value.shape[1] :] = 0.0
+            compatible[name] = expanded
+            adapted.append(name)
+            continue
+        if (
+            name == "obs_encoder.modality_emb"
+            and value.ndim == 3
+            and target[name].shape[0] == value.shape[0]
+            and target[name].shape[2] == value.shape[2]
+            and target[name].shape[1] > value.shape[1]
+        ):
+            expanded = target[name].clone()
+            expanded[:, : value.shape[1]] = value
+            expanded[:, value.shape[1] :] = value[:, -1:]
+            compatible[name] = expanded
+            adapted.append(name)
+            continue
+        if (
+            name == "velocity_net.cond_pos_emb"
+            and value.ndim == 3
+            and target[name].shape[0] == value.shape[0]
+            and target[name].shape[2] == value.shape[2]
+            and target[name].shape[1] > value.shape[1]
+        ):
+            expanded = target[name].clone()
+            expanded[:, : value.shape[1]] = value
+            extra = target[name].shape[1] - value.shape[1]
+            expanded[:, value.shape[1] :] = value[:, -extra:]
+            compatible[name] = expanded
+            adapted.append(name)
+            continue
+        skipped.append(name)
+    result = model.load_state_dict(compatible, strict=False)
+    print(
+        f"[INFO] initialized from {checkpoint_path}: loaded={len(compatible)} "
+        f"adapted={adapted} skipped={len(skipped)} missing={len(result.missing_keys)}"
+    )
+
+
+def initialize_pretrained_image_backbone(model: SimFlowMatchingPolicy, backbone_name: str) -> None:
+    if backbone_name == "none":
+        return
+    if backbone_name != "resnet50_imagenet1k_v2":
+        raise ValueError(f"Unsupported pretrained image backbone: {backbone_name}")
+
+    pretrained = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
+    source = pretrained.state_dict()
+    target_module = model.obs_encoder.image_encoder.backbone
+    target = target_module.state_dict()
+    compatible = {
+        name: value for name, value in source.items() if name in target and value.shape == target[name].shape
+    }
+    result = target_module.load_state_dict(compatible, strict=False)
+    print(
+        f"[INFO] initialized image backbone from {backbone_name}: loaded={len(compatible)} "
+        f"missing={len(result.missing_keys)}"
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train single-camera sim action policy with flow matching.")
     parser.add_argument("--dataset", type=Path, required=True)
@@ -138,6 +231,12 @@ def main() -> None:
     parser.add_argument("--action-key", type=str, default="high")
     parser.add_argument("--state-key", type=str, default="robot0_pos")
     parser.add_argument("--image-key", type=str, default="robot0_image")
+    parser.add_argument(
+        "--image-keys",
+        type=str,
+        default="",
+        help="Comma-separated image datasets for multi-camera fusion (for example robot0_image,robot0_image_third).",
+    )
     parser.add_argument("--success-only", action="store_true")
     parser.add_argument("--n-state-obs-steps", type=int, default=2)
     parser.add_argument("--n-image-obs-steps", type=int, default=2)
@@ -153,6 +252,18 @@ def main() -> None:
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--normalizer-mode", choices=["standard", "gaussian", "limits"], default="limits")
     parser.add_argument("--image-feature-dim", type=int, default=512)
+    parser.add_argument(
+        "--image-normalization",
+        choices=("none", "imagenet"),
+        default="none",
+        help="Input normalization applied inside the image encoder and stored in the checkpoint.",
+    )
+    parser.add_argument(
+        "--pretrained-image-backbone",
+        choices=("none", "resnet50_imagenet1k_v2"),
+        default="none",
+        help="Reset only the ResNet backbone after loading --init-checkpoint.",
+    )
     parser.add_argument("--obs-feature-dim", type=int, default=512)
     parser.add_argument("--transformer-layers", type=int, default=6)
     parser.add_argument("--transformer-heads", type=int, default=8)
@@ -164,6 +275,14 @@ def main() -> None:
     parser.add_argument("--time-embed-scale", type=float, default=1000.0)
     parser.add_argument("--no-clip-sample", action="store_true")
     parser.add_argument("--cache-images", action="store_true")
+    parser.add_argument("--include-phase", action="store_true", help="Append normalized episode progress to robot0_pos.")
+    parser.add_argument(
+        "--visual-xy-loss-weight",
+        type=float,
+        default=0.0,
+        help="Auxiliary image-only loss weight for predicting the first normalized target XY.",
+    )
+    parser.add_argument("--init-checkpoint", type=Path, default=None, help="Initialize matching weights from an existing checkpoint.")
     parser.add_argument("--max-train-steps", type=int, default=None)
     parser.add_argument("--max-val-steps", type=int, default=None)
     parser.add_argument("--no-ema", action="store_true")
@@ -179,6 +298,9 @@ def main() -> None:
         torch.backends.cudnn.benchmark = True
     device = torch.device(args.device)
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    dataset_image_key = args.image_keys if args.image_keys.strip() else args.image_key
+    resolved_image_keys = tuple(part.strip() for part in dataset_image_key.split(",") if part.strip())
+    model_image_keys = resolved_image_keys if len(resolved_image_keys) > 1 else ("robot0_image",)
 
     train_set, val_set, normalizer = build_datasets(
         hdf5_path=args.dataset,
@@ -190,9 +312,10 @@ def main() -> None:
         normalizer_mode=args.normalizer_mode,
         action_key=args.action_key,
         state_key=args.state_key,
-        image_key=args.image_key,
+        image_key=dataset_image_key,
         success_only=args.success_only,
         cache_images=args.cache_images,
+        include_phase=args.include_phase,
     )
     train_loader = DataLoader(
         train_set,
@@ -219,6 +342,8 @@ def main() -> None:
         action_dim=train_set.action_dim,
         n_state_obs_steps=args.n_state_obs_steps,
         n_image_obs_steps=args.n_image_obs_steps,
+        image_keys=model_image_keys,
+        image_normalization=args.image_normalization,
         n_action_steps=args.n_action_steps,
         image_feature_dim=args.image_feature_dim,
         obs_feature_dim=args.obs_feature_dim,
@@ -231,8 +356,12 @@ def main() -> None:
         num_inference_steps=args.num_inference_steps,
         ode_solver=args.ode_solver,
         clip_sample=not args.no_clip_sample,
+        visual_xy_loss_weight=args.visual_xy_loss_weight,
     )
     model = SimFlowMatchingPolicy(policy_config).to(device)
+    if args.init_checkpoint is not None:
+        initialize_from_checkpoint(model, args.init_checkpoint.expanduser().resolve())
+    initialize_pretrained_image_backbone(model, args.pretrained_image_backbone)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, betas=(0.95, 0.999))
     ema = None if args.no_ema else EMAModel(model, decay=args.ema_decay)
     scaler = torch.cuda.amp.GradScaler(enabled=args.amp and device.type == "cuda")
@@ -249,6 +378,8 @@ def main() -> None:
             "robot0_pos_dim": train_set.robot0_pos_dim,
             "action_dim": train_set.action_dim,
             "image_shape": train_set.image_shape,
+            "image_shapes": train_set.image_shapes,
+            "resolved_image_keys": resolved_image_keys,
             "freq_ratio": train_set.freq_ratio,
             "instruction": train_set.instruction,
             "labware": train_set.labware,
