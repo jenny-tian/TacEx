@@ -1,0 +1,41 @@
+seed: 42
+
+network:
+  hidden_dims: [256, 256, 256]
+
+memory_size: 200000
+
+agent:
+  gradient_steps: 1
+  batch_size: 256
+  discount_factor: 0.99
+  polyak: 0.005
+  learning_rate: [0.0003, 0.0003, 0.0003]
+  learning_rate_scheduler: null
+  learning_rate_scheduler_kwargs: {}
+  observation_preprocessor: null
+  observation_preprocessor_kwargs: {}
+  state_preprocessor: null
+  state_preprocessor_kwargs: {}
+  random_timesteps: 5000
+  learning_starts: 5000
+  grad_norm_clip: 10.0
+  learn_entropy: true
+  initial_entropy_value: 0.2
+  target_entropy: -4.0
+  rewards_shaper: null
+  mixed_precision: false
+
+  experiment:
+    directory: "lab_pick_slide"
+    experiment_name: "sac_state"
+    write_interval: 1000
+    checkpoint_interval: 50000
+    store_separately: false
+    wandb: false
+    wandb_kwargs: {}
+
+trainer:
+  # Full baseline budget. Use --timesteps for smoke tests and shorter runs.
+  timesteps: 1000000
+  environment_info: "log"

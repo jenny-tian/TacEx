@@ -1,0 +1,41 @@
+seed: 42
+
+network:
+  hidden_dims: [512, 512, 512]
+
+memory_size: 100000
+
+agent:
+  gradient_steps: 1
+  batch_size: 256
+  discount_factor: 0.99
+  polyak: 0.005
+  learning_rate: [0.0001, 0.0003, 0.0003]
+  learning_rate_scheduler: null
+  learning_rate_scheduler_kwargs: {}
+  observation_preprocessor: null
+  observation_preprocessor_kwargs: {}
+  state_preprocessor: null
+  state_preprocessor_kwargs: {}
+  random_timesteps: 2000
+  learning_starts: 2000
+  grad_norm_clip: 10.0
+  learn_entropy: true
+  initial_entropy_value: 0.05
+  target_entropy: null
+  rewards_shaper: null
+  mixed_precision: false
+
+  experiment:
+    directory: "lab_pick_slide"
+    experiment_name: "dsrl_sac_ddim"
+    write_interval: 500
+    checkpoint_interval: 10000
+    store_separately: false
+    wandb: false
+    wandb_kwargs: {}
+
+trainer:
+  # Outer steps; each step executes up to n_action_steps simulator steps.
+  timesteps: 200000
+  environment_info: "log"

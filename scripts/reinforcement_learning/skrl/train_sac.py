@@ -15,7 +15,7 @@ import argparse
 import copy
 import sys
 
-from omni.isaac.lab.app import AppLauncher
+from isaaclab.app import AppLauncher
 
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Train an RL agent with skrl.")
@@ -42,6 +42,41 @@ parser.add_argument(
     help="Run training with multiple GPUs or nodes.",
 )
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
+parser.add_argument("--timesteps", type=int, default=None, help="Override the configured number of environment steps.")
+parser.add_argument("--sac_learning_starts", type=int, default=None)
+parser.add_argument("--sac_batch_size", type=int, default=None)
+parser.add_argument("--sac_checkpoint_interval", type=int, default=None)
+parser.add_argument("--sac_write_interval", type=int, default=None)
+parser.add_argument("--dsrl_policy", type=str, default=None, help="Frozen Diffusion or Flow Matching BC checkpoint for DSRL-SAC.")
+parser.add_argument("--dsrl_device", type=str, default="cuda", help="Device used by the frozen BC policy.")
+parser.add_argument("--dsrl_noise_magnitude", type=float, default=1.5)
+parser.add_argument("--dsrl_chunk_discount", type=float, default=0.99)
+parser.add_argument(
+    "--dsrl_action_repeat",
+    type=int,
+    default=2,
+    help="Physics steps per decoded action. Use 2 for a 60 Hz BC dataset in the 120 Hz LabPick simulator.",
+)
+parser.add_argument(
+    "--dsrl_policy_type",
+    choices=["auto", "diffusion", "flow_matching"],
+    default="auto",
+    help="Frozen BC family. Auto detects .pt files as sim_robot Flow Matching.",
+)
+parser.add_argument("--dsrl_flow_num_inference_steps", type=int, default=20)
+parser.add_argument(
+    "--dsrl_flow_chunk_execute_steps",
+    type=int,
+    default=32,
+)
+parser.add_argument("--dsrl_flow_phase_horizon_steps", type=int, default=383)
+parser.add_argument("--dsrl_flow_camera_warmup_steps", type=int, default=8)
+parser.add_argument(
+    "--dsrl_bc_prior_init",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Initialize the SAC actor as the frozen BC's zero-mean unit-Gaussian prior.",
+)
 parser.add_argument(
     "--ml_framework",
     type=str,
@@ -76,11 +111,9 @@ sys.argv = [sys.argv[0]] + hydra_args
 
 """Rest everything follows."""
 
-from omni.isaac.core.utils.extensions import enable_extension
+from isaacsim.core.utils.extensions import enable_extension
 
-enable_extension(
-    "omni.isaac.debug_draw"
-)  # otherwise running headless on the cluster is not possible (some GIPC classes import debug_draw)
+enable_extension("omni.isaac.debug_draw")
 
 import gymnasium as gym
 import os
@@ -93,13 +126,13 @@ import skrl
 from packaging import version
 
 # import the skrl components to build the RL system
-from skrl.agents.torch.sac import SAC, SAC_DEFAULT_CONFIG
+from skrl.agents.torch.sac import SAC, SAC_CFG
 from skrl.memories.torch import RandomMemory
 from skrl.models.torch import DeterministicMixin, GaussianMixin, Model
 from skrl.trainers.torch import SequentialTrainer
 
 # check for minimum supported skrl version
-SKRL_VERSION = "1.3.0"
+SKRL_VERSION = "2.0.0"
 if version.parse(skrl.__version__) < version.parse(SKRL_VERSION):
     skrl.logger.error(
         f"Unsupported skrl version: {skrl.__version__}. "
@@ -110,69 +143,76 @@ if version.parse(skrl.__version__) < version.parse(SKRL_VERSION):
 if args_cli.ml_framework.startswith("torch") or args_cli.ml_framework.startswith("jax"):
     pass
 
-import omni.isaac.lab_tasks  # noqa: F401
-from omni.isaac.lab.envs import (
+from isaaclab.envs import (
     DirectMARLEnvCfg,
     DirectRLEnvCfg,
     ManagerBasedRLEnvCfg,
 )
-from omni.isaac.lab.utils.dict import print_dict
-from omni.isaac.lab.utils.io import dump_pickle, dump_yaml
-from omni.isaac.lab_tasks.utils.hydra import hydra_task_config
-from omni.isaac.lab_tasks.utils.wrappers.skrl import SkrlVecEnvWrapper
+from isaaclab.utils.dict import print_dict
+from isaaclab.utils.io import dump_pickle, dump_yaml
+from isaaclab_rl.skrl import SkrlVecEnvWrapper
+from isaaclab_tasks.utils.hydra import hydra_task_config
+
+import tacex_tasks  # noqa: F401
+import tacex_tasks.lab_pick  # noqa: F401
 
 
 # define models (stochastic and deterministic models) using mixins
-class StochasticActor(GaussianMixin, Model):
-    def __init__(
-        self,
-        observation_space,
-        action_space,
-        device,
-        clip_actions=False,
-        clip_log_std=True,
-        min_log_std=-5,
-        max_log_std=2,
-    ):
-        Model.__init__(self, observation_space, action_space, device)
-        GaussianMixin.__init__(self, clip_actions, clip_log_std, min_log_std, max_log_std)
+def _build_mlp(input_dim: int, hidden_dims: list[int], output_dim: int, final_activation=None) -> nn.Sequential:
+    layers: list[nn.Module] = []
+    current_dim = input_dim
+    for hidden_dim in hidden_dims:
+        layers.extend((nn.Linear(current_dim, hidden_dim), nn.ELU()))
+        current_dim = hidden_dim
+    layers.append(nn.Linear(current_dim, output_dim))
+    if final_activation is not None:
+        layers.append(final_activation())
+    return nn.Sequential(*layers)
 
-        # self.net = nn.Sequential(nn.Linear(self.num_observations, 512),
-        #                          nn.ReLU(),
-        #                          nn.Linear(512, 256),
-        #                          nn.ReLU(),
-        #                          nn.Linear(256, self.num_actions),
-        #                          nn.Tanh())
-        self.net = nn.Sequential(
-            nn.Linear(self.num_observations, 64),
-            nn.ReLU(),
-            nn.Linear(64, self.num_actions),
-            nn.Tanh(),
+
+class StochasticActor(GaussianMixin, Model):
+    def __init__(self, observation_space, action_space, device, hidden_dims: list[int]):
+        Model.__init__(
+            self,
+            observation_space=observation_space,
+            action_space=action_space,
+            device=device,
         )
+        GaussianMixin.__init__(
+            self,
+            clip_actions=True,
+            clip_mean_actions=True,
+            clip_log_std=True,
+            min_log_std=-5,
+            max_log_std=2,
+        )
+        self.net = _build_mlp(self.num_observations, hidden_dims, self.num_actions, nn.Tanh)
         self.log_std_parameter = nn.Parameter(torch.zeros(self.num_actions))
 
+    def initialize_bc_prior(self) -> None:
+        output_layer = next(module for module in reversed(self.net) if isinstance(module, nn.Linear))
+        with torch.no_grad():
+            output_layer.weight.zero_()
+            output_layer.bias.zero_()
+            self.log_std_parameter.zero_()
+
     def compute(self, inputs, role):
-        return self.net(inputs["states"]), self.log_std_parameter, {}
+        return self.net(inputs["observations"]), {"log_std": self.log_std_parameter}
 
 
 class Critic(DeterministicMixin, Model):
-    def __init__(self, observation_space, action_space, device, clip_actions=False):
-        Model.__init__(self, observation_space, action_space, device)
-        DeterministicMixin.__init__(self, clip_actions)
-
-        # self.net = nn.Sequential(nn.Linear(self.num_observations + self.num_actions, 512),
-        #                          nn.ReLU(),
-        #                          nn.Linear(512, 256),
-        #                          nn.ReLU(),
-        #                          nn.Linear(256, 1))
-        self.net = nn.Sequential(
-            nn.Linear(self.num_observations + self.num_actions, 64),
-            nn.ReLU(),
-            nn.Linear(64, 1),
+    def __init__(self, observation_space, action_space, device, hidden_dims: list[int]):
+        Model.__init__(
+            self,
+            observation_space=observation_space,
+            action_space=action_space,
+            device=device,
         )
+        DeterministicMixin.__init__(self, clip_actions=False)
+        self.net = _build_mlp(self.num_observations + self.num_actions, hidden_dims, 1)
 
     def compute(self, inputs, role):
-        return self.net(torch.cat([inputs["states"], inputs["taken_actions"]], dim=1)), {}
+        return self.net(torch.cat([inputs["observations"], inputs["taken_actions"]], dim=1)), {}
 
 
 # config shortcuts
@@ -225,10 +265,25 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # multi-gpu training config
     if args_cli.distributed:
         env_cfg.sim.device = f"cuda:{app_launcher.local_rank}"
-    # max iterations for training
-    if args_cli.max_iterations:
-        agent_cfg["trainer"]["timesteps"] = args_cli.max_iterations * agent_cfg["agent"]["rollouts"]
-    agent_cfg["trainer"]["close_environment_at_exit"] = False
+    # SAC is updated every environment step, so the legacy max_iterations
+    # option is treated as a step override as well.
+    if args_cli.timesteps is not None:
+        agent_cfg["trainer"]["timesteps"] = args_cli.timesteps
+    elif args_cli.max_iterations is not None:
+        agent_cfg["trainer"]["timesteps"] = args_cli.max_iterations
+    if args_cli.sac_learning_starts is not None:
+        agent_cfg["agent"]["learning_starts"] = args_cli.sac_learning_starts
+    if args_cli.sac_batch_size is not None:
+        agent_cfg["agent"]["batch_size"] = args_cli.sac_batch_size
+    if args_cli.sac_checkpoint_interval is not None:
+        agent_cfg["agent"]["experiment"]["checkpoint_interval"] = args_cli.sac_checkpoint_interval
+    if args_cli.sac_write_interval is not None:
+        agent_cfg["agent"]["experiment"]["write_interval"] = args_cli.sac_write_interval
+    if args_cli.dsrl_policy and (
+        args_cli.dsrl_policy_type == "flow_matching"
+        or (args_cli.dsrl_policy_type == "auto" and os.path.isfile(args_cli.dsrl_policy))
+    ):
+        agent_cfg["agent"]["experiment"]["experiment_name"] = "dsrl_sac_flow_bc_init"
     # configure the ML framework into the global skrl variable
     if args_cli.ml_framework.startswith("jax"):
         skrl.config.jax.backend = "jax" if args_cli.ml_framework == "jax" else "numpy"
@@ -269,6 +324,31 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+    if args_cli.dsrl_policy:
+        if args_cli.task != "TacEx-LabPick-Slide-DSRL-Base-v0":
+            raise ValueError(
+                "--dsrl_policy currently requires --task TacEx-LabPick-Slide-DSRL-Base-v0"
+            )
+        dsrl_module_dir = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "dsrl")
+        )
+        if dsrl_module_dir not in sys.path:
+            sys.path.insert(0, dsrl_module_dir)
+        from lab_pick_dsrl_wrapper import LabPickDSRLWrapper
+
+        env = LabPickDSRLWrapper(
+            env,
+            args_cli.dsrl_policy,
+            device=args_cli.dsrl_device,
+            noise_magnitude=args_cli.dsrl_noise_magnitude,
+            chunk_discount=args_cli.dsrl_chunk_discount,
+            action_repeat=args_cli.dsrl_action_repeat,
+            policy_type=args_cli.dsrl_policy_type,
+            flow_num_inference_steps=args_cli.dsrl_flow_num_inference_steps,
+            flow_chunk_execute_steps=args_cli.dsrl_flow_chunk_execute_steps,
+            flow_phase_horizon_steps=args_cli.dsrl_flow_phase_horizon_steps,
+            flow_camera_warmup_steps=args_cli.dsrl_flow_camera_warmup_steps,
+        )
     # wrap for video recording
     if args_cli.video:
         video_kwargs = {
@@ -296,21 +376,28 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # instantiate the agent's models (function approximators).
     # SAC requires 5 models, visit its documentation for more details
     # https://skrl.readthedocs.io/en/latest/api/agents/sac.html#models
+    hidden_dims = [int(value) for value in agent_cfg.get("network", {}).get("hidden_dims", [256, 256])]
+    print(f"[INFO] SAC spaces: observation={env.observation_space}, action={env.action_space}")
+    print(f"[INFO] SAC hidden dimensions: {hidden_dims}")
     models = {
-        "policy": StochasticActor(env.observation_space, env.action_space, device),
-        "critic_1": Critic(env.observation_space, env.action_space, device),
-        "critic_2": Critic(env.observation_space, env.action_space, device),
-        "target_critic_1": Critic(env.observation_space, env.action_space, device),
-        "target_critic_2": Critic(env.observation_space, env.action_space, device),
+        "policy": StochasticActor(env.observation_space, env.action_space, device, hidden_dims),
+        "critic_1": Critic(env.observation_space, env.action_space, device, hidden_dims),
+        "critic_2": Critic(env.observation_space, env.action_space, device, hidden_dims),
+        "target_critic_1": Critic(env.observation_space, env.action_space, device, hidden_dims),
+        "target_critic_2": Critic(env.observation_space, env.action_space, device, hidden_dims),
     }
 
-    cfg = SAC_DEFAULT_CONFIG.copy()
-    cfg.update(_process_cfg(agent_cfg["agent"]))
+    if args_cli.dsrl_policy and args_cli.dsrl_bc_prior_init and not args_cli.checkpoint:
+        models["policy"].initialize_bc_prior()
+        agent_cfg["agent"]["random_timesteps"] = 0
+        print("[INFO] Initialized SAC actor as zero-mean unit-Gaussian frozen-BC prior.")
+
+    cfg = SAC_CFG(**_process_cfg(agent_cfg["agent"]))
 
     agent = SAC(
         models=models,
         memory=memory,
-        cfg=cfg,  # agent_cfg,
+        cfg=cfg,
         observation_space=env.observation_space,
         action_space=env.action_space,
         device=device,
@@ -323,74 +410,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     cfg_trainer = {
         "timesteps": agent_cfg["trainer"]["timesteps"],
         "headless": True,
+        "environment_info": agent_cfg["trainer"].get("environment_info", "episode"),
+        "close_environment_at_exit": False,
     }  # headless command gets overridden by IsaacLab argument
     trainer = SequentialTrainer(cfg=cfg_trainer, env=env, agents=agent)
-    # # start training
-    # trainer.train()
-
-    # do the training "manually" for better logging of variables
-    # -> see `single_agent_train` method of Trainer as reference and https://github.com/Toni-SM/skrl/discussions/84
-    import tqdm
-
-    # reset env
-    states, infos = trainer.env.reset()
-    for timestep in tqdm.tqdm(
-        range(trainer.initial_timestep, trainer.timesteps),
-        disable=trainer.disable_progressbar,
-        file=sys.stdout,
-    ):
-        # pre-interaction
-        trainer.agents.pre_interaction(timestep=timestep, timesteps=trainer.timesteps)
-
-        with torch.no_grad():
-            # compute actions
-            actions = trainer.agents.act(states, timestep=timestep, timesteps=trainer.timesteps)[0]
-
-            # step the environments
-            next_states, rewards, terminated, truncated, infos = trainer.env.step(actions)
-
-            # render scene
-            if not trainer.headless:
-                trainer.env.render()
-
-            # record the environments' transitions
-            trainer.agents.record_transition(
-                states=states,
-                actions=actions,
-                rewards=rewards,
-                next_states=next_states,
-                terminated=terminated,
-                truncated=truncated,
-                infos=infos,
-                timestep=timestep,
-                timesteps=trainer.timesteps,
-            )
-            # log extra info from IsaacLab env
-            if "log" in infos:
-                for k, v in infos["log"].items():
-                    if isinstance(v, torch.Tensor) and v.numel() == 1:
-                        trainer.agents.track_data(f"IsaacLab Extra Log / {k}", v.item())
-
-            # log environment info
-            if trainer.environment_info in infos:
-                for k, v in infos[trainer.environment_info].items():
-                    if isinstance(v, torch.Tensor) and v.numel() == 1:
-                        trainer.agents.track_data(f"Info / {k}", v.item())
-
-        # post-interaction
-        trainer.agents.post_interaction(timestep=timestep, timesteps=trainer.timesteps)
-
-        # reset environments
-        if trainer.env.num_envs > 1:
-            states = next_states
-        else:
-            if terminated.any() or truncated.any():
-                with torch.no_grad():
-                    states, infos = trainer.env.reset()
-            else:
-                states = next_states
-
-    # close the simulator
+    # SKRL 2.1's trainer handles single-environment reset and environment_info logging.
+    trainer.train()
     env.close()
 
 

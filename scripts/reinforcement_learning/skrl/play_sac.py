@@ -131,7 +131,7 @@ class StochasticActor(GaussianMixin, Model):
         self.log_std_parameter = nn.Parameter(torch.zeros(self.num_actions))
 
     def compute(self, inputs, role):
-        return self.net(inputs["states"]), self.log_std_parameter, {}
+        return self.net(inputs["observations"]), {"log_std": self.log_std_parameter}
 
 
 class Critic(DeterministicMixin, Model):
@@ -148,7 +148,7 @@ class Critic(DeterministicMixin, Model):
         )
 
     def compute(self, inputs, role):
-        return self.net(torch.cat([inputs["states"], inputs["taken_actions"]], dim=1)), {}
+        return self.net(torch.cat([inputs["observations"], inputs["taken_actions"]], dim=1)), {}
 
 
 def _process_cfg(cfg: dict) -> dict:
