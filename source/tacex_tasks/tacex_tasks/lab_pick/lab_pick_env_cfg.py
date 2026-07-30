@@ -43,6 +43,24 @@ class LabPickEnvCfg(DirectRLEnvCfg):
     labware_pos_randomization_xy: tuple[float, float] = (0.05, 0.05)
     labware_yaw_randomization: float = 3.1415/180*30
 
+    # RL-only behavior is opt-in so the existing absolute 10-D CAFE/BC action
+    # interface remains unchanged for data collection and policy deployment.
+    rl_normalized_actions: bool = False
+    rl_privileged_observation: bool = False
+    rl_shaped_reward: bool = False
+    rl_terminate_on_success: bool = False
+    rl_align_cafe_action_yaw: bool = False
+    rl_position_action_scale_m: float = 0.004
+    rl_safe_force_n: float = 3.0
+    rl_reach_reward_scale: float = 20.0
+    rl_lift_reward_scale: float = 100.0
+    rl_first_contact_reward: float = 2.0
+    rl_both_contact_reward: float = 3.0
+    rl_success_reward: float = 50.0
+    rl_failure_penalty: float = 25.0
+    rl_force_penalty_scale: float = 0.25
+    rl_action_penalty_scale: float = 0.001
+
     viewer: ViewerCfg = ViewerCfg(
         eye=(1.15, -1.15, 0.65),
         lookat=(0.52, 0.0, 0.05),
@@ -54,7 +72,7 @@ class LabPickEnvCfg(DirectRLEnvCfg):
     decimation = 1
     episode_length_s = 8.0
     action_space = 10
-    observation_space = 14
+    observation_space = 16
     state_space = 0
 
     sim: SimulationCfg = SimulationCfg(
@@ -306,3 +324,38 @@ class LabPickCoverslipEnvCfg(LabPickEnvCfg):
 @configclass
 class LabPickCupEnvCfg(LabPickEnvCfg):
     labware_name = "cup"
+
+
+@configclass
+class LabPickSlideSACEnvCfg(LabPickSlideEnvCfg):
+    """State-based SAC baseline for slide grasping.
+
+    The policy controls Cartesian position increments and absolute gripper
+    width. Slide yaw is handled by the same deterministic alignment used by
+    the successful scripted demonstrations. This keeps the first RL baseline
+    focused on reach, contact-force regulation, grasp closure, and lifting.
+    """
+
+    action_space = 4
+    observation_space = 23
+    rl_normalized_actions = True
+    rl_privileged_observation = True
+    rl_shaped_reward = True
+    rl_terminate_on_success = True
+
+
+@configclass
+class LabPickSlideDSRLBaseEnvCfg(LabPickSlideEnvCfg):
+    """Physical-action environment wrapped by the DSRL noise decoder.
+
+    The wrapper replaces this 10-D CAFE action space with the flattened DDIM
+    noise space seen by SAC. The underlying environment still receives decoded
+    xyz + rot6d + width actions from the frozen Diffusion Policy.
+    """
+
+    action_space = 10
+    observation_space = 23
+    rl_privileged_observation = True
+    rl_shaped_reward = True
+    rl_terminate_on_success = True
+    rl_align_cafe_action_yaw = True

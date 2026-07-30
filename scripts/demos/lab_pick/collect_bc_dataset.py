@@ -111,20 +111,25 @@ def _camera_rgb_224(camera_rgb: torch.Tensor) -> np.ndarray:
     return rgb.detach().cpu().numpy()
 
 
-def _make_cafe_sample(env: LabPickEnv, action: torch.Tensor) -> dict[str, np.ndarray]:
+def _make_cafe_observation(env: LabPickEnv) -> dict[str, np.ndarray]:
     tool_pos_b, tool_quat_b = env._compute_frame_pose()
     rgb = _camera_rgb_224(env.wrist_camera.data.output["rgb"])
     rgb_third = _camera_rgb_224(env.third_person_camera.data.output["rgb"])
     return {
         "xyz": _to_numpy(tool_pos_b).astype(np.float32),
         "quat": _quat_wxyz_to_xyzw(_to_numpy(tool_quat_b)),
+        # Capture the previous command width before the expert mutates it for
+        # the next action. This matches the observation available at deploy.
         "width": _to_numpy(env.gripper_width[:, :1]).astype(np.float32),
         "ft": _to_numpy(env.get_cafe_ft()).astype(np.float32),
         "marker2d": _to_numpy(env.get_cafe_marker2d()).astype(np.float32),
         "rgb": rgb,
         "rgb_third": rgb_third,
-        "action": _to_numpy(action).astype(np.float32),
     }
+
+
+def _make_cafe_sample(observation: dict[str, np.ndarray], action: torch.Tensor) -> dict[str, np.ndarray]:
+    return {**observation, "action": _to_numpy(action).astype(np.float32)}
 
 
 def _record_base_dir() -> Path:
@@ -282,6 +287,12 @@ def main():
     env = LabPickEnv(env_cfg, render_mode="rgb_array")
     record_dir = _record_base_dir()
     record_dir.mkdir(parents=True, exist_ok=True)
+    existing_record_indices = [
+        int(path.name.removeprefix("record_"))
+        for path in record_dir.glob("record_*")
+        if path.is_dir() and path.name.removeprefix("record_").isdigit()
+    ]
+    next_record_index = max(existing_record_indices, default=-1) + 1
     recorded = 0
     attempted = 0
     successful = 0
@@ -295,13 +306,13 @@ def main():
             env.reset()
             attempt_index = attempted
             attempted += 1
-            writer = CafeRecordWriter(record_dir / f"record_{recorded:06d}")
-            failure_debug_dir = record_dir / "failed_attempts" / f"attempt_{attempt_index:06d}"
-            next_aligned_t = 1.0 / args_cli.aligned_hz
-            next_ft_t = 1.0 / args_cli.ft_hz
-            next_tracker_t = 1.0 / args_cli.tracker_hz
-            next_encoder_t = 1.0 / args_cli.aligned_hz
-            next_xense_t = 1.0 / args_cli.aligned_hz
+            writer = CafeRecordWriter(record_dir / f"record_{next_record_index + recorded:06d}")
+            failure_debug_dir = record_dir / "failed_attempts" / f"attempt_{next_record_index + attempt_index:06d}"
+            next_aligned_t = 0.0
+            next_ft_t = 0.0
+            next_tracker_t = 0.0
+            next_encoder_t = 0.0
+            next_xense_t = 0.0
             episode_failed = False
             first_failure_step = -1
             failure_reason = ""
@@ -314,18 +325,11 @@ def main():
             exported = False
 
             for step in range(args_cli.max_episode_steps):
+                timestamp = float(step * env.physics_dt)
+                observation = _make_cafe_observation(env)
                 env.command_pick_state_machine()
                 action = env.get_cafe_action()
-
-                env._pre_physics_step(None)
-                env._apply_action()
-                env.scene.write_data_to_sim()
-                env.sim.step(render=False)
-                env.scene.update(dt=env.physics_dt)
-                env.sim.render()
-
-                timestamp = float((step + 1) * env.physics_dt)
-                sample = _make_cafe_sample(env, action)
+                sample = _make_cafe_sample(observation, action)
                 last_sample = sample
                 last_timestamp = timestamp
                 last_step = step
@@ -346,14 +350,21 @@ def main():
                     writer.append_xense_sample(next_xense_t, sample["marker2d"])
                     next_xense_t += 1.0 / args_cli.aligned_hz
 
+                env._pre_physics_step(None)
+                env._apply_action()
+                env.scene.write_data_to_sim()
+                env.sim.step(render=False)
+                env.scene.update(dt=env.physics_dt)
+                env.sim.render()
+
                 terminated, _time_out = env._get_dones()
                 terminated_now = bool(terminated[0].item())
                 if terminated_now and not episode_failed:
                     episode_failed = True
                     first_failure_step = step
                     failure_reason = "+".join(_failure_reasons(env)) or "terminated"
-                    failure_sample = sample
-                    failure_timestamp = timestamp
+                    failure_sample = _make_cafe_sample(_make_cafe_observation(env), action)
+                    failure_timestamp = float((step + 1) * env.physics_dt)
                     failure_step = step
 
                 lift_delta = env.labware.data.root_pos_w[:, 2] - env.initial_object_height

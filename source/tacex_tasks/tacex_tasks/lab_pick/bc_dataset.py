@@ -223,6 +223,8 @@ class CafeRecordWriter:
         np.savez(
             self.record_dir / "metadata.npz",
             success=np.asarray(success, dtype=np.bool_),
+            schema_version=np.asarray(2, dtype=np.int64),
+            observation_timing=np.asarray("pre_action"),
             labware_reset_pos_w=np.asarray(labware_reset_pos_w, dtype=np.float32).reshape(3),
             labware_reset_quat_w=np.asarray(labware_reset_quat_w, dtype=np.float32).reshape(4),
         )
