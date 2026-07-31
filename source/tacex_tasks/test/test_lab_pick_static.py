@@ -574,6 +574,9 @@ def test_lab_pick_dsrl_pipeline_has_ddim_adapter_wrapper_launcher_and_config():
     assert "action_repeat: int = 2" in wrapper_source
     assert "for _ in range(self.action_repeat):" in wrapper_source
     assert "def step_bc(self):" in wrapper_source
+    assert '"LabPick/episode_success_rate"' in wrapper_source
+    assert '"LabPick/episode_broken_rate"' in wrapper_source
+    assert '"LabPick/completed_episodes"' in wrapper_source
     assert "requires --num_envs 1" in wrapper_source
     assert "disable_optional_transformers_discovery()" in wrapper_source
     assert wrapper_source.count("self.adapter.reset()") >= 2
@@ -601,6 +604,8 @@ def test_lab_pick_dsrl_pipeline_has_ddim_adapter_wrapper_launcher_and_config():
     assert (dsrl_root / "check_dsrl_ready.py").is_file()
     assert (dsrl_root / "smoke_diffusion_noise.py").is_file()
     assert (dsrl_root / "eval_lab_pick_diffusion_bc.py").is_file()
+    assert (dsrl_root / "eval_lab_pick_dsrl_sac.py").is_file()
+    assert (dsrl_root / "eval_lab_pick_dsrl_sac_runtime.py").is_file()
     assert (dsrl_root / "README.md").is_file()
 
 

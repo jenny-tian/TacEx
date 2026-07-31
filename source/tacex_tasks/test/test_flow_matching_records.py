@@ -288,6 +288,60 @@ def test_runner_locks_visual_xy_at_phase_threshold_and_reset_clears_lock():
 
 
 
+
+def test_dsrl_episode_metrics_are_not_terminal_step_frequency(monkeypatch):
+    import sys
+    import types
+
+    import torch
+
+    module_names = (
+        "lerobot",
+        "lerobot.policies",
+        "lerobot.policies.diffusion",
+        "lerobot.policies.diffusion.modeling_diffusion",
+        "lerobot.policies.factory",
+    )
+    modules = {name: types.ModuleType(name) for name in module_names}
+    modules["lerobot.policies.diffusion.modeling_diffusion"].DiffusionPolicy = type("DiffusionPolicy", (), {})
+    modules["lerobot.policies.factory"].make_pre_post_processors = lambda *_args, **_kwargs: (None, None)
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
+
+    dsrl_root = str(ROOT / "scripts" / "reinforcement_learning" / "dsrl")
+    if dsrl_root not in sys.path:
+        sys.path.insert(0, dsrl_root)
+    from lab_pick_dsrl_wrapper import LabPickDSRLWrapper
+
+    wrapper = LabPickDSRLWrapper.__new__(LabPickDSRLWrapper)
+    wrapper._completed_episodes = 0
+    wrapper._successful_episodes = 0
+    wrapper._broken_episodes = 0
+
+    ongoing = wrapper._add_episode_metrics(
+        {"log": {"LabPick/success_terminal_step": torch.tensor([0.0])}},
+        episode_done=False,
+    )
+    assert ongoing["log"]["LabPick/episode_success_rate"] == 0.0
+    assert ongoing["log"]["LabPick/completed_episodes"] == 0.0
+
+    success = wrapper._add_episode_metrics(
+        {"log": {"LabPick/success_terminal_step": torch.tensor([1.0])}},
+        episode_done=True,
+    )
+    assert success["log"]["LabPick/episode_success_rate"] == 1.0
+    assert success["log"]["LabPick/episode_broken_rate"] == 0.0
+    assert success["log"]["LabPick/completed_episodes"] == 1.0
+
+    failure = wrapper._add_episode_metrics(
+        {"log": {"LabPick/success_terminal_step": 0.0, "LabPick/broken_terminal_step": 1.0}},
+        episode_done=True,
+    )
+    assert failure["log"]["LabPick/episode_success_rate"] == 0.5
+    assert failure["log"]["LabPick/episode_broken_rate"] == 0.5
+    assert failure["log"]["LabPick/completed_episodes"] == 2.0
+
+
 def test_old_policy_config_defaults_to_raw_image_range():
     from sim_robot.policy.flow_matching_policy import SimFlowMatchingConfig
 

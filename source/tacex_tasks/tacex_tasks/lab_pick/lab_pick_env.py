@@ -389,6 +389,8 @@ class LabPickEnv(DirectRLEnv):
             "LabPick/grasp_distance_m": grasp_distance.mean(),
             "LabPick/contact_force_n": flags["break_force_n"].mean(),
             "LabPick/net_contact_force_n": flags["net_force_n"].mean(),
+            "LabPick/success_terminal_step": flags["success"].float().mean(),
+            "LabPick/broken_terminal_step": flags["object_broken"].float().mean(),
             "LabPick/success_rate": flags["success"].float().mean(),
             "LabPick/broken_rate": flags["object_broken"].float().mean(),
         }

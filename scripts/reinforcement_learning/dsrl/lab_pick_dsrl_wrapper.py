@@ -75,6 +75,9 @@ class LabPickDSRLWrapper(gym.Wrapper):
         self.flow_camera_warmup_steps = int(flow_camera_warmup_steps)
         self._flow_policy_steps = 0
         self._flow_needs_warmup = policy_type == "flow_matching"
+        self._completed_episodes = 0
+        self._successful_episodes = 0
+        self._broken_episodes = 0
         if self.action_repeat < 1:
             raise ValueError(f"action_repeat must be at least 1, received {self.action_repeat}.")
         if policy_type == "flow_matching" and not 1 <= self.flow_chunk_execute_steps <= self.adapter.n_action_steps:
@@ -168,6 +171,29 @@ class LabPickDSRLWrapper(gym.Wrapper):
             "observation.images.rgb_third": self._camera_tensor(base.third_person_camera),
         }
 
+    @staticmethod
+    def _log_flag(log: dict[str, Any], key: str, legacy_key: str) -> bool:
+        value = log.get(key, log.get(legacy_key, 0.0))
+        if isinstance(value, torch.Tensor):
+            value = value.reshape(-1)[0].item()
+        return bool(value)
+
+    def _add_episode_metrics(self, info: dict[str, Any], episode_done: bool) -> dict[str, Any]:
+        info = dict(info)
+        log = dict(info.get("log", {}))
+        success = self._log_flag(log, "LabPick/success_terminal_step", "LabPick/success_rate")
+        broken = self._log_flag(log, "LabPick/broken_terminal_step", "LabPick/broken_rate")
+        if episode_done:
+            self._completed_episodes += 1
+            self._successful_episodes += int(success)
+            self._broken_episodes += int(broken)
+        denominator = max(self._completed_episodes, 1)
+        log["LabPick/episode_success_rate"] = self._successful_episodes / denominator
+        log["LabPick/episode_broken_rate"] = self._broken_episodes / denominator
+        log["LabPick/completed_episodes"] = float(self._completed_episodes)
+        info["log"] = log
+        return info
+
     @torch.inference_mode()
     def _next_physical_action(self, flat_noise: torch.Tensor | None) -> torch.Tensor:
         if self.adapter.preprocessor is None:
@@ -203,7 +229,7 @@ class LabPickDSRLWrapper(gym.Wrapper):
 
         if observation is None or total_reward is None or terminated is None or truncated is None or info is None:
             raise RuntimeError("DSRL wrapper executed no physical actions.")
-        info = dict(info)
+        info = self._add_episode_metrics(info, episode_done)
         info["dsrl/action_steps_executed"] = executed_actions
         info["dsrl/action_repeat"] = self.action_repeat
         info["dsrl/physics_steps_executed"] = executed_physics_steps
@@ -247,7 +273,7 @@ class LabPickDSRLWrapper(gym.Wrapper):
 
         if observation is None or total_reward is None or terminated is None or truncated is None or info is None:
             raise RuntimeError("DSRL wrapper executed no physical actions.")
-        info = dict(info)
+        info = self._add_episode_metrics(info, episode_done)
         info["dsrl/action_steps_executed"] = executed_actions
         info["dsrl/action_repeat"] = self.action_repeat
         info["dsrl/physics_steps_executed"] = executed_physics_steps
