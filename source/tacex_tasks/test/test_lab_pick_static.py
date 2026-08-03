@@ -544,6 +544,7 @@ def test_lab_pick_dsrl_pipeline_has_ddim_adapter_wrapper_launcher_and_config():
     wrapper_source = read(dsrl_root / "lab_pick_dsrl_wrapper.py")
     launcher_source = read(dsrl_root / "train_lab_pick_dsrl_sac.py")
     evaluator_source = read(dsrl_root / "eval_lab_pick_diffusion_bc_runtime.py")
+    sac_evaluator_source = read(dsrl_root / "eval_lab_pick_dsrl_sac_runtime.py")
     runtime_source = read(dsrl_root / "runtime.py")
     trainer_source = read(ROOT / "scripts" / "reinforcement_learning" / "skrl" / "train_sac.py")
     agent_source = read(TASK_ROOT / "agents" / "skrl_dsrl_sac_cfg.yaml")
@@ -568,6 +569,9 @@ def test_lab_pick_dsrl_pipeline_has_ddim_adapter_wrapper_launcher_and_config():
 
     assert "class LabPickDSRLWrapper(gym.Wrapper):" in wrapper_source
     assert "self.action_space = gym.spaces.Box(" in wrapper_source
+    assert 'action_mode: str = "noise"' in wrapper_source
+    assert "def _apply_flow_residual" in wrapper_source
+    assert "def _update_randomization_curriculum" in wrapper_source
     assert "env.unwrapped.single_action_space = self.action_space" in wrapper_source
     assert "self.adapter.policy.select_action(batch, noise=noise)" in wrapper_source
     assert "self.chunk_discount**action_step" in wrapper_source
@@ -588,13 +592,19 @@ def test_lab_pick_dsrl_pipeline_has_ddim_adapter_wrapper_launcher_and_config():
     assert "disable_optional_transformers_discovery" in runtime_source
 
     assert 'parser.add_argument("--dsrl_policy"' in trainer_source
-    assert "\"--dsrl_action_repeat\"" in trainer_source
+    assert '"--dsrl_action_mode"' in trainer_source
+    assert '"--dsrl_curriculum_steps"' in trainer_source
+    assert '"--dsrl_action_repeat"' in trainer_source
     assert "LabPickDSRLWrapper(" in trainer_source
     assert "action_repeat=args_cli.dsrl_action_repeat" in trainer_source
     assert "initialize_bc_prior" in trainer_source
     assert 'agent_cfg["agent"]["random_timesteps"] = 0' in trainer_source
     assert 'policy_type=args_cli.dsrl_policy_type' in trainer_source
+    assert "action_mode=args_cli.dsrl_action_mode" in trainer_source
+    assert "curriculum_steps=args_cli.dsrl_curriculum_steps" in trainer_source
     assert "env.step_bc()" in evaluator_source
+    assert '"--dsrl_action_mode"' in sac_evaluator_source
+    assert '"--labware_random_xy"' in sac_evaluator_source
     assert "\"action_hz\": action_hz" in evaluator_source
     assert "hidden_dims: [512, 512, 512]" in agent_source
     assert "target_entropy: null" in agent_source

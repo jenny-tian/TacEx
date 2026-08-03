@@ -289,11 +289,9 @@ def test_runner_locks_visual_xy_at_phase_threshold_and_reset_clears_lock():
 
 
 
-def test_dsrl_episode_metrics_are_not_terminal_step_frequency(monkeypatch):
+def _load_dsrl_wrapper(monkeypatch):
     import sys
     import types
-
-    import torch
 
     module_names = (
         "lerobot",
@@ -313,10 +311,29 @@ def test_dsrl_episode_metrics_are_not_terminal_step_frequency(monkeypatch):
         sys.path.insert(0, dsrl_root)
     from lab_pick_dsrl_wrapper import LabPickDSRLWrapper
 
+    return LabPickDSRLWrapper
+
+
+def test_dsrl_episode_metrics_are_not_terminal_step_frequency(monkeypatch):
+    import types
+
+    import torch
+
+    LabPickDSRLWrapper = _load_dsrl_wrapper(monkeypatch)
     wrapper = LabPickDSRLWrapper.__new__(LabPickDSRLWrapper)
     wrapper._completed_episodes = 0
     wrapper._successful_episodes = 0
     wrapper._broken_episodes = 0
+    wrapper.action_mode = "noise"
+    wrapper._curriculum_progress = 0.0
+    wrapper.env = types.SimpleNamespace(
+        unwrapped=types.SimpleNamespace(
+            cfg=types.SimpleNamespace(
+                labware_pos_randomization_xy=(0.05, 0.05),
+                labware_yaw_randomization=0.5235987756,
+            )
+        )
+    )
 
     ongoing = wrapper._add_episode_metrics(
         {"log": {"LabPick/success_terminal_step": torch.tensor([0.0])}},
@@ -340,6 +357,62 @@ def test_dsrl_episode_metrics_are_not_terminal_step_frequency(monkeypatch):
     assert failure["log"]["LabPick/episode_success_rate"] == 0.5
     assert failure["log"]["LabPick/episode_broken_rate"] == 0.5
     assert failure["log"]["LabPick/completed_episodes"] == 2.0
+
+
+def test_dsrl_flow_residual_offsets_xyz_and_only_closed_width(monkeypatch):
+    import torch
+
+    LabPickDSRLWrapper = _load_dsrl_wrapper(monkeypatch)
+    wrapper = LabPickDSRLWrapper.__new__(LabPickDSRLWrapper)
+    wrapper.residual_position_scale_m = (0.03, 0.02, 0.01)
+    wrapper.residual_width_scale_m = 0.002
+
+    action_chunk = torch.zeros(3, 10)
+    action_chunk[:, 9] = torch.tensor([0.040, 0.037, 0.0065])
+    original = action_chunk.clone()
+    adjusted = wrapper._apply_flow_residual(
+        action_chunk,
+        torch.tensor([[1.0, -0.5, 0.5, -1.0]]),
+    )
+
+    torch.testing.assert_close(
+        adjusted[:, :3],
+        torch.tensor([[0.03, -0.01, 0.005]]).expand(3, -1),
+    )
+    torch.testing.assert_close(adjusted[:, 9], torch.tensor([0.040, 0.035, 0.006]))
+    torch.testing.assert_close(action_chunk, original)
+
+
+def test_dsrl_randomization_curriculum_interpolates_and_saturates(monkeypatch):
+    import math
+    import types
+
+    LabPickDSRLWrapper = _load_dsrl_wrapper(monkeypatch)
+    wrapper = LabPickDSRLWrapper.__new__(LabPickDSRLWrapper)
+    wrapper.curriculum_steps = 100
+    wrapper.curriculum_start_xy_m = (0.05, 0.05)
+    wrapper.curriculum_end_xy_m = (0.10, 0.10)
+    wrapper.curriculum_start_yaw_rad = math.radians(30.0)
+    wrapper.curriculum_end_yaw_rad = math.radians(45.0)
+    cfg = types.SimpleNamespace(
+        randomize_labware_position=False,
+        labware_pos_randomization_xy=(0.0, 0.0),
+        labware_yaw_randomization=0.0,
+    )
+    wrapper.env = types.SimpleNamespace(unwrapped=types.SimpleNamespace(cfg=cfg))
+
+    wrapper._outer_steps = 50
+    wrapper._update_randomization_curriculum()
+    assert wrapper._curriculum_progress == 0.5
+    assert cfg.randomize_labware_position is True
+    assert cfg.labware_pos_randomization_xy == (0.07500000000000001, 0.07500000000000001)
+    assert math.isclose(cfg.labware_yaw_randomization, math.radians(37.5))
+
+    wrapper._outer_steps = 200
+    wrapper._update_randomization_curriculum()
+    assert wrapper._curriculum_progress == 1.0
+    assert cfg.labware_pos_randomization_xy == (0.10, 0.10)
+    assert math.isclose(cfg.labware_yaw_randomization, math.radians(45.0))
 
 
 def test_old_policy_config_defaults_to_raw_image_range():

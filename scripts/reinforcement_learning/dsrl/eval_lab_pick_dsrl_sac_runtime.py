@@ -20,6 +20,29 @@ parser.add_argument("--policy_seed", type=int, default=42)
 parser.add_argument("--stochastic", action="store_true", help="Sample the actor instead of using its deterministic mean.")
 parser.add_argument("--policy_device", type=str, default="cuda")
 parser.add_argument("--noise_magnitude", type=float, default=3.0)
+parser.add_argument("--dsrl_action_mode", choices=["noise", "residual"], default="noise")
+parser.add_argument(
+    "--dsrl_residual_position_scale_m",
+    type=float,
+    nargs=3,
+    default=(0.03, 0.03, 0.01),
+    metavar=("X", "Y", "Z"),
+)
+parser.add_argument("--dsrl_residual_width_scale_m", type=float, default=0.002)
+parser.add_argument(
+    "--labware_random_xy",
+    type=float,
+    nargs=2,
+    metavar=("X", "Y"),
+    default=None,
+    help="Uniform reset half-range in meters for labware x/y.",
+)
+parser.add_argument(
+    "--labware_random_yaw",
+    type=float,
+    default=None,
+    help="Uniform reset yaw half-range in radians.",
+)
 parser.add_argument("--action_repeat", type=int, default=2)
 parser.add_argument("--flow_num_inference_steps", type=int, default=20)
 parser.add_argument("--flow_chunk_execute_steps", type=int, default=32)
@@ -120,6 +143,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, _age
 
     env_cfg.scene.num_envs = 1
     env_cfg.seed = args_cli.seed
+    if args_cli.labware_random_xy is not None:
+        env_cfg.randomize_labware_position = True
+        env_cfg.labware_pos_randomization_xy = tuple(args_cli.labware_random_xy)
+    if args_cli.labware_random_yaw is not None:
+        env_cfg.randomize_labware_position = True
+        env_cfg.labware_yaw_randomization = args_cli.labware_random_yaw
     if args_cli.device is not None:
         env_cfg.sim.device = args_cli.device
 
@@ -131,6 +160,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, _age
         noise_magnitude=args_cli.noise_magnitude,
         action_repeat=args_cli.action_repeat,
         policy_type="flow_matching",
+        action_mode=args_cli.dsrl_action_mode,
+        residual_position_scale_m=tuple(args_cli.dsrl_residual_position_scale_m),
+        residual_width_scale_m=args_cli.dsrl_residual_width_scale_m,
         flow_num_inference_steps=args_cli.flow_num_inference_steps,
         flow_chunk_execute_steps=args_cli.flow_chunk_execute_steps,
         flow_phase_horizon_steps=args_cli.flow_phase_horizon_steps,
@@ -159,7 +191,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, _age
     print(
         "[INFO] DSRL-SAC episodic evaluation "
         f"checkpoint={checkpoint_path} trials={args_cli.num_trials} seed={args_cli.seed} "
-        f"mode={mode} max_outer_steps={max_outer_steps}",
+        f"mode={mode} action_mode={args_cli.dsrl_action_mode} max_outer_steps={max_outer_steps}",
         flush=True,
     )
 
@@ -245,6 +277,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, _age
         "checkpoint": str(checkpoint_path),
         "task": args_cli.task,
         "mode": mode,
+        "dsrl_action_mode": args_cli.dsrl_action_mode,
+        "dsrl_residual_position_scale_m": list(args_cli.dsrl_residual_position_scale_m),
+        "dsrl_residual_width_scale_m": args_cli.dsrl_residual_width_scale_m,
+        "labware_random_xy": args_cli.labware_random_xy,
+        "labware_random_yaw": args_cli.labware_random_yaw,
         "num_trials": len(results),
         "successes": successes,
         "success_rate": successes / max(len(results), 1),

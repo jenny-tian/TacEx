@@ -71,6 +71,20 @@ parser.add_argument(
 )
 parser.add_argument("--output", type=Path, default=Path("logs/lab_pick_flow_eval_canonical/results.json"))
 parser.add_argument("--no_randomize_labware", action="store_true")
+parser.add_argument(
+    "--labware_random_xy",
+    type=float,
+    nargs=2,
+    metavar=("X", "Y"),
+    default=None,
+    help="Uniform reset half-range in meters for labware x/y.",
+)
+parser.add_argument(
+    "--labware_random_yaw",
+    type=float,
+    default=None,
+    help="Uniform reset yaw half-range in radians.",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 args_cli.enable_cameras = True
@@ -149,6 +163,12 @@ def main() -> None:
     cfg.scene.num_envs = 1
     cfg.seed = args_cli.seed
     cfg.randomize_labware_position = not args_cli.no_randomize_labware
+    if args_cli.labware_random_xy is not None:
+        cfg.randomize_labware_position = True
+        cfg.labware_pos_randomization_xy = tuple(args_cli.labware_random_xy)
+    if args_cli.labware_random_yaw is not None:
+        cfg.randomize_labware_position = True
+        cfg.labware_yaw_randomization = args_cli.labware_random_yaw
     cfg.rl_normalized_actions = False
     # Data collection uses the yaw-aligned scripted target quaternion. The
     # policy predicts the same rotation, while this setting executes the
@@ -405,6 +425,8 @@ def main() -> None:
         "phase_horizon_steps": args_cli.phase_horizon_steps,
         "camera_warmup_steps": args_cli.camera_warmup_steps,
         "visual_xy_lock_phase": args_cli.visual_xy_lock_phase,
+        "labware_random_xy": args_cli.labware_random_xy,
+        "labware_random_yaw": args_cli.labware_random_yaw,
         "close_onset_width_m": args_cli.close_onset_width_m,
         "results": results,
     }

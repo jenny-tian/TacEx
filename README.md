@@ -304,6 +304,9 @@ env -u LD_PRELOAD -u VGL_ISACTIVE -u VGL_DISPLAY -u DISPLAY \
   --camera_warmup_steps 8 \
   --visual_xy_lock_phase 0.30 \
   --policy_camera third \
+  --labware_random_xy 0.10 0.10 \
+  --labware_random_yaw 0.7853981634 \
+  --output logs/lab_pick_eval/bc_wide_seed0_49.json \
   --headless
 ```
 
@@ -314,18 +317,33 @@ The DSRL launcher automatically selects
 requires the isolated `.cache/lerobot_inference` dependencies described in
 [`scripts/reinforcement_learning/dsrl/README.md`](scripts/reinforcement_learning/dsrl/README.md).
 
+The recommended Flow Matching setup uses a 4-D normalized residual
+`[dx, dy, dz, dwidth]` instead of the legacy 320-D initial-noise action. The
+residual mean starts at zero, so the initial deterministic policy is the frozen BC, and the reset
+distribution expands from +/-5 cm and +/-30 degrees to +/-10 cm and +/-45
+degrees over the first 100k outer steps:
+
 ```bash
 env -u LD_PRELOAD -u VGL_ISACTIVE -u VGL_DISPLAY -u DISPLAY \
   "$ISAAC_PYTHON" scripts/reinforcement_learning/dsrl/train_lab_pick_dsrl_sac.py \
   --dsrl_policy outputs/lab_pick_flow_matching/best.pt \
   --dsrl_policy_type flow_matching \
-  --timesteps 50000 \
+  --dsrl_action_mode residual \
+  --dsrl_residual_position_scale_m 0.03 0.03 0.01 \
+  --dsrl_residual_width_scale_m 0.002 \
+  --dsrl_curriculum_steps 100000 \
+  --dsrl_curriculum_start_xy_m 0.05 0.05 \
+  --dsrl_curriculum_end_xy_m 0.10 0.10 \
+  --dsrl_curriculum_start_yaw_deg 30 \
+  --dsrl_curriculum_end_yaw_deg 45 \
+  --timesteps 200000 \
   --seed 42
 ```
 
 Checkpoints and TensorBoard logs are written below
 `logs/skrl/lab_pick_slide/`. To continue a run, pass the saved checkpoint to
-the underlying SKRL entry point while keeping the same BC policy:
+the underlying SKRL entry point, keep the residual settings unchanged, and set
+`--dsrl_curriculum_start_step` to the already completed outer-step count:
 
 ```bash
 env -u LD_PRELOAD -u VGL_ISACTIVE -u VGL_DISPLAY -u DISPLAY \
@@ -335,9 +353,39 @@ env -u LD_PRELOAD -u VGL_ISACTIVE -u VGL_DISPLAY -u DISPLAY \
   --headless --enable_cameras \
   --dsrl_policy outputs/lab_pick_flow_matching/best.pt \
   --dsrl_policy_type flow_matching \
+  --dsrl_action_mode residual \
+  --dsrl_residual_position_scale_m 0.03 0.03 0.01 \
+  --dsrl_residual_width_scale_m 0.002 \
+  --dsrl_curriculum_steps 100000 \
+  --dsrl_curriculum_start_step <completed_outer_steps> \
+  --dsrl_curriculum_start_xy_m 0.05 0.05 \
+  --dsrl_curriculum_end_xy_m 0.10 0.10 \
+  --dsrl_curriculum_start_yaw_deg 30 \
+  --dsrl_curriculum_end_yaw_deg 45 \
   --checkpoint logs/skrl/lab_pick_slide/<run>/checkpoints/agent_<step>.pt \
-  --timesteps 50000
+  --timesteps 100000
 ```
+
+Evaluate a residual checkpoint on the final wide distribution with the same
+residual scales:
+
+```bash
+env -u LD_PRELOAD -u VGL_ISACTIVE -u VGL_DISPLAY -u DISPLAY \
+  "$ISAAC_PYTHON" scripts/reinforcement_learning/dsrl/eval_lab_pick_dsrl_sac.py \
+  --policy outputs/lab_pick_flow_matching/best.pt \
+  --checkpoint logs/skrl/lab_pick_slide/<run>/checkpoints/agent_<step>.pt \
+  --dsrl_action_mode residual \
+  --dsrl_residual_position_scale_m 0.03 0.03 0.01 \
+  --dsrl_residual_width_scale_m 0.002 \
+  --labware_random_xy 0.10 0.10 \
+  --labware_random_yaw 0.7853981634 \
+  --num_trials 50 --seed 0 --policy_seed 42 \
+  --output logs/lab_pick_eval/sac_residual_wide_seed0_49.json \
+  --headless
+```
+
+Existing full-noise checkpoints remain supported by omitting
+`--dsrl_action_mode residual`; `noise` is the compatibility default.
 
 Use `systemd-run --user` for long unattended jobs. Do not terminate unrelated
 Isaac or GPU processes when checking a running job; inspect the unit with:

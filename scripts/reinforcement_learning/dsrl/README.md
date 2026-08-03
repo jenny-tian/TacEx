@@ -100,8 +100,11 @@ python scripts/reinforcement_learning/dsrl/check_dsrl_ready.py \
 
 ## Phase 5: DSRL-SAC online fine-tuning
 
-The SAC actor outputs flattened DDIM initial noise with dimension `horizon * action_dim` (default `16 * 10 = 160`). The frozen Diffusion Policy decodes it into up to eight CAFE actions. Rewards are accumulated over that chunk.
-The demonstrations are aligned at 60 Hz while LabPick physics runs at 120 Hz, so every decoded action is held for two physics steps (--dsrl_action_repeat 2).
+For DDIM Diffusion, the SAC actor can still output flattened initial noise with dimension `horizon * action_dim` (default `16 * 10 = 160`). The frozen Diffusion Policy decodes it into CAFE actions. Rewards are accumulated over that chunk.
+
+For the 32-step Flow Matching policy, the recommended mode is instead a 4-D normalized residual `[dx, dy, dz, dwidth]`. This avoids a 320-D SAC action space while keeping the Flow Matching visual encoder and trajectory prior frozen. The demonstrations are aligned at 60 Hz while LabPick physics runs at 120 Hz, so every decoded action is held for two physics steps (`--dsrl_action_repeat 2`).
+
+Legacy DDIM noise training:
 
 ```bash
 OMNI_KIT_ACCEPT_EULA=YES \
@@ -110,6 +113,27 @@ OMNI_KIT_ACCEPT_EULA=YES \
   --dsrl_policy outputs/lab_pick_diffusion_ddim/checkpoints/last/pretrained_model \
   --timesteps 200000 --seed 42
 ```
+
+Recommended Flow Matching residual training with a reset curriculum:
+
+```bash
+OMNI_KIT_ACCEPT_EULA=YES \
+/home/tjx/miniforge3/envs/env_isaaclab/bin/python \
+  scripts/reinforcement_learning/dsrl/train_lab_pick_dsrl_sac.py \
+  --dsrl_policy outputs/lab_pick_flow_matching/best.pt \
+  --dsrl_policy_type flow_matching \
+  --dsrl_action_mode residual \
+  --dsrl_residual_position_scale_m 0.03 0.03 0.01 \
+  --dsrl_residual_width_scale_m 0.002 \
+  --dsrl_curriculum_steps 100000 \
+  --dsrl_curriculum_start_xy_m 0.05 0.05 \
+  --dsrl_curriculum_end_xy_m 0.10 0.10 \
+  --dsrl_curriculum_start_yaw_deg 30 \
+  --dsrl_curriculum_end_yaw_deg 45 \
+  --timesteps 200000 --seed 42
+```
+
+Omit `--dsrl_action_mode residual` for existing full-noise checkpoints. Residual and noise checkpoints have different actor output dimensions and must be evaluated with the mode used for training.
 
 Before online fine-tuning, evaluate the frozen BC checkpoint with the same randomized task and 60 Hz control timing:
 
