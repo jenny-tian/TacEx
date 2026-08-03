@@ -321,7 +321,7 @@ The recommended Flow Matching setup uses a 4-D normalized residual
 `[dx, dy, dz, dwidth]` instead of the legacy 320-D initial-noise action. The
 residual mean starts at zero, so the initial deterministic policy is the frozen BC, and the reset
 distribution expands from +/-5 cm and +/-30 degrees to +/-10 cm and +/-45
-degrees over the first 100k outer steps. The recommended `--dsrl_residual_penalty_scale 5.0` subtracts the squared normalized residual from the reward, keeping SAC behavior anchored near frozen BC; set it to `0` only to reproduce the unregularized legacy run:
+degrees over the first 100k outer steps. The recommended penalty stays at `5.0` during SAC warm-up, then decays to `1.0` over 50k steps. This anchors early behavior near frozen BC while allowing larger useful corrections after the critic becomes informative:
 
 ```bash
 env -u LD_PRELOAD -u VGL_ISACTIVE -u VGL_DISPLAY -u DISPLAY \
@@ -332,6 +332,9 @@ env -u LD_PRELOAD -u VGL_ISACTIVE -u VGL_DISPLAY -u DISPLAY \
   --dsrl_residual_position_scale_m 0.03 0.03 0.01 \
   --dsrl_residual_width_scale_m 0.002 \
   --dsrl_residual_penalty_scale 5.0 \
+  --dsrl_residual_penalty_end_scale 1.0 \
+  --dsrl_residual_penalty_decay_start_step 2000 \
+  --dsrl_residual_penalty_decay_steps 50000 \
   --dsrl_curriculum_steps 100000 \
   --dsrl_curriculum_start_xy_m 0.05 0.05 \
   --dsrl_curriculum_end_xy_m 0.10 0.10 \
@@ -358,6 +361,9 @@ env -u LD_PRELOAD -u VGL_ISACTIVE -u VGL_DISPLAY -u DISPLAY \
   --dsrl_residual_position_scale_m 0.03 0.03 0.01 \
   --dsrl_residual_width_scale_m 0.002 \
   --dsrl_residual_penalty_scale 5.0 \
+  --dsrl_residual_penalty_end_scale 1.0 \
+  --dsrl_residual_penalty_decay_start_step 2000 \
+  --dsrl_residual_penalty_decay_steps 50000 \
   --dsrl_curriculum_steps 100000 \
   --dsrl_curriculum_start_step <completed_outer_steps> \
   --dsrl_curriculum_start_xy_m 0.05 0.05 \

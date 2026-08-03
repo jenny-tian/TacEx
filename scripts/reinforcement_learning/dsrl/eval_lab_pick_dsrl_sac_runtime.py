@@ -30,6 +30,9 @@ parser.add_argument(
 )
 parser.add_argument("--dsrl_residual_width_scale_m", type=float, default=0.002)
 parser.add_argument("--dsrl_residual_penalty_scale", type=float, default=0.0)
+parser.add_argument("--dsrl_residual_penalty_end_scale", type=float, default=None)
+parser.add_argument("--dsrl_residual_penalty_decay_start_step", type=int, default=2000)
+parser.add_argument("--dsrl_residual_penalty_decay_steps", type=int, default=0)
 parser.add_argument(
     "--labware_random_xy",
     type=float,
@@ -165,6 +168,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, _age
         residual_position_scale_m=tuple(args_cli.dsrl_residual_position_scale_m),
         residual_width_scale_m=args_cli.dsrl_residual_width_scale_m,
         residual_penalty_scale=args_cli.dsrl_residual_penalty_scale,
+        residual_penalty_end_scale=args_cli.dsrl_residual_penalty_end_scale,
+        residual_penalty_decay_start_step=args_cli.dsrl_residual_penalty_decay_start_step,
+        residual_penalty_decay_steps=args_cli.dsrl_residual_penalty_decay_steps,
         flow_num_inference_steps=args_cli.flow_num_inference_steps,
         flow_chunk_execute_steps=args_cli.flow_chunk_execute_steps,
         flow_phase_horizon_steps=args_cli.flow_phase_horizon_steps,
@@ -283,6 +289,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, _age
         "dsrl_residual_position_scale_m": list(args_cli.dsrl_residual_position_scale_m),
         "dsrl_residual_width_scale_m": args_cli.dsrl_residual_width_scale_m,
         "dsrl_residual_penalty_scale": args_cli.dsrl_residual_penalty_scale,
+        "dsrl_residual_penalty_end_scale": args_cli.dsrl_residual_penalty_end_scale,
+        "dsrl_residual_penalty_decay_start_step": args_cli.dsrl_residual_penalty_decay_start_step,
+        "dsrl_residual_penalty_decay_steps": args_cli.dsrl_residual_penalty_decay_steps,
         "labware_random_xy": args_cli.labware_random_xy,
         "labware_random_yaw": args_cli.labware_random_yaw,
         "num_trials": len(results),

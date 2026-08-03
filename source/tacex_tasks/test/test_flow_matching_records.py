@@ -390,6 +390,10 @@ def test_dsrl_residual_penalty_anchors_frozen_bc_prior(monkeypatch):
     wrapper = LabPickDSRLWrapper.__new__(LabPickDSRLWrapper)
     wrapper.action_mode = "residual"
     wrapper.residual_penalty_scale = 4.0
+    wrapper.residual_penalty_end_scale = 1.0
+    wrapper.residual_penalty_decay_start_step = 10
+    wrapper.residual_penalty_decay_steps = 20
+    wrapper._outer_steps = 0
     info = {"log": {}}
     result = (
         torch.zeros(1, 23),
@@ -404,6 +408,12 @@ def test_dsrl_residual_penalty_anchors_frozen_bc_prior(monkeypatch):
     torch.testing.assert_close(adjusted[1], torch.tensor([6.0]))
     torch.testing.assert_close(info["dsrl/residual_penalty"], torch.tensor(4.0))
     torch.testing.assert_close(info["log"]["LabPick/residual_penalty"], torch.tensor(4.0))
+    torch.testing.assert_close(info["dsrl/residual_penalty_scale"], torch.tensor(4.0))
+
+    wrapper._outer_steps = 20
+    assert wrapper._current_residual_penalty_scale() == 2.5
+    wrapper._outer_steps = 40
+    assert wrapper._current_residual_penalty_scale() == 1.0
 
 
 def test_dsrl_randomization_curriculum_interpolates_and_saturates(monkeypatch):

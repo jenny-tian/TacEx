@@ -103,7 +103,7 @@ python scripts/reinforcement_learning/dsrl/check_dsrl_ready.py \
 For DDIM Diffusion, the SAC actor can still output flattened initial noise with dimension `horizon * action_dim` (default `16 * 10 = 160`). The frozen Diffusion Policy decodes it into CAFE actions. Rewards are accumulated over that chunk.
 
 For the 32-step Flow Matching policy, the recommended mode is instead a 4-D normalized residual `[dx, dy, dz, dwidth]`. This avoids a 320-D SAC action space while keeping the Flow Matching visual encoder and trajectory prior frozen. The demonstrations are aligned at 60 Hz while LabPick physics runs at 120 Hz, so every decoded action is held for two physics steps (`--dsrl_action_repeat 2`).
-The residual penalty is measured against the zero residual prior, which is the frozen BC behavior. It is disabled by default for backward compatibility and set explicitly in the recommended training command.
+The residual penalty is measured against the zero residual prior, which is the frozen BC behavior. The recommended run keeps it at 5.0 during the 2,000-step warm-up and linearly decays it to 1.0 over the next 50,000 steps; it is disabled by default for backward compatibility.
 
 Legacy DDIM noise training:
 
@@ -127,6 +127,9 @@ OMNI_KIT_ACCEPT_EULA=YES \
   --dsrl_residual_position_scale_m 0.03 0.03 0.01 \
   --dsrl_residual_width_scale_m 0.002 \
   --dsrl_residual_penalty_scale 5.0 \
+  --dsrl_residual_penalty_end_scale 1.0 \
+  --dsrl_residual_penalty_decay_start_step 2000 \
+  --dsrl_residual_penalty_decay_steps 50000 \
   --dsrl_curriculum_steps 100000 \
   --dsrl_curriculum_start_xy_m 0.05 0.05 \
   --dsrl_curriculum_end_xy_m 0.10 0.10 \

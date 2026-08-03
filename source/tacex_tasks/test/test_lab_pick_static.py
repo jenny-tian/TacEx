@@ -604,6 +604,8 @@ def test_lab_pick_dsrl_pipeline_has_ddim_adapter_wrapper_launcher_and_config():
     assert "curriculum_steps=args_cli.dsrl_curriculum_steps" in trainer_source
     assert "residual_penalty_scale=args_cli.dsrl_residual_penalty_scale" in trainer_source
     assert "--dsrl_residual_penalty_scale" in trainer_source
+    assert "--dsrl_residual_penalty_decay_steps" in trainer_source
+    assert "residual_penalty_decay_steps=args_cli.dsrl_residual_penalty_decay_steps" in trainer_source
     assert "env.step_bc()" in evaluator_source
     assert '"--dsrl_action_mode"' in sac_evaluator_source
     assert '"--labware_random_xy"' in sac_evaluator_source

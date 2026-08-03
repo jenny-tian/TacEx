@@ -68,8 +68,11 @@ parser.add_argument(
     "--dsrl_residual_penalty_scale",
     type=float,
     default=0.0,
-    help="L2 reward penalty on normalized residual actions; zero preserves legacy behavior.",
+    help="Initial L2 reward penalty on normalized residual actions; zero preserves legacy behavior.",
 )
+parser.add_argument("--dsrl_residual_penalty_end_scale", type=float, default=None)
+parser.add_argument("--dsrl_residual_penalty_decay_start_step", type=int, default=2000)
+parser.add_argument("--dsrl_residual_penalty_decay_steps", type=int, default=0)
 parser.add_argument("--dsrl_curriculum_steps", type=int, default=0)
 parser.add_argument("--dsrl_curriculum_start_step", type=int, default=0)
 parser.add_argument(
@@ -392,6 +395,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             residual_position_scale_m=tuple(args_cli.dsrl_residual_position_scale_m),
             residual_width_scale_m=args_cli.dsrl_residual_width_scale_m,
             residual_penalty_scale=args_cli.dsrl_residual_penalty_scale,
+            residual_penalty_end_scale=args_cli.dsrl_residual_penalty_end_scale,
+            residual_penalty_decay_start_step=args_cli.dsrl_residual_penalty_decay_start_step,
+            residual_penalty_decay_steps=args_cli.dsrl_residual_penalty_decay_steps,
             curriculum_steps=args_cli.dsrl_curriculum_steps,
             curriculum_start_step=args_cli.dsrl_curriculum_start_step,
             curriculum_start_xy_m=tuple(args_cli.dsrl_curriculum_start_xy_m),
@@ -443,12 +449,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     if args_cli.dsrl_policy and args_cli.dsrl_bc_prior_init and not args_cli.checkpoint:
         prior_log_std = -2.0 if args_cli.dsrl_action_mode == "residual" else 0.0
+        penalty_end_scale = (
+            args_cli.dsrl_residual_penalty_scale
+            if args_cli.dsrl_residual_penalty_end_scale is None
+            else args_cli.dsrl_residual_penalty_end_scale
+        )
         models["policy"].initialize_bc_prior(log_std=prior_log_std)
         agent_cfg["agent"]["random_timesteps"] = 0
         print(
             "[INFO] Initialized SAC actor as frozen-BC prior "
             f"action_mode={args_cli.dsrl_action_mode} log_std={prior_log_std:.1f} "
-            f"residual_penalty={args_cli.dsrl_residual_penalty_scale:.3g}."
+            f"residual_penalty={args_cli.dsrl_residual_penalty_scale:.3g}->{penalty_end_scale:.3g}."
         )
 
     cfg = SAC_CFG(**_process_cfg(agent_cfg["agent"]))
