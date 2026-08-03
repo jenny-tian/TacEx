@@ -51,6 +51,7 @@ class LabPickDSRLWrapper(gym.Wrapper):
         action_mode: str = "noise",
         residual_position_scale_m: tuple[float, float, float] = (0.03, 0.03, 0.01),
         residual_width_scale_m: float = 0.002,
+        residual_penalty_scale: float = 0.0,
         curriculum_steps: int = 0,
         curriculum_start_step: int = 0,
         curriculum_start_xy_m: tuple[float, float] = (0.05, 0.05),
@@ -88,6 +89,7 @@ class LabPickDSRLWrapper(gym.Wrapper):
         self.action_repeat = int(action_repeat)
         self.residual_position_scale_m = tuple(float(value) for value in residual_position_scale_m)
         self.residual_width_scale_m = float(residual_width_scale_m)
+        self.residual_penalty_scale = float(residual_penalty_scale)
         self.curriculum_steps = int(curriculum_steps)
         self.curriculum_start_step = int(curriculum_start_step)
         self.curriculum_start_xy_m = tuple(float(value) for value in curriculum_start_xy_m)
@@ -110,6 +112,8 @@ class LabPickDSRLWrapper(gym.Wrapper):
             raise ValueError("residual_position_scale_m must contain three non-negative values.")
         if self.residual_width_scale_m < 0.0:
             raise ValueError("residual_width_scale_m must be non-negative.")
+        if self.residual_penalty_scale < 0.0:
+            raise ValueError("residual_penalty_scale must be non-negative.")
         if len(self.curriculum_start_xy_m) != 2 or len(self.curriculum_end_xy_m) != 2:
             raise ValueError("Curriculum XY ranges must contain two values.")
         if any(value < 0.0 for value in (*self.curriculum_start_xy_m, *self.curriculum_end_xy_m)):
@@ -316,6 +320,20 @@ class LabPickDSRLWrapper(gym.Wrapper):
         adjusted[closing, 9] = (adjusted[closing, 9] + width_delta).clamp(0.006, 0.04)
         return adjusted
 
+    def _apply_residual_penalty(self, result, residual: torch.Tensor):
+        """Keep the learned correction close to the frozen BC residual prior."""
+
+        if self.action_mode != "residual" or self.residual_penalty_scale <= 0.0:
+            return result
+        observation, total_reward, terminated, truncated, info = result
+        penalty = self.residual_penalty_scale * residual.detach().reshape(-1).square().mean()
+        penalty = penalty.to(device=total_reward.device, dtype=total_reward.dtype)
+        total_reward = total_reward - penalty
+        info["dsrl/residual_penalty"] = penalty.detach()
+        if isinstance(info.get("log"), dict):
+            info["log"]["LabPick/residual_penalty"] = penalty.detach()
+        return observation, total_reward, terminated, truncated, info
+
     def _step_flow_chunk(self, flat_action: torch.Tensor | None, *, apply_residual: bool = True):
         self._ensure_flow_observation_ready()
         if self.action_mode == "residual":
@@ -379,6 +397,7 @@ class LabPickDSRLWrapper(gym.Wrapper):
             result = self._step_flow_chunk(flat_action)
         else:
             result = self._step_decoded_chunk(flat_action)
+        result = self._apply_residual_penalty(result, flat_action)
         self._outer_steps += 1
         self._update_randomization_curriculum()
         return result

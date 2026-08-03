@@ -383,6 +383,29 @@ def test_dsrl_flow_residual_offsets_xyz_and_only_closed_width(monkeypatch):
     torch.testing.assert_close(action_chunk, original)
 
 
+def test_dsrl_residual_penalty_anchors_frozen_bc_prior(monkeypatch):
+    import torch
+
+    LabPickDSRLWrapper = _load_dsrl_wrapper(monkeypatch)
+    wrapper = LabPickDSRLWrapper.__new__(LabPickDSRLWrapper)
+    wrapper.action_mode = "residual"
+    wrapper.residual_penalty_scale = 4.0
+    info = {"log": {}}
+    result = (
+        torch.zeros(1, 23),
+        torch.tensor([10.0]),
+        torch.zeros(1, dtype=torch.bool),
+        torch.zeros(1, dtype=torch.bool),
+        info,
+    )
+
+    adjusted = wrapper._apply_residual_penalty(result, torch.ones(1, 4))
+
+    torch.testing.assert_close(adjusted[1], torch.tensor([6.0]))
+    torch.testing.assert_close(info["dsrl/residual_penalty"], torch.tensor(4.0))
+    torch.testing.assert_close(info["log"]["LabPick/residual_penalty"], torch.tensor(4.0))
+
+
 def test_dsrl_randomization_curriculum_interpolates_and_saturates(monkeypatch):
     import math
     import types

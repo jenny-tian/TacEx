@@ -64,6 +64,12 @@ parser.add_argument(
     metavar=("X", "Y", "Z"),
 )
 parser.add_argument("--dsrl_residual_width_scale_m", type=float, default=0.002)
+parser.add_argument(
+    "--dsrl_residual_penalty_scale",
+    type=float,
+    default=0.0,
+    help="L2 reward penalty on normalized residual actions; zero preserves legacy behavior.",
+)
 parser.add_argument("--dsrl_curriculum_steps", type=int, default=0)
 parser.add_argument("--dsrl_curriculum_start_step", type=int, default=0)
 parser.add_argument(
@@ -385,6 +391,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             action_mode=args_cli.dsrl_action_mode,
             residual_position_scale_m=tuple(args_cli.dsrl_residual_position_scale_m),
             residual_width_scale_m=args_cli.dsrl_residual_width_scale_m,
+            residual_penalty_scale=args_cli.dsrl_residual_penalty_scale,
             curriculum_steps=args_cli.dsrl_curriculum_steps,
             curriculum_start_step=args_cli.dsrl_curriculum_start_step,
             curriculum_start_xy_m=tuple(args_cli.dsrl_curriculum_start_xy_m),
@@ -440,7 +447,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         agent_cfg["agent"]["random_timesteps"] = 0
         print(
             "[INFO] Initialized SAC actor as frozen-BC prior "
-            f"action_mode={args_cli.dsrl_action_mode} log_std={prior_log_std:.1f}."
+            f"action_mode={args_cli.dsrl_action_mode} log_std={prior_log_std:.1f} "
+            f"residual_penalty={args_cli.dsrl_residual_penalty_scale:.3g}."
         )
 
     cfg = SAC_CFG(**_process_cfg(agent_cfg["agent"]))

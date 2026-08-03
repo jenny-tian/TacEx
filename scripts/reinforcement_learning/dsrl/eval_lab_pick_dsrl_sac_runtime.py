@@ -29,6 +29,7 @@ parser.add_argument(
     metavar=("X", "Y", "Z"),
 )
 parser.add_argument("--dsrl_residual_width_scale_m", type=float, default=0.002)
+parser.add_argument("--dsrl_residual_penalty_scale", type=float, default=0.0)
 parser.add_argument(
     "--labware_random_xy",
     type=float,
@@ -163,6 +164,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, _age
         action_mode=args_cli.dsrl_action_mode,
         residual_position_scale_m=tuple(args_cli.dsrl_residual_position_scale_m),
         residual_width_scale_m=args_cli.dsrl_residual_width_scale_m,
+        residual_penalty_scale=args_cli.dsrl_residual_penalty_scale,
         flow_num_inference_steps=args_cli.flow_num_inference_steps,
         flow_chunk_execute_steps=args_cli.flow_chunk_execute_steps,
         flow_phase_horizon_steps=args_cli.flow_phase_horizon_steps,
@@ -280,6 +282,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, _age
         "dsrl_action_mode": args_cli.dsrl_action_mode,
         "dsrl_residual_position_scale_m": list(args_cli.dsrl_residual_position_scale_m),
         "dsrl_residual_width_scale_m": args_cli.dsrl_residual_width_scale_m,
+        "dsrl_residual_penalty_scale": args_cli.dsrl_residual_penalty_scale,
         "labware_random_xy": args_cli.labware_random_xy,
         "labware_random_yaw": args_cli.labware_random_yaw,
         "num_trials": len(results),
