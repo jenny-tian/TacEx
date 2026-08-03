@@ -177,50 +177,178 @@ Failed attempts are not stopped early. The script finishes the full `--max_episo
 - `last_frame_ft.npy`
 - `last_frame_info.txt`, including failure reason, final FT, force norm, torque norm, and the first failure step
 
-### Training BC Policy Using Collected Dataset
-After you run the above command, you will generate a dataset in hdf5 format in `dataset` direct. Then, we will gernerate a dataset in lerobot format using the gernated dataset.
+### Train Flow Matching BC and DSRL-SAC
 
+The commands below are the supported training path on this branch. They use the
+Isaac Lab environment for simulation and Flow Matching training, and a separate
+LeRobot environment only for optional dataset conversion.
+
+Set the paths once from the repository root. Replace the Python paths if your
+environments are installed elsewhere:
 
 ```bash
-python scripts/bc_training/create_lerobot_dataset.py \
-  --input /home/limx/github_repo/TacEx/dataset \
-  --output-root /home/limx/github_repo/TacEx/dataset_lerobot \
-  --repo-id tacex/lab_pick \
+export TACEX_ROOT="$PWD"
+export ISAAC_PYTHON="${TACEX_ISAAC_PYTHON:-/home/tjx/miniforge3/envs/env_isaaclab/bin/python}"
+export OMNI_KIT_ACCEPT_EULA=YES
+export PYTHONPATH="$TACEX_ROOT/source/tacex:$TACEX_ROOT/source/tacex_assets:$TACEX_ROOT/source/tacex_tasks:$TACEX_ROOT/bc_policy${PYTHONPATH:+:$PYTHONPATH}"
+```
+
+For a remote desktop or TurboVNC session, run camera-enabled headless commands
+with the graphics interposition variables removed:
+
+```bash
+unset LD_PRELOAD VGL_ISACTIVE VGL_DISPLAY DISPLAY
+```
+
+#### 1. Collect demonstrations
+
+Collect at least 50 successful episodes for a smoke test; 200-500 episodes are
+recommended for a useful BC policy:
+
+```bash
+env -u LD_PRELOAD -u VGL_ISACTIVE -u VGL_DISPLAY -u DISPLAY \
+  "$ISAAC_PYTHON" scripts/demos/lab_pick/collect_bc_dataset.py \
+  --labware slide \
+  --num_demos 200 \
+  --max_attempts 500 \
+  --max_episode_steps 960 \
+  --success_only \
+  --record_dir datasets/lab_pick_slide_records \
+  --headless
+```
+
+Check that the records contain aligned RGB, third-person RGB, state, width and
+action arrays:
+
+```bash
+"$ISAAC_PYTHON" scripts/reinforcement_learning/dsrl/check_dsrl_ready.py \
+  --records datasets/lab_pick_slide_records --min-success 50
+```
+
+#### 2. Convert records to the Flow Matching HDF5 format
+
+The third-person camera is included explicitly because the dual-camera BC
+policy consumes both `robot0_image` and `robot0_image_third`:
+
+```bash
+"$ISAAC_PYTHON" bc_policy/sim_robot/scripts/convert_records_to_hdf5.py \
+  --input datasets/lab_pick_slide_records \
+  --output datasets/lab_pick_slide_flow_matching.hdf5 \
+  --success-only \
+  --include-third-camera \
   --overwrite
 ```
 
+#### 3. Train the dual-camera Flow Matching BC policy
 
-You can visualize generated dataset using 
+This configuration matches the validated LabPick policy: phase conditioning,
+ImageNet-normalized ImageNet-pretrained ResNet50 features, visual XY auxiliary
+loss, and 32-step action chunks. The best checkpoint is written to
+`outputs/lab_pick_flow_matching/best.pt`.
+
 ```bash
-lerobot-dataset-viz     --repo-id /home/limx/github_repo/TacEx/dataset_lerobot    --episode-index 0
+"$ISAAC_PYTHON" bc_policy/sim_robot/scripts/train_flow_matching.py \
+  --dataset datasets/lab_pick_slide_flow_matching.hdf5 \
+  --output-dir outputs/lab_pick_flow_matching \
+  --success-only \
+  --action-key high \
+  --image-keys robot0_image,robot0_image_third \
+  --n-state-obs-steps 2 \
+  --n-image-obs-steps 2 \
+  --n-action-steps 32 \
+  --epochs 50 \
+  --batch-size 32 \
+  --num-workers 4 \
+  --lr 1e-4 \
+  --weight-decay 1e-6 \
+  --warmup-steps 500 \
+  --val-ratio 0.05 \
+  --seed 42 \
+  --normalizer-mode limits \
+  --image-normalization imagenet \
+  --pretrained-image-backbone resnet50_imagenet1k_v2 \
+  --image-feature-dim 512 \
+  --obs-feature-dim 512 \
+  --transformer-layers 6 \
+  --transformer-heads 8 \
+  --transformer-embedding-dim 512 \
+  --transformer-cond-layers 2 \
+  --dropout 0.1 \
+  --num-inference-steps 100 \
+  --ode-solver euler \
+  --include-phase \
+  --visual-xy-loss-weight 1.0 \
+  --ema-decay 0.999 \
+  --amp \
+  --save-every 10
 ```
 
-You can train your bc policy using 
-```
-python scripts/bc_training/train_bc.py \
-  --data-root /home/limx/github_repo/TacEx/dataset \
-  --output-dir /home/limx/github_repo/TacEx/checkpoints/tacex_dinov3_fm_bc \
-  --epochs 200 \
-  --batch-size 32
+For a short smoke test, add `--max-train-steps 20 --max-val-steps 5`.
+The output contains `best.pt`, `last.pt` and `logs.jsonl`.
+
+#### 4. Evaluate the frozen BC policy
+
+Use the same camera, phase and action-chunk settings during evaluation:
+
+```bash
+env -u LD_PRELOAD -u VGL_ISACTIVE -u VGL_DISPLAY -u DISPLAY \
+  "$ISAAC_PYTHON" scripts/demos/lab_pick/eval_flow_matching_policy.py \
+  --checkpoint outputs/lab_pick_flow_matching/best.pt \
+  --num_trials 50 \
+  --seed 0 \
+  --policy_seed 42 \
+  --action_repeat 2 \
+  --chunk_execute_steps 32 \
+  --num_inference_steps 20 \
+  --phase_horizon_steps 383 \
+  --camera_warmup_steps 8 \
+  --visual_xy_lock_phase 0.30 \
+  --policy_camera third \
+  --headless
 ```
 
-Then, you can visulize your bc result using 
-```
-python scripts/bc_training/bc_open_loop_test.py \
-  --checkpoint checkpoints/tacex_dinov3_fm_bc/best.pt \
-  --output-dir outputs/bc_open_loop_smoke \
-  --split val \
-  --max-episodes 1 \
-  --max-frames-per-episode 300 \
-  --num-inference-steps 50 \
-  --dims xyz,rot6d,width \
-  --batch-size 64
+#### 5. Train DSRL-SAC initialized from the BC policy
+
+The DSRL launcher automatically selects
+`TacEx-LabPick-Slide-DSRL-Base-v0`, enables cameras and runs headless. It
+requires the isolated `.cache/lerobot_inference` dependencies described in
+[`scripts/reinforcement_learning/dsrl/README.md`](scripts/reinforcement_learning/dsrl/README.md).
+
+```bash
+env -u LD_PRELOAD -u VGL_ISACTIVE -u VGL_DISPLAY -u DISPLAY \
+  "$ISAAC_PYTHON" scripts/reinforcement_learning/dsrl/train_lab_pick_dsrl_sac.py \
+  --dsrl_policy outputs/lab_pick_flow_matching/best.pt \
+  --dsrl_policy_type flow_matching \
+  --timesteps 50000 \
+  --seed 42
 ```
 
-You can test your training result using 
+Checkpoints and TensorBoard logs are written below
+`logs/skrl/lab_pick_slide/`. To continue a run, pass the saved checkpoint to
+the underlying SKRL entry point while keeping the same BC policy:
+
+```bash
+env -u LD_PRELOAD -u VGL_ISACTIVE -u VGL_DISPLAY -u DISPLAY \
+  "$ISAAC_PYTHON" scripts/reinforcement_learning/skrl/train_sac.py \
+  --task TacEx-LabPick-Slide-DSRL-Base-v0 \
+  --num_envs 1 \
+  --headless --enable_cameras \
+  --dsrl_policy outputs/lab_pick_flow_matching/best.pt \
+  --dsrl_policy_type flow_matching \
+  --checkpoint logs/skrl/lab_pick_slide/<run>/checkpoints/agent_<step>.pt \
+  --timesteps 50000
 ```
-bash scripts/bc_training/run_bc_inference_sim.sh 
+
+Use `systemd-run --user` for long unattended jobs. Do not terminate unrelated
+Isaac or GPU processes when checking a running job; inspect the unit with:
+
+```bash
+systemctl --user status <unit>.service
+journalctl --user -u <unit>.service -f
 ```
+
+The older `scripts/bc_training/train_bc.py` examples are not the entry point
+for this branch; use the Flow Matching command above.
 
 ### Analyze failed attempts with a VLM
 
