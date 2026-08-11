@@ -263,6 +263,13 @@ class SimActionChunkPolicyRunner:
             model_obs[key] = torch.from_numpy(image).unsqueeze(0).to(self.device)
         return model_obs
 
+    @torch.inference_mode()
+    def encode_observation(self) -> torch.Tensor:
+        """Return the frozen BC encoder's exact flattened conditioning tokens."""
+
+        _, global_cond = self.model.obs_encoder(self.build_model_obs())
+        return global_cond
+
     def _apply_demo_mode_width(self, action: np.ndarray) -> np.ndarray:
         if not getattr(self, "project_demo_mode_width", False):
             return action

@@ -82,6 +82,11 @@ class LabPickDSRLWrapper(gym.Wrapper):
         self.gate_penalty = float(gate_penalty)
         self.gate_max = float(gate_max)
         self.noise_dim = int(self.adapter.noise_dim)
+        self.observation_dim = (
+            int(self.adapter.observation_dim)
+            if policy_type == "flow_matching"
+            else int(env.unwrapped.single_observation_space.shape[-1])
+        )
         self._flow_policy_steps = 0
         self._flow_needs_warmup = policy_type == "flow_matching"
         self._completed_episodes = 0
@@ -111,6 +116,15 @@ class LabPickDSRLWrapper(gym.Wrapper):
         # SKRL's Isaac wrapper reads the unwrapped environment metadata.
         env.unwrapped.single_action_space = self.action_space
         self.single_action_space = self.action_space
+        policy_observation_space = gym.spaces.Box(
+            low=-np.inf,
+            high=np.inf,
+            shape=(self.observation_dim,),
+            dtype=np.float32,
+        )
+        self.observation_space = gym.spaces.Dict({"policy": policy_observation_space})
+        env.unwrapped.single_observation_space = self.observation_space
+        self.single_observation_space = self.observation_space
 
     @property
     def device(self):
@@ -127,7 +141,7 @@ class LabPickDSRLWrapper(gym.Wrapper):
         if self.policy_type == "flow_matching":
             self._flow_needs_warmup = True
             self._ensure_flow_observation_ready()
-            observation = self.env.unwrapped._get_observations()
+            observation = {"policy": self._encoded_flow_observation()}
         return observation, info
 
     def _warmup_flow_cameras(self) -> None:
@@ -172,6 +186,10 @@ class LabPickDSRLWrapper(gym.Wrapper):
             self._flow_needs_warmup = False
         if not self.adapter.is_ready:
             self.adapter.update(self._raw_flow_observation())
+
+    def _encoded_flow_observation(self) -> torch.Tensor:
+        self._ensure_flow_observation_ready()
+        return self.adapter.encode_observation().to(device=self.device, dtype=torch.float32)
 
     def _camera_tensor(self, camera) -> torch.Tensor:
         rgb = camera.data.output["rgb"][:, :, :, :3].permute(0, 3, 1, 2).float()
@@ -338,6 +356,7 @@ class LabPickDSRLWrapper(gym.Wrapper):
         info["dsrl/action_repeat"] = self.action_repeat
         info["dsrl/physics_steps_executed"] = executed_physics_steps
         info["dsrl/policy_type"] = self.policy_type
+        observation = {"policy": self._encoded_flow_observation()}
         return observation, total_reward, terminated, truncated, info
 
     def step(self, flat_noise):

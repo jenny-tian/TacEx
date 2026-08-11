@@ -184,6 +184,56 @@ def test_demo_mode_conditioning_distinguishes_three_outcome_modes(tmp_path):
     )
 
 
+def test_overforce_targets_are_strengthened_without_mode_conditioning(tmp_path):
+    import sys
+
+    policy_root = str(ROOT / "bc_policy")
+    if policy_root not in sys.path:
+        sys.path.insert(0, policy_root)
+    from sim_robot.data.sequence_dataset import SimRobotHDF5SequenceDataset, compute_normalizer
+
+    converter = load_converter()
+    records = tmp_path / "records"
+    write_record(
+        records, 0, success=True, value=3, observation_timing="pre_action", demonstration_mode="safe"
+    )
+    write_record(
+        records,
+        1,
+        success=False,
+        value=7,
+        observation_timing="pre_action",
+        demonstration_mode="overforce",
+    )
+    output = tmp_path / "unconditioned_overforce.hdf5"
+    converter.convert_records(records, output, success_only=False)
+    with h5py.File(output, "r+") as h5:
+        h5["data"]["demo_0"]["actions"]["high"][:, -1] = 0.0065
+        h5["data"]["demo_1"]["actions"]["high"][:, -1] = 0.0030
+
+    episode_ids = np.asarray([0, 1])
+    normalizer = compute_normalizer(
+        output,
+        episode_ids,
+        include_demo_mode=False,
+        overforce_close_width_m=0.0015,
+    )
+    dataset = SimRobotHDF5SequenceDataset(
+        output,
+        episode_ids,
+        normalizer,
+        include_demo_mode=False,
+        overforce_close_width_m=0.0015,
+    )
+    overforce_index = dataset.episodes[0].length
+    overforce_action = normalizer.unnormalize_numpy(
+        "action", dataset[overforce_index]["action"].numpy()
+    )
+
+    assert dataset.robot0_pos_dim == 10
+    np.testing.assert_allclose(overforce_action[:, -1], 0.0015)
+
+
 def test_phase_conditioned_runner_appends_phase():
     import sys
     from types import SimpleNamespace

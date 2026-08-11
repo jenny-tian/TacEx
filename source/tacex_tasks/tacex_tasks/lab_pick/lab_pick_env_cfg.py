@@ -360,11 +360,11 @@ class LabPickSlideDSRLBaseEnvCfg(LabPickSlideEnvCfg):
     """
 
     action_space = 10
-    observation_space = 23
-    rl_privileged_observation = True
+    observation_space = 16
+    rl_privileged_observation = False
     rl_shaped_reward = True
     rl_terminate_on_success = True
-    rl_align_cafe_action_yaw = True
+    rl_align_cafe_action_yaw = False
     rl_reach_reward_scale = 40.0
     rl_first_contact_reward = 4.0
     rl_both_contact_reward = 6.0

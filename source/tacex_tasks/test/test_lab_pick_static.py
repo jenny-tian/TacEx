@@ -558,6 +558,7 @@ def test_lab_pick_dsrl_pipeline_has_ddim_adapter_wrapper_launcher_and_config():
     adapter_source = read(dsrl_root / "diffusion_noise_adapter.py")
     flow_adapter_source = read(dsrl_root / "flow_matching_noise_adapter.py")
     wrapper_source = read(dsrl_root / "lab_pick_dsrl_wrapper.py")
+    runner_source = read(ROOT / "bc_policy" / "sim_robot" / "deployment" / "policy_runner.py")
     launcher_source = read(dsrl_root / "train_lab_pick_dsrl_sac.py")
     evaluator_source = read(dsrl_root / "eval_lab_pick_diffusion_bc_runtime.py")
     runtime_source = read(dsrl_root / "runtime.py")
@@ -568,8 +569,11 @@ def test_lab_pick_dsrl_pipeline_has_ddim_adapter_wrapper_launcher_and_config():
     assert '"env_cfg_entry_point": LabPickSlideDSRLBaseEnvCfg' in package_source
     assert '"skrl_sac_cfg_entry_point": DSRL_SAC_CFG_ENTRY_POINT' in package_source
     assert "class LabPickSlideDSRLBaseEnvCfg(LabPickSlideEnvCfg):" in cfg_source
-    assert "rl_align_cafe_action_yaw = True" in cfg_source
+    assert "rl_privileged_observation = False" in cfg_source
+    assert "rl_align_cafe_action_yaw = False" in cfg_source
     assert "self.cfg.rl_align_cafe_action_yaw" in env_source
+    assert "self._rot6d_to_quat(actions[:, 3:9])" in env_source
+    assert "def _rot6d_to_quat(rot6d: torch.Tensor)" in env_source
     assert "if self.cfg.rl_shaped_reward:" in env_source
 
     assert "class DiffusionNoiseAdapter:" in adapter_source
@@ -581,10 +585,17 @@ def test_lab_pick_dsrl_pipeline_has_ddim_adapter_wrapper_launcher_and_config():
     assert "SimActionChunkPolicyRunner" in flow_adapter_source
     assert "self.noise_dim = self.horizon * self.action_dim" in flow_adapter_source
     assert "initial_noise=noise" in flow_adapter_source
+    assert "def encode_observation(self) -> torch.Tensor:" in flow_adapter_source
+    assert "self.runner.encode_observation()" in flow_adapter_source
+    assert "def encode_observation(self) -> torch.Tensor:" in runner_source
+    assert "self.model.obs_encoder(self.build_model_obs())" in runner_source
 
     assert "class LabPickDSRLWrapper(gym.Wrapper):" in wrapper_source
     assert "self.action_space = gym.spaces.Box(" in wrapper_source
     assert "env.unwrapped.single_action_space = self.action_space" in wrapper_source
+    assert "env.unwrapped.single_observation_space = self.observation_space" in wrapper_source
+    assert 'gym.spaces.Dict({"policy": policy_observation_space})' in wrapper_source
+    assert 'observation = {"policy": self._encoded_flow_observation()}' in wrapper_source
     assert "self.adapter.policy.select_action(batch, noise=noise)" in wrapper_source
     assert "self.chunk_discount**action_step" in wrapper_source
     assert "action_repeat: int = 2" in wrapper_source
@@ -644,7 +655,7 @@ def test_lab_pick_collector_appends_without_overwriting_existing_records():
 
 
 
-def test_lab_pick_bc50_pipeline_trains_on_three_outcome_modes():
+def test_lab_pick_bc50_pipeline_trains_on_three_outcome_data_without_mode_input():
     pipeline = read(ROOT / "bc_policy" / "sim_robot" / "scripts" / "run_lab_pick_bc50_mixed_pipeline.sh")
     assert "--safe_demo_fraction" in pipeline
     assert "SAFE_FRACTION" in pipeline
@@ -656,16 +667,25 @@ def test_lab_pick_bc50_pipeline_trains_on_three_outcome_modes():
     assert "--labware_random_yaw 0.7853981633974483" in pipeline
     assert "--break_force_threshold_n" in pipeline
     assert "--success-only" not in pipeline
-    assert "--include-demo-mode" in pipeline
-    assert 'SAFE_MODE_PROBABILITY="${TACEX_BC50_SAFE_MODE_PROBABILITY:-0.50}"' in pipeline
-    assert 'OVERFORCE_MODE_PROBABILITY="${TACEX_BC50_OVERFORCE_MODE_PROBABILITY:-0.25}"' in pipeline
-    assert 'POSITION_FAILURE_MODE_PROBABILITY="${TACEX_BC50_POSITION_FAILURE_MODE_PROBABILITY:-0.25}"' in pipeline
+    assert "--include-demo-mode" not in pipeline
+    assert "DEMO_MODE_PROBABILITY" not in pipeline
     assert "--overforce_trial_fraction 0.0" in pipeline
     assert "--position_failure_trial_fraction 0.0" in pipeline
     assert "--force_demo_mode_projection" not in pipeline
     assert "--epochs 1" in pipeline
+    assert "--epochs 2" in pipeline
+    assert "--overforce-sample-weight 1.3" in pipeline
+    assert "--position-failure-sample-weight 0.25" in pipeline
+    assert 'BASE_OUTPUT_DIR=' in pipeline
+    assert '--checkpoint "${OUTPUT_DIR}/epoch_0001.pt"' in pipeline
     assert "--visual_xy_lock_phase 0.30" in pipeline
     assert "--image-normalization none" in pipeline
     assert "--image-normalization imagenet" not in pipeline
-    assert ".success_rate >= 0.40 and .success_rate <= 0.60" in pipeline
+    assert ".success_rate >= 0.30 and .success_rate <= 0.60" in pipeline
     assert ".break_failure_fraction >= 0.30 and .break_failure_fraction <= 0.70" in pipeline
+
+
+def test_flow_checkpoint_initializer_can_drop_final_conditioning_feature():
+    trainer = read(ROOT / "bc_policy" / "sim_robot" / "training" / "trainer.py")
+    assert "target[name].shape[1] + 1 == value.shape[1]" in trainer
+    assert "value[:, : target[name].shape[1]]" in trainer

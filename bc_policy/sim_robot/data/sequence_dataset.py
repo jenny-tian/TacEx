@@ -125,8 +125,7 @@ def compute_normalizer(
             pos_parts.append(pos)
             actions = demo["actions"][action_key][:length]
             if (
-                include_demo_mode
-                and overforce_close_width_m is not None
+                overforce_close_width_m is not None
                 and demonstration_mode_name(demo) == "overforce"
             ):
                 actions = np.asarray(actions).copy()
@@ -302,8 +301,7 @@ class SimRobotHDF5SequenceDataset(Dataset):
             robot0_pos = np.concatenate((robot0_pos, mode_feature), axis=-1)
         action = self._read_rows(demo["actions"][self.action_key], action_idx).astype(np.float32)
         if (
-            self.include_demo_mode
-            and self.overforce_close_width_m is not None
+            self.overforce_close_width_m is not None
             and demonstration_mode_name(demo) == "overforce"
         ):
             closing = action[:, -1] < 0.02

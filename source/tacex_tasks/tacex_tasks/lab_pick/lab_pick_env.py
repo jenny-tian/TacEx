@@ -252,7 +252,7 @@ class LabPickEnv(DirectRLEnv):
                 target_quat_b = (
                     self.scripted_target_quat_b
                     if self.cfg.rl_align_cafe_action_yaw
-                    else self.nominal_ee_quat_b
+                    else self._rot6d_to_quat(actions[:, 3:9])
                 )
                 gripper_width = actions[:, 9:10].clamp(0.0, 0.04)
             self.ik_commands[:, :3] = target_pos_b
@@ -517,6 +517,19 @@ class LabPickEnv(DirectRLEnv):
     def _quat_to_rot6d(self, quat_wxyz: torch.Tensor) -> torch.Tensor:
         rot_mat = math_utils.matrix_from_quat(quat_wxyz)
         return rot_mat[:, :, :2].reshape(quat_wxyz.shape[0], 6)
+
+    @staticmethod
+    def _rot6d_to_quat(rot6d: torch.Tensor) -> torch.Tensor:
+        matrix_3x2 = rot6d.reshape(-1, 3, 2)
+        first = F.normalize(matrix_3x2[:, :, 0], dim=-1, eps=1.0e-6)
+        second_raw = matrix_3x2[:, :, 1]
+        second = F.normalize(
+            second_raw - (first * second_raw).sum(dim=-1, keepdim=True) * first,
+            dim=-1,
+            eps=1.0e-6,
+        )
+        third = torch.cross(first, second, dim=-1)
+        return math_utils.quat_from_matrix(torch.stack((first, second, third), dim=-1))
 
     def _gripper_center_pos_b(self) -> torch.Tensor:
         tool_pos_b, tool_quat_b = self._compute_frame_pose()

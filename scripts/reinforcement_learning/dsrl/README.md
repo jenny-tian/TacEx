@@ -132,11 +132,23 @@ TACEX_DSRL_TIMESTEPS=200000 \
 ```
 
 The default checkpoint is
-`outputs/lab_pick_flow_bc50_strong48n_pos8_50_final/best.pt`. Training starts
+`outputs/lab_pick_flow_bc50_strong48n_pos8_50_unconditioned_balanced/epoch_0001.pt`.
+It was trained from the existing 50 mixed demonstrations without exposing the
+demonstration category to the policy (`include_demo_mode=False`). A normal
+10-trial evaluation over +/-10 cm and +/-45 degrees produced 3 successes,
+3 overforce breakages, and 4 position/timeout failures; the evaluator did not
+request any failure mode. Training starts
 with a gate of `0.1`, temperature `0.5`, penalty `0.1`, and maximum gate `0.3`;
 `DSRL/gate_mean` and `DSRL/gate_penalty` are written to the normal SKRL/IsaacLab
 logs. Set `TACEX_DSRL_GATE_INIT`, `TACEX_DSRL_GATE_TEMPERATURE`,
 `TACEX_DSRL_GATE_PENALTY`, or `TACEX_DSRL_GATE_MAX` to override the defaults.
+
+The SAC actor and critics receive the frozen BC encoder's exact `global_cond`:
+the same robot-state history, wrist-camera history, and third-person-camera
+history used by Flow Matching. Simulator object position, object orientation,
+and demonstration category are not included. The environment executes the
+BC-predicted rot6d orientation instead of replacing it with simulator-aligned
+yaw.
 
 ## Validation gates
 

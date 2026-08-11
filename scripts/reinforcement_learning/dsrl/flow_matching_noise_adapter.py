@@ -42,6 +42,10 @@ class FlowMatchingNoiseAdapter:
         return self.horizon, self.action_dim
 
     @property
+    def observation_dim(self) -> int:
+        return int(self.runner.model.obs_encoder.global_cond_dim)
+
+    @property
     def is_ready(self) -> bool:
         return self.runner.is_ready()
 
@@ -55,6 +59,10 @@ class FlowMatchingNoiseAdapter:
 
     def update(self, observation: dict[str, Any]) -> None:
         self.runner.update(observation)
+
+    @torch.inference_mode()
+    def encode_observation(self) -> torch.Tensor:
+        return self.runner.encode_observation()
 
     @torch.inference_mode()
     def decode(self, flat_noise: torch.Tensor | None = None) -> torch.Tensor:

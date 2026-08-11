@@ -314,7 +314,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         or (args_cli.dsrl_policy_type == "auto" and os.path.isfile(args_cli.dsrl_policy))
     ):
         gate_suffix = "_gated" if args_cli.dsrl_gate else ""
-        agent_cfg["agent"]["experiment"]["experiment_name"] = f"dsrl_sac_flow_bc_init{gate_suffix}"
+        agent_cfg["agent"]["experiment"]["experiment_name"] = f"dsrl_sac_flow_bc_encoded{gate_suffix}"
     # configure the ML framework into the global skrl variable
     if args_cli.ml_framework.startswith("jax"):
         skrl.config.jax.backend = "jax" if args_cli.ml_framework == "jax" else "numpy"

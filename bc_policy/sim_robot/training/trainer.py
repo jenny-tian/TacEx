@@ -191,6 +191,17 @@ def initialize_from_checkpoint(
             adapted.append(name)
             continue
         if (
+            name == "obs_encoder.state_projector.0.weight"
+            and value.ndim == 2
+            and target[name].shape[0] == value.shape[0]
+            and target[name].shape[1] + 1 == value.shape[1]
+        ):
+            # Removing the final conditioning feature (for example demonstration_mode)
+            # should preserve all weights for the remaining physical state and phase.
+            compatible[name] = value[:, : target[name].shape[1]]
+            adapted.append(name)
+            continue
+        if (
             name == "obs_encoder.modality_emb"
             and value.ndim == 3
             and target[name].shape[0] == value.shape[0]
