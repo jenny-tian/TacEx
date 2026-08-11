@@ -50,47 +50,6 @@ parser.add_argument("--sac_write_interval", type=int, default=None)
 parser.add_argument("--dsrl_policy", type=str, default=None, help="Frozen Diffusion or Flow Matching BC checkpoint for DSRL-SAC.")
 parser.add_argument("--dsrl_device", type=str, default="cuda", help="Device used by the frozen BC policy.")
 parser.add_argument("--dsrl_noise_magnitude", type=float, default=1.5)
-parser.add_argument(
-    "--dsrl_action_mode",
-    choices=["noise", "residual"],
-    default="noise",
-    help="SAC controls the full BC noise tensor or a 4-D xyz/width residual. Noise preserves old checkpoints.",
-)
-parser.add_argument(
-    "--dsrl_residual_position_scale_m",
-    type=float,
-    nargs=3,
-    default=(0.03, 0.03, 0.01),
-    metavar=("X", "Y", "Z"),
-)
-parser.add_argument("--dsrl_residual_width_scale_m", type=float, default=0.002)
-parser.add_argument(
-    "--dsrl_residual_penalty_scale",
-    type=float,
-    default=0.0,
-    help="Initial L2 reward penalty on normalized residual actions; zero preserves legacy behavior.",
-)
-parser.add_argument("--dsrl_residual_penalty_end_scale", type=float, default=None)
-parser.add_argument("--dsrl_residual_penalty_decay_start_step", type=int, default=2000)
-parser.add_argument("--dsrl_residual_penalty_decay_steps", type=int, default=0)
-parser.add_argument("--dsrl_curriculum_steps", type=int, default=0)
-parser.add_argument("--dsrl_curriculum_start_step", type=int, default=0)
-parser.add_argument(
-    "--dsrl_curriculum_start_xy_m",
-    type=float,
-    nargs=2,
-    default=(0.05, 0.05),
-    metavar=("X", "Y"),
-)
-parser.add_argument(
-    "--dsrl_curriculum_end_xy_m",
-    type=float,
-    nargs=2,
-    default=(0.10, 0.10),
-    metavar=("X", "Y"),
-)
-parser.add_argument("--dsrl_curriculum_start_yaw_deg", type=float, default=30.0)
-parser.add_argument("--dsrl_curriculum_end_yaw_deg", type=float, default=45.0)
 parser.add_argument("--dsrl_chunk_discount", type=float, default=0.99)
 parser.add_argument(
     "--dsrl_action_repeat",
@@ -112,6 +71,16 @@ parser.add_argument(
 )
 parser.add_argument("--dsrl_flow_phase_horizon_steps", type=int, default=383)
 parser.add_argument("--dsrl_flow_camera_warmup_steps", type=int, default=8)
+parser.add_argument(
+    "--dsrl_gate",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Learn a state-dependent soft gate between native BC noise and SAC DSRL noise.",
+)
+parser.add_argument("--dsrl_gate_init", type=float, default=0.1)
+parser.add_argument("--dsrl_gate_temperature", type=float, default=0.5)
+parser.add_argument("--dsrl_gate_penalty", type=float, default=0.1)
+parser.add_argument("--dsrl_gate_max", type=float, default=0.3)
 parser.add_argument(
     "--dsrl_bc_prior_init",
     action=argparse.BooleanOptionalAction,
@@ -157,7 +126,6 @@ from isaacsim.core.utils.extensions import enable_extension
 enable_extension("omni.isaac.debug_draw")
 
 import gymnasium as gym
-import math
 import os
 import random
 import torch
@@ -231,12 +199,32 @@ class StochasticActor(GaussianMixin, Model):
         self.net = _build_mlp(self.num_observations, hidden_dims, self.num_actions, nn.Tanh)
         self.log_std_parameter = nn.Parameter(torch.zeros(self.num_actions))
 
-    def initialize_bc_prior(self, *, log_std: float = 0.0) -> None:
+    def initialize_bc_prior(
+        self,
+        *,
+        gated: bool = False,
+        gate_init: float = 0.1,
+        gate_temperature: float = 0.5,
+        gate_max: float = 0.3,
+    ) -> None:
         output_layer = next(module for module in reversed(self.net) if isinstance(module, nn.Linear))
         with torch.no_grad():
             output_layer.weight.zero_()
             output_layer.bias.zero_()
-            self.log_std_parameter.fill_(log_std)
+            self.log_std_parameter.zero_()
+            if gated:
+                if not 0.0 < gate_max <= 1.0:
+                    raise ValueError("--dsrl_gate_max must be in (0, 1].")
+                if not 0.0 < gate_init < gate_max:
+                    raise ValueError("--dsrl_gate_init must be strictly between 0 and --dsrl_gate_max.")
+                if gate_temperature <= 0.0:
+                    raise ValueError("--dsrl_gate_temperature must be positive.")
+                gate_action = gate_temperature * torch.logit(
+                    torch.tensor(gate_init / gate_max, device=output_layer.bias.device)
+                )
+                gate_action = gate_action.clamp(-0.95, 0.95)
+                output_layer.bias[-1] = torch.atanh(gate_action)
+                self.log_std_parameter[-1] = -3.0
 
     def compute(self, inputs, role):
         return self.net(inputs["observations"]), {"log_std": self.log_std_parameter}
@@ -303,10 +291,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # override configurations with non-hydra CLI arguments
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
-    if args_cli.dsrl_policy and args_cli.dsrl_curriculum_steps > 0:
-        env_cfg.randomize_labware_position = True
-        env_cfg.labware_pos_randomization_xy = tuple(args_cli.dsrl_curriculum_start_xy_m)
-        env_cfg.labware_yaw_randomization = math.radians(args_cli.dsrl_curriculum_start_yaw_deg)
 
     # multi-gpu training config
     if args_cli.distributed:
@@ -329,8 +313,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         args_cli.dsrl_policy_type == "flow_matching"
         or (args_cli.dsrl_policy_type == "auto" and os.path.isfile(args_cli.dsrl_policy))
     ):
-        suffix = "residual" if args_cli.dsrl_action_mode == "residual" else "noise"
-        agent_cfg["agent"]["experiment"]["experiment_name"] = f"dsrl_sac_flow_bc_{suffix}"
+        gate_suffix = "_gated" if args_cli.dsrl_gate else ""
+        agent_cfg["agent"]["experiment"]["experiment_name"] = f"dsrl_sac_flow_bc_init{gate_suffix}"
     # configure the ML framework into the global skrl variable
     if args_cli.ml_framework.startswith("jax"):
         skrl.config.jax.backend = "jax" if args_cli.ml_framework == "jax" else "numpy"
@@ -391,23 +375,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             chunk_discount=args_cli.dsrl_chunk_discount,
             action_repeat=args_cli.dsrl_action_repeat,
             policy_type=args_cli.dsrl_policy_type,
-            action_mode=args_cli.dsrl_action_mode,
-            residual_position_scale_m=tuple(args_cli.dsrl_residual_position_scale_m),
-            residual_width_scale_m=args_cli.dsrl_residual_width_scale_m,
-            residual_penalty_scale=args_cli.dsrl_residual_penalty_scale,
-            residual_penalty_end_scale=args_cli.dsrl_residual_penalty_end_scale,
-            residual_penalty_decay_start_step=args_cli.dsrl_residual_penalty_decay_start_step,
-            residual_penalty_decay_steps=args_cli.dsrl_residual_penalty_decay_steps,
-            curriculum_steps=args_cli.dsrl_curriculum_steps,
-            curriculum_start_step=args_cli.dsrl_curriculum_start_step,
-            curriculum_start_xy_m=tuple(args_cli.dsrl_curriculum_start_xy_m),
-            curriculum_end_xy_m=tuple(args_cli.dsrl_curriculum_end_xy_m),
-            curriculum_start_yaw_rad=math.radians(args_cli.dsrl_curriculum_start_yaw_deg),
-            curriculum_end_yaw_rad=math.radians(args_cli.dsrl_curriculum_end_yaw_deg),
             flow_num_inference_steps=args_cli.dsrl_flow_num_inference_steps,
             flow_chunk_execute_steps=args_cli.dsrl_flow_chunk_execute_steps,
             flow_phase_horizon_steps=args_cli.dsrl_flow_phase_horizon_steps,
             flow_camera_warmup_steps=args_cli.dsrl_flow_camera_warmup_steps,
+            gate_enabled=args_cli.dsrl_gate,
+            gate_temperature=args_cli.dsrl_gate_temperature,
+            gate_penalty=args_cli.dsrl_gate_penalty,
+            gate_max=args_cli.dsrl_gate_max,
         )
     # wrap for video recording
     if args_cli.video:
@@ -448,18 +423,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     }
 
     if args_cli.dsrl_policy and args_cli.dsrl_bc_prior_init and not args_cli.checkpoint:
-        prior_log_std = -2.0 if args_cli.dsrl_action_mode == "residual" else 0.0
-        penalty_end_scale = (
-            args_cli.dsrl_residual_penalty_scale
-            if args_cli.dsrl_residual_penalty_end_scale is None
-            else args_cli.dsrl_residual_penalty_end_scale
+        models["policy"].initialize_bc_prior(
+            gated=args_cli.dsrl_gate,
+            gate_init=args_cli.dsrl_gate_init,
+            gate_temperature=args_cli.dsrl_gate_temperature,
+            gate_max=args_cli.dsrl_gate_max,
         )
-        models["policy"].initialize_bc_prior(log_std=prior_log_std)
         agent_cfg["agent"]["random_timesteps"] = 0
         print(
-            "[INFO] Initialized SAC actor as frozen-BC prior "
-            f"action_mode={args_cli.dsrl_action_mode} log_std={prior_log_std:.1f} "
-            f"residual_penalty={args_cli.dsrl_residual_penalty_scale:.3g}->{penalty_end_scale:.3g}."
+            "[INFO] Initialized SAC actor as zero-mean unit-Gaussian frozen-BC prior "
+            f"with gate_enabled={args_cli.dsrl_gate} gate_init={args_cli.dsrl_gate_init:.3f}."
         )
 
     cfg = SAC_CFG(**_process_cfg(agent_cfg["agent"]))

@@ -100,12 +100,8 @@ python scripts/reinforcement_learning/dsrl/check_dsrl_ready.py \
 
 ## Phase 5: DSRL-SAC online fine-tuning
 
-For DDIM Diffusion, the SAC actor can still output flattened initial noise with dimension `horizon * action_dim` (default `16 * 10 = 160`). The frozen Diffusion Policy decodes it into CAFE actions. Rewards are accumulated over that chunk.
-
-For the 32-step Flow Matching policy, the recommended mode is instead a 4-D normalized residual `[dx, dy, dz, dwidth]`. This avoids a 320-D SAC action space while keeping the Flow Matching visual encoder and trajectory prior frozen. The demonstrations are aligned at 60 Hz while LabPick physics runs at 120 Hz, so every decoded action is held for two physics steps (`--dsrl_action_repeat 2`).
-The residual penalty is measured against the zero residual prior, which is the frozen BC behavior. The recommended run keeps it at 5.0 during the 2,000-step warm-up and linearly decays it to 1.0 over the next 50,000 steps; it is disabled by default for backward compatibility.
-
-Legacy DDIM noise training:
+The SAC actor outputs flattened DDIM initial noise with dimension `horizon * action_dim` (default `16 * 10 = 160`). The frozen Diffusion Policy decodes it into up to eight CAFE actions. Rewards are accumulated over that chunk.
+The demonstrations are aligned at 60 Hz while LabPick physics runs at 120 Hz, so every decoded action is held for two physics steps (--dsrl_action_repeat 2).
 
 ```bash
 OMNI_KIT_ACCEPT_EULA=YES \
@@ -115,31 +111,6 @@ OMNI_KIT_ACCEPT_EULA=YES \
   --timesteps 200000 --seed 42
 ```
 
-Recommended Flow Matching residual training with a reset curriculum:
-
-```bash
-OMNI_KIT_ACCEPT_EULA=YES \
-/home/tjx/miniforge3/envs/env_isaaclab/bin/python \
-  scripts/reinforcement_learning/dsrl/train_lab_pick_dsrl_sac.py \
-  --dsrl_policy outputs/lab_pick_flow_matching/best.pt \
-  --dsrl_policy_type flow_matching \
-  --dsrl_action_mode residual \
-  --dsrl_residual_position_scale_m 0.03 0.03 0.01 \
-  --dsrl_residual_width_scale_m 0.002 \
-  --dsrl_residual_penalty_scale 5.0 \
-  --dsrl_residual_penalty_end_scale 1.0 \
-  --dsrl_residual_penalty_decay_start_step 2000 \
-  --dsrl_residual_penalty_decay_steps 50000 \
-  --dsrl_curriculum_steps 100000 \
-  --dsrl_curriculum_start_xy_m 0.05 0.05 \
-  --dsrl_curriculum_end_xy_m 0.10 0.10 \
-  --dsrl_curriculum_start_yaw_deg 30 \
-  --dsrl_curriculum_end_yaw_deg 45 \
-  --timesteps 200000 --seed 42
-```
-
-Omit `--dsrl_action_mode residual` for existing full-noise checkpoints. Residual and noise checkpoints have different actor output dimensions and must be evaluated with the mode used for training.
-
 Before online fine-tuning, evaluate the frozen BC checkpoint with the same randomized task and 60 Hz control timing:
 
     OMNI_KIT_ACCEPT_EULA=YES \
@@ -147,6 +118,25 @@ Before online fine-tuning, evaluate the frozen BC checkpoint with the same rando
       scripts/reinforcement_learning/dsrl/eval_lab_pick_diffusion_bc.py \
       --policy outputs/lab_pick_diffusion_ddim/checkpoints/last/pretrained_model \
       --num_trials 20 --seed 0 --action_repeat 2 --headless
+
+### Flow Matching BC with a learned gate
+
+For the sim_robot Flow Matching checkpoint, the gated variant adds one scalar
+to the SAC action. The scalar controls a soft blend between native frozen-BC
+Gaussian noise and SAC-proposed DSRL noise. The gate is capped so SAC remains
+a residual correction instead of replacing the frozen BC policy.
+
+```bash
+TACEX_DSRL_TIMESTEPS=200000 \
+  scripts/reinforcement_learning/dsrl/run_lab_pick_flow_gated_sac.sh
+```
+
+The default checkpoint is
+`outputs/lab_pick_flow_bc50_strong48n_pos8_50_final/best.pt`. Training starts
+with a gate of `0.1`, temperature `0.5`, penalty `0.1`, and maximum gate `0.3`;
+`DSRL/gate_mean` and `DSRL/gate_penalty` are written to the normal SKRL/IsaacLab
+logs. Set `TACEX_DSRL_GATE_INIT`, `TACEX_DSRL_GATE_TEMPERATURE`,
+`TACEX_DSRL_GATE_PENALTY`, or `TACEX_DSRL_GATE_MAX` to override the defaults.
 
 ## Validation gates
 

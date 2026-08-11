@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from torchvision.models import ResNet50_Weights, resnet50
 from tqdm import tqdm
 
@@ -132,9 +132,30 @@ def save_checkpoint(
     torch.save(checkpoint, path)
 
 
-def initialize_from_checkpoint(model: SimFlowMatchingPolicy, checkpoint_path: Path) -> None:
+def _normalizer_center_scale(state: dict, key: str) -> tuple[torch.Tensor, torch.Tensor]:
+    stats = state["stats"][key]
+    center = torch.as_tensor(stats["mean"], dtype=torch.float32)
+    scale = torch.as_tensor(stats["std"], dtype=torch.float32)
+    if state.get("mode", "limits") != "standard":
+        lower = torch.as_tensor(stats["min"], dtype=torch.float32)
+        upper = torch.as_tensor(stats["max"], dtype=torch.float32)
+        span = upper - lower
+        eps = state.get("range_eps", 1e-4)
+        center = torch.where(span < eps, lower, (upper + lower) / 2.0)
+        scale = torch.where(span < eps, torch.ones_like(scale), span / 2.0)
+    eps = state.get("range_eps", 1e-4)
+    return center, torch.where(scale < eps, torch.ones_like(scale), scale)
+
+
+def initialize_from_checkpoint(
+    model: SimFlowMatchingPolicy,
+    checkpoint_path: Path,
+    normalizer_state: dict | None = None,
+    preserve_normalization: bool = False,
+) -> None:
     checkpoint = load_checkpoint(checkpoint_path, map_location="cpu")
     source = checkpoint.get("ema", {}).get("averaged_model", checkpoint["model"])
+    source_normalizer = checkpoint.get("normalizer")
     target = model.state_dict()
     compatible = {}
     adapted = []
@@ -197,6 +218,50 @@ def initialize_from_checkpoint(model: SimFlowMatchingPolicy, checkpoint_path: Pa
             adapted.append(name)
             continue
         skipped.append(name)
+
+    if preserve_normalization:
+        if normalizer_state is None or source_normalizer is None:
+            raise ValueError("--preserve-init-normalization requires normalizer statistics in both checkpoints")
+        old_state_center, old_state_scale = _normalizer_center_scale(source_normalizer, "robot0_pos")
+        new_state_center, new_state_scale = _normalizer_center_scale(normalizer_state, "robot0_pos")
+        old_action_center, old_action_scale = _normalizer_center_scale(source_normalizer, "action")
+        new_action_center, new_action_scale = _normalizer_center_scale(normalizer_state, "action")
+
+        # Map new normalized observations back to source-checkpoint coordinates.
+        state_gain = new_state_scale / old_state_scale
+        state_offset = (new_state_center - old_state_center) / old_state_scale
+        state_weight_name = "obs_encoder.state_projector.0.weight"
+        state_bias_name = "obs_encoder.state_projector.0.bias"
+        if state_weight_name in compatible and state_bias_name in compatible:
+            weight = compatible[state_weight_name]
+            compatible[state_weight_name] = weight * state_gain.unsqueeze(0)
+            compatible[state_bias_name] = compatible[state_bias_name] + weight @ state_offset
+            adapted.extend([state_weight_name, state_bias_name])
+
+        # Preserve physical action coordinates across the changed action limits.
+        action_gain = old_action_scale / new_action_scale
+        action_offset = (old_action_center - new_action_center) / new_action_scale
+        input_weight_name = "velocity_net.input_emb.weight"
+        input_bias_name = "velocity_net.input_emb.bias"
+        if input_weight_name in compatible and input_bias_name in compatible:
+            weight = compatible[input_weight_name]
+            compatible[input_weight_name] = weight / action_gain.unsqueeze(0)
+            compatible[input_bias_name] = compatible[input_bias_name] - weight @ (action_offset / action_gain)
+            adapted.extend([input_weight_name, input_bias_name])
+
+        output_weight_name = "velocity_net.head.weight"
+        output_bias_name = "velocity_net.head.bias"
+        if output_weight_name in compatible and output_bias_name in compatible:
+            compatible[output_weight_name] = compatible[output_weight_name] * action_gain.unsqueeze(1)
+            compatible[output_bias_name] = compatible[output_bias_name] * action_gain
+            adapted.extend([output_weight_name, output_bias_name])
+
+        visual_weight_name = "visual_xy_head.1.weight"
+        visual_bias_name = "visual_xy_head.1.bias"
+        if visual_weight_name in compatible and visual_bias_name in compatible:
+            compatible[visual_weight_name] = compatible[visual_weight_name] * action_gain[:2].unsqueeze(1)
+            compatible[visual_bias_name] = compatible[visual_bias_name] * action_gain[:2] + action_offset[:2]
+            adapted.extend([visual_weight_name, visual_bias_name])
     result = model.load_state_dict(compatible, strict=False)
     print(
         f"[INFO] initialized from {checkpoint_path}: loaded={len(compatible)} "
@@ -277,12 +342,34 @@ def main() -> None:
     parser.add_argument("--cache-images", action="store_true")
     parser.add_argument("--include-phase", action="store_true", help="Append normalized episode progress to robot0_pos.")
     parser.add_argument(
+        "--include-demo-mode",
+        action="store_true",
+        help="Append the position-failure/safe/overforce demonstration mode to robot0_pos.",
+    )
+    parser.add_argument("--safe-close-width-m", type=float, default=0.0065)
+    parser.add_argument("--overforce-close-width-m", type=float, default=0.0015)
+    parser.add_argument("--safe-sample-weight", type=float, default=1.0)
+    parser.add_argument("--overforce-sample-weight", type=float, default=1.0)
+    parser.add_argument("--position-failure-sample-weight", type=float, default=1.0)
+    parser.add_argument("--close-projection-onset-width-m", type=float, default=0.02)
+    parser.add_argument("--overforce-projection-phase", type=float, default=0.30)
+    parser.add_argument("--position-failure-offset-m", type=float, default=0.03)
+    parser.add_argument("--position-failure-projection-phase", type=float, default=0.30)
+    parser.add_argument("--safe-demo-mode-probability", type=float, default=0.50)
+    parser.add_argument("--overforce-demo-mode-probability", type=float, default=0.25)
+    parser.add_argument("--position-failure-demo-mode-probability", type=float, default=0.25)
+    parser.add_argument(
         "--visual-xy-loss-weight",
         type=float,
         default=0.0,
         help="Auxiliary image-only loss weight for predicting the first normalized target XY.",
     )
     parser.add_argument("--init-checkpoint", type=Path, default=None, help="Initialize matching weights from an existing checkpoint.")
+    parser.add_argument(
+        "--preserve-init-normalization",
+        action="store_true",
+        help="Remap initialized linear layers so source physical coordinates are preserved under this dataset's normalizer.",
+    )
     parser.add_argument("--max-train-steps", type=int, default=None)
     parser.add_argument("--max-val-steps", type=int, default=None)
     parser.add_argument("--no-ema", action="store_true")
@@ -316,11 +403,23 @@ def main() -> None:
         success_only=args.success_only,
         cache_images=args.cache_images,
         include_phase=args.include_phase,
+        include_demo_mode=args.include_demo_mode,
+        overforce_close_width_m=args.overforce_close_width_m,
+    )
+    train_sampler = WeightedRandomSampler(
+        train_set.sample_weights(
+            safe_weight=args.safe_sample_weight,
+            overforce_weight=args.overforce_sample_weight,
+            position_failure_weight=args.position_failure_sample_weight,
+        ),
+        num_samples=len(train_set),
+        replacement=True,
+        generator=torch.Generator().manual_seed(args.seed),
     )
     train_loader = DataLoader(
         train_set,
         batch_size=args.batch_size,
-        shuffle=True,
+        sampler=train_sampler,
         num_workers=args.num_workers,
         pin_memory=device.type == "cuda",
         persistent_workers=args.num_workers > 0,
@@ -360,7 +459,12 @@ def main() -> None:
     )
     model = SimFlowMatchingPolicy(policy_config).to(device)
     if args.init_checkpoint is not None:
-        initialize_from_checkpoint(model, args.init_checkpoint.expanduser().resolve())
+        initialize_from_checkpoint(
+            model,
+            args.init_checkpoint.expanduser().resolve(),
+            normalizer_state=normalizer.state_dict(),
+            preserve_normalization=args.preserve_init_normalization,
+        )
     initialize_pretrained_image_backbone(model, args.pretrained_image_backbone)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, betas=(0.95, 0.999))
     ema = None if args.no_ema else EMAModel(model, decay=args.ema_decay)
@@ -490,4 +594,3 @@ def main() -> None:
             )
         if args.debug:
             break
-

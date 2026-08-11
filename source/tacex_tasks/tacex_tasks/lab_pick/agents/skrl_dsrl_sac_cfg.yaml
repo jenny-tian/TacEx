@@ -21,8 +21,8 @@ agent:
   learning_starts: 2000
   grad_norm_clip: 10.0
   learn_entropy: true
-  initial_entropy_value: 0.05
-  target_entropy: null
+  initial_entropy_value: 0.005
+  target_entropy: -32.0
   rewards_shaper: null
   mixed_precision: false
 

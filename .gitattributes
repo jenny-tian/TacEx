@@ -1,3 +1,4 @@
 # copied and modified from https://github.com/NVIDIA/warp/blob/main/.gitattributes
 * text=auto
 *.sh text eol=LF
+outputs/lab_pick_flow_bc50_strong48n_pos8_50_final/best.pt filter=lfs diff=lfs merge=lfs -text

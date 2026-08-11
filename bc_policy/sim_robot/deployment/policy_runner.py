@@ -43,13 +43,19 @@ class SimActionChunkPolicyRunner:
         seed: int | None = None,
         resize_images: bool = True,
         visual_xy_lock_phase: float | None = 0.30,
+        use_visual_xy_override: bool = True,
+        demonstration_mode: str = "safe",
+        force_demo_mode_projection: bool = False,
     ) -> None:
-        self.model, self.normalizer, self.checkpoint = load_policy(checkpoint_path, device=device, use_ema=use_ema)
+        self.model, self.normalizer, self.checkpoint = load_policy(
+            checkpoint_path, device=device, use_ema=use_ema
+        )
         self.config = self.model.config
         self.device = next(self.model.parameters()).device
         self.num_inference_steps = num_inference_steps
         self.resize_images = resize_images
         self.visual_xy_lock_phase = visual_xy_lock_phase
+        self.use_visual_xy_override = bool(use_visual_xy_override)
         self.current_phase: float | None = None
         self.locked_visual_xy: np.ndarray | None = None
 
@@ -61,6 +67,33 @@ class SimActionChunkPolicyRunner:
             for key in self.image_keys
         }
         self.include_phase = bool(train_config.get("include_phase", False))
+        self.include_demo_mode = bool(train_config.get("include_demo_mode", False))
+        self.uses_demonstration_mode = self.include_demo_mode or bool(force_demo_mode_projection)
+        # Keep evaluation model-driven by default. Projection is an explicit legacy/debug option.
+        self.project_demo_mode_width = bool(force_demo_mode_projection)
+        self.demonstration_mode = self._validate_demonstration_mode(demonstration_mode)
+        self.safe_close_width_m = float(train_config.get("safe_close_width_m", 0.0065))
+        self.overforce_close_width_m = float(train_config.get("overforce_close_width_m", 0.0055))
+        self.close_projection_onset_width_m = float(
+            train_config.get("close_projection_onset_width_m", 0.02)
+        )
+        self.overforce_projection_phase = float(train_config.get("overforce_projection_phase", 0.30))
+        self.position_failure_offset_m = float(train_config.get("position_failure_offset_m", 0.03))
+        self.position_failure_projection_phase = float(
+            train_config.get("position_failure_projection_phase", 0.30)
+        )
+        self.demo_mode_names = ("position_failure", "safe", "overforce")
+        self.demo_mode_probabilities = np.asarray(
+            [
+                train_config.get("position_failure_demo_mode_probability", 0.25),
+                train_config.get("safe_demo_mode_probability", 0.50),
+                train_config.get("overforce_demo_mode_probability", 0.25),
+            ],
+            dtype=np.float64,
+        )
+        if np.any(self.demo_mode_probabilities < 0.0) or self.demo_mode_probabilities.sum() <= 0.0:
+            raise ValueError("Demonstration mode probabilities must be non-negative with positive sum.")
+        self.demo_mode_probabilities /= self.demo_mode_probabilities.sum()
 
         self.state_history: deque[np.ndarray] = deque(maxlen=self.config.n_state_obs_steps)
         self.image_history: dict[str, deque[np.ndarray]] = {
@@ -88,7 +121,26 @@ class SimActionChunkPolicyRunner:
     def _copy_frame(frame: np.ndarray) -> np.ndarray:
         return np.asarray(frame).copy()
 
-    def reset(self) -> None:
+    @staticmethod
+    def _validate_demonstration_mode(mode: str) -> str:
+        if mode not in {"safe", "overforce", "position_failure"}:
+            raise ValueError(
+                "demonstration_mode must be 'safe', 'overforce', or 'position_failure'"
+            )
+        return mode
+
+    def reset(self, demonstration_mode: str | None = None) -> None:
+        if demonstration_mode is not None:
+            self.demonstration_mode = self._validate_demonstration_mode(demonstration_mode)
+        elif getattr(self, "include_demo_mode", False):
+            if self.generator is None:
+                sample = float(np.random.random())
+            else:
+                sample = float(torch.rand((), device=self.device, generator=self.generator).item())
+            mode_index = int(
+                np.searchsorted(np.cumsum(self.demo_mode_probabilities), sample, side="right")
+            )
+            self.demonstration_mode = self.demo_mode_names[min(mode_index, 2)]
         self.state_history.clear()
         for history in self.image_history.values():
             history.clear()
@@ -101,14 +153,19 @@ class SimActionChunkPolicyRunner:
             self.current_phase = phase
             state = self._prepare_state(np.asarray(obs["robot0_pos"]), phase)
             images = {
-                key: self._prepare_image(np.asarray(obs[key]), image_key=key) for key in self.image_keys
+                key: self._prepare_image(np.asarray(obs[key]), image_key=key)
+                for key in self.image_keys
             }
         else:
             if len(self.image_keys) != 1:
                 raise ValueError("Multi-camera policy observations must be provided as a dictionary.")
             self.current_phase = obs.phase
             state = self._prepare_state(obs.robot0_pos, obs.phase)
-            images = {self.image_keys[0]: self._prepare_image(obs.robot0_image, image_key=self.image_keys[0])}
+            images = {
+                self.image_keys[0]: self._prepare_image(
+                    obs.robot0_image, image_key=self.image_keys[0]
+                )
+            }
 
         if not self.state_history:
             for _ in range(self.config.n_state_obs_steps):
@@ -124,12 +181,25 @@ class SimActionChunkPolicyRunner:
 
     def _prepare_state(self, state: np.ndarray, phase: float | None = None) -> np.ndarray:
         state = np.asarray(state, dtype=np.float32).reshape(-1)
-        if self.include_phase and state.shape[0] == self.config.robot0_pos_dim - 1:
-            if phase is None:
-                raise ValueError("Phase-conditioned policy requires observation field 'phase' in [0, 1].")
-            state = np.concatenate((state, np.asarray([np.clip(phase, 0.0, 1.0)], dtype=np.float32)))
+        include_demo_mode = bool(getattr(self, "include_demo_mode", False))
+        base_dim = self.config.robot0_pos_dim - int(self.include_phase) - int(include_demo_mode)
+        if state.shape[0] == base_dim:
+            extras = []
+            if self.include_phase:
+                if phase is None:
+                    raise ValueError(
+                        "Phase-conditioned policy requires observation field 'phase' in [0, 1]."
+                    )
+                extras.append(float(np.clip(phase, 0.0, 1.0)))
+            if include_demo_mode:
+                mode = getattr(self, "demonstration_mode", "safe")
+                extras.append({"position_failure": -1.0, "safe": 0.0, "overforce": 1.0}[mode])
+            if extras:
+                state = np.concatenate((state, np.asarray(extras, dtype=np.float32)))
         if state.shape[0] != self.config.robot0_pos_dim:
-            raise ValueError(f"robot0_pos must have shape ({self.config.robot0_pos_dim},), got {state.shape}")
+            raise ValueError(
+                f"robot0_pos must have shape ({self.config.robot0_pos_dim},), got {state.shape}"
+            )
         return state
 
     def _prepare_image(self, image: np.ndarray, image_key: str = "robot0_image") -> np.ndarray:
@@ -137,7 +207,7 @@ class SimActionChunkPolicyRunner:
         if image.ndim == 2:
             image = image[:, :, None]
         if image.ndim != 3:
-            raise ValueError(f"robot0_image must be HWC or CHW image, got shape {image.shape}")
+            raise ValueError(f"{image_key} must be HWC or CHW image, got shape {image.shape}")
 
         if image.shape[0] in {1, 3, 4} and image.shape[-1] not in {1, 3, 4}:
             image = np.transpose(image, (1, 2, 0))
@@ -146,12 +216,14 @@ class SimActionChunkPolicyRunner:
         elif image.shape[-1] == 4:
             image = image[:, :, :3]
         elif image.shape[-1] != 3:
-            raise ValueError(f"robot0_image must have 1, 3, or 4 channels, got shape {image.shape}")
+            raise ValueError(f"{image_key} must have 1, 3, or 4 channels, got shape {image.shape}")
 
         expected_image_hw = self.expected_image_hws.get(image_key)
         if expected_image_hw is not None and tuple(image.shape[:2]) != expected_image_hw:
             if not self.resize_images:
-                raise ValueError(f"{image_key} expected HxW={expected_image_hw}, got {tuple(image.shape[:2])}")
+                raise ValueError(
+                    f"{image_key} expected HxW={expected_image_hw}, got {tuple(image.shape[:2])}"
+                )
             image = self._resize_hwc(image, expected_image_hw)
 
         image = image.astype(np.float32)
@@ -191,6 +263,29 @@ class SimActionChunkPolicyRunner:
             model_obs[key] = torch.from_numpy(image).unsqueeze(0).to(self.device)
         return model_obs
 
+    def _apply_demo_mode_width(self, action: np.ndarray) -> np.ndarray:
+        if not getattr(self, "project_demo_mode_width", False):
+            return action
+        action = action.copy()
+        closing = action[:, -1] < self.close_projection_onset_width_m
+        if self.demonstration_mode == "position_failure":
+            if (
+                getattr(self, "current_phase", None) is not None
+                and self.current_phase >= self.position_failure_projection_phase
+            ):
+                action[:, 1] += self.position_failure_offset_m
+            action[closing, -1] = np.maximum(action[closing, -1], self.safe_close_width_m)
+            return action
+        if self.demonstration_mode == "overforce":
+            if (
+                getattr(self, "current_phase", None) is not None
+                and self.current_phase >= self.overforce_projection_phase
+            ):
+                action[:, -1] = np.minimum(action[:, -1], self.overforce_close_width_m)
+        else:
+            action[closing, -1] = np.maximum(action[closing, -1], self.safe_close_width_m)
+        return action
+
     @torch.inference_mode()
     def predict_action_chunk(
         self,
@@ -212,7 +307,7 @@ class SimActionChunkPolicyRunner:
         )
         action_norm = result["action"].detach().cpu().numpy()[0]
         visual_xy = result.get("visual_xy")
-        if visual_xy is not None:
+        if visual_xy is not None and getattr(self, "use_visual_xy_override", True):
             current_xy = visual_xy.detach().cpu().numpy()[0]
             should_lock = (
                 self.visual_xy_lock_phase is not None
@@ -224,7 +319,8 @@ class SimActionChunkPolicyRunner:
             selected_xy = self.locked_visual_xy if self.locked_visual_xy is not None else current_xy
             action_norm = action_norm.copy()
             action_norm[:, :2] = selected_xy
-        return self.normalizer.unnormalize_numpy("action", action_norm)
+        action = self.normalizer.unnormalize_numpy("action", action_norm)
+        return self._apply_demo_mode_width(action)
 
 
 def format_action_chunk(action_chunk: np.ndarray, precision: int = 5) -> str:
@@ -237,4 +333,3 @@ def format_action_chunk(action_chunk: np.ndarray, precision: int = 5) -> str:
             np.array2string(action_chunk, precision=precision, suppress_small=False),
         ]
     )
-

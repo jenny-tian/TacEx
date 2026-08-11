@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
@@ -24,7 +26,9 @@ class LabPickEnvCfg(DirectRLEnvCfg):
     terminate_object_drop_height: float = 0.010
     terminate_object_xy_distance: float = 0.30
     terminate_ee_workspace_margin: float = 0.05
-    terminate_break_force_threshold_n: float = 6.0
+    # Glass failure is based on the larger individual fingertip load. 3.8 N
+    # separates the safe and over-force scripted demonstrations used by BC.
+    terminate_break_force_threshold_n: float = 3.8
     contact_force_n_per_mm: float = 8.0
     contact_torque_arm_m: float = 0.018
     marker2d_rows: int = 14
@@ -35,13 +39,14 @@ class LabPickEnvCfg(DirectRLEnvCfg):
     success_lift_height: float = 0.200
     scripted_lift_assist_on_contact: bool = False
     scripted_nominal_ee_quat_b: tuple[float, float, float, float] = (0.0, 1.0, 0.0, 0.0)
-    scripted_grasp_width_noise_fraction: float = 0.10
     reset_hold_steps: int = 24
     scripted_lift_steps: int = 180
+    scripted_slide_close_width_m: float = 0.0065
     tactile_threshold_mm: float = 0.0
     randomize_labware_position: bool = True
-    labware_pos_randomization_xy: tuple[float, float] = (0.05, 0.05)
-    labware_yaw_randomization: float = 3.1415/180*30
+    # Half ranges: x/y are sampled in [-10 cm, 10 cm], yaw in [-45 deg, 45 deg].
+    labware_pos_randomization_xy: tuple[float, float] = (0.10, 0.10)
+    labware_yaw_randomization: float = math.radians(45.0)
 
     # RL-only behavior is opt-in so the existing absolute 10-D CAFE/BC action
     # interface remains unchanged for data collection and policy deployment.
@@ -58,6 +63,7 @@ class LabPickEnvCfg(DirectRLEnvCfg):
     rl_both_contact_reward: float = 3.0
     rl_success_reward: float = 50.0
     rl_failure_penalty: float = 25.0
+    rl_timeout_penalty: float = 0.0
     rl_force_penalty_scale: float = 0.25
     rl_action_penalty_scale: float = 0.001
 
@@ -359,3 +365,9 @@ class LabPickSlideDSRLBaseEnvCfg(LabPickSlideEnvCfg):
     rl_shaped_reward = True
     rl_terminate_on_success = True
     rl_align_cafe_action_yaw = True
+    rl_reach_reward_scale = 40.0
+    rl_first_contact_reward = 4.0
+    rl_both_contact_reward = 6.0
+    rl_success_reward = 60.0
+    rl_failure_penalty = 20.0
+    rl_timeout_penalty = 10.0

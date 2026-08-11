@@ -43,12 +43,6 @@ class LabPickEnv(DirectRLEnv):
 
         self.ik_commands = torch.zeros((self.num_envs, self._ik_controller.action_dim), device=self.device)
         self.gripper_width = torch.full((self.num_envs, len(self._finger_joint_ids)), 0.04, device=self.device)
-        self.scripted_close_width = torch.full(
-            (self.num_envs, 1),
-            self._nominal_scripted_close_width(),
-            dtype=torch.float32,
-            device=self.device,
-        )
         self.initial_object_height = self.labware.data.root_pos_w[:, 2].clone()
         self.initial_object_pos_b = self.labware.data.root_pos_w - self._robot.data.root_link_pos_w
         self.has_touched = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -376,6 +370,9 @@ class LabPickEnv(DirectRLEnv):
             | flags["object_broken"]
         )
         reward -= self.cfg.rl_failure_penalty * failed.float()
+        time_out = self.episode_length_buf >= self.max_episode_length - 1
+        unsuccessful_time_out = time_out & ~flags["success"] & ~failed
+        reward -= self.cfg.rl_timeout_penalty * unsuccessful_time_out.float()
         force_excess = torch.clamp(flags["break_force_n"] - self.cfg.rl_safe_force_n, min=0.0)
         reward -= self.cfg.rl_force_penalty_scale * force_excess.square()
         reward -= self.cfg.rl_action_penalty_scale * self._rl_last_actions.square().mean(dim=1)
@@ -393,6 +390,7 @@ class LabPickEnv(DirectRLEnv):
             "LabPick/broken_terminal_step": flags["object_broken"].float().mean(),
             "LabPick/success_rate": flags["success"].float().mean(),
             "LabPick/broken_rate": flags["object_broken"].float().mean(),
+            "LabPick/timeout_terminal_step": unsuccessful_time_out.float().mean(),
         }
         return reward
 
@@ -444,7 +442,6 @@ class LabPickEnv(DirectRLEnv):
         self.initial_object_pos_b[env_ids] = root_state[:, :3] - self._robot.data.root_link_pos_w[env_ids]
         self.step_count[env_ids] = 0
         self.gripper_width[env_ids] = 0.04
-        self.scripted_close_width[env_ids] = self._sample_scripted_close_width(len(env_ids))
         self.labware_reset_pos_w[env_ids] = root_state[:, :3]
         self.labware_reset_quat_w[env_ids] = root_state[:, 3:7]
         self.last_object_pos_b[env_ids] = self.initial_object_pos_b[env_ids]
@@ -703,34 +700,18 @@ class LabPickEnv(DirectRLEnv):
         rgb = rgb.permute(0, 2, 3, 1).clamp(0, 255).byte()
         return rgb.detach().clone()
 
-    def _nominal_scripted_close_width(self) -> float:
-        if self.labware_name == "cup":
-            return 0.020
-        if self.labware_name == "slide":
-            return 0.006
-        return 0.0
-
-    def _sample_scripted_close_width(self, count: int) -> torch.Tensor:
-        nominal_width = self._nominal_scripted_close_width()
-        width = torch.full((count, 1), nominal_width, dtype=torch.float32, device=self.device)
-        noise_fraction = float(self.cfg.scripted_grasp_width_noise_fraction)
-        if noise_fraction > 0.0 and nominal_width > 0.0:
-            noise = 2.0 * torch.rand((count, 1), dtype=torch.float32, device=self.device) - 1.0
-            width = width * (1.0 + noise_fraction * noise)
-        return width.clamp(0.0, 0.04)
-
-    def command_pick_state_machine(self):
+    def command_pick_state_machine(self, slide_close_width_m: float | None = None):
         center_target_b = self.initial_object_pos_b.clone()
         target_quat_b = self.scripted_target_quat_b
         touch_left, touch_right = self.tactile_contact_depths()
         touched = (touch_left > self.cfg.tactile_threshold_mm) | (touch_right > self.cfg.tactile_threshold_mm)
         self.has_touched |= touched
-        close_width = self.scripted_close_width
 
         if self.labware_name == "cup":
             hover_height = 0.040
             grasp_height = 0.030
             lift_height = 0.08
+            close_width = 0.020
             close_start = 220
             close_end = 500
             squeeze_steps = 40
@@ -738,6 +719,11 @@ class LabPickEnv(DirectRLEnv):
             hover_height = 0.048
             grasp_height = 0.0006
             lift_height = 0.25
+            close_width = (
+                self.cfg.scripted_slide_close_width_m
+                if slide_close_width_m is None
+                else float(slide_close_width_m)
+            )
             close_start = 300
             close_end = 420
             squeeze_steps = 180
@@ -745,6 +731,7 @@ class LabPickEnv(DirectRLEnv):
             hover_height = 0.046
             grasp_height = 0.010
             lift_height = 0.08
+            close_width = 0.0
             close_start = 180
             close_end = 600
             squeeze_steps = 60
@@ -764,17 +751,17 @@ class LabPickEnv(DirectRLEnv):
                 center_target_b[:, 2] += max(grasp_height - 0.0015 * close_progress, 0.0)
             else:
                 center_target_b[:, 2] += grasp_height
-            self.gripper_width[:] = (0.04 - (0.04 - close_width) * close_progress).expand_as(self.gripper_width)
+            self.gripper_width[:] = 0.04 - (0.04 - close_width) * close_progress
         elif phase < close_end + squeeze_steps:
             center_target_b[:, 2] += grasp_height
-            self.gripper_width[:] = close_width.expand_as(self.gripper_width)
+            self.gripper_width[:] = close_width
         else:
             lift_progress = min(max((phase - lift_start) / max(self.cfg.scripted_lift_steps, 1), 0.0), 1.0)
             target_lift = torch.full((self.num_envs,), grasp_height, dtype=center_target_b.dtype, device=self.device)
             if bool(self.has_touched.any().item()):
                 target_lift[self.has_touched] = grasp_height + (lift_height - grasp_height) * lift_progress
             center_target_b[:, 2] += target_lift
-            self.gripper_width[:] = close_width.expand_as(self.gripper_width)
+            self.gripper_width[:] = close_width
 
         target_pos_b = centered_tool_target(
             center_target_b,

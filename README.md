@@ -111,7 +111,7 @@ In simulation, `ft` is generated from Isaac Lab `ContactSensor` readings on the 
 - Labware reset pose is randomized each episode for better behavior-cloning generalization.
 - A slide demonstration is marked successful when the labware is lifted at least `0.20 m` above its reset height.
 - The scripted slide expert trajectory lifts to `0.25 m`.
-- A demonstration is terminated as broken/failed if the net fingertip contact force exceeds `6 N`.
+- A demonstration is terminated as broken/failed if the larger individual fingertip load exceeds `3.8 N`.
 
 ### Collect one slide demonstration
 
@@ -317,37 +317,20 @@ The DSRL launcher automatically selects
 requires the isolated `.cache/lerobot_inference` dependencies described in
 [`scripts/reinforcement_learning/dsrl/README.md`](scripts/reinforcement_learning/dsrl/README.md).
 
-The recommended Flow Matching setup uses a 4-D normalized residual
-`[dx, dy, dz, dwidth]` instead of the legacy 320-D initial-noise action. The
-residual mean starts at zero, so the initial deterministic policy is the frozen BC, and the reset
-distribution expands from +/-5 cm and +/-30 degrees to +/-10 cm and +/-45
-degrees over the first 100k outer steps. The recommended penalty stays at `5.0` during SAC warm-up, then decays to `1.0` over 50k steps. This anchors early behavior near frozen BC while allowing larger useful corrections after the critic becomes informative:
+The Flow Matching setup uses the 320-D initial-noise action plus one learned
+gate. The gate blends native frozen-BC noise with SAC-proposed noise, starts at
+`0.1`, and is capped at `0.3` so SAC remains a correction instead of replacing
+the BC policy. Training and evaluation both use the full +/-10 cm and +/-45
+degree reset distribution; there is no position curriculum.
 
 ```bash
-env -u LD_PRELOAD -u VGL_ISACTIVE -u VGL_DISPLAY -u DISPLAY \
-  "$ISAAC_PYTHON" scripts/reinforcement_learning/dsrl/train_lab_pick_dsrl_sac.py \
-  --dsrl_policy outputs/lab_pick_flow_matching/best.pt \
-  --dsrl_policy_type flow_matching \
-  --dsrl_action_mode residual \
-  --dsrl_residual_position_scale_m 0.03 0.03 0.01 \
-  --dsrl_residual_width_scale_m 0.002 \
-  --dsrl_residual_penalty_scale 5.0 \
-  --dsrl_residual_penalty_end_scale 1.0 \
-  --dsrl_residual_penalty_decay_start_step 2000 \
-  --dsrl_residual_penalty_decay_steps 50000 \
-  --dsrl_curriculum_steps 100000 \
-  --dsrl_curriculum_start_xy_m 0.05 0.05 \
-  --dsrl_curriculum_end_xy_m 0.10 0.10 \
-  --dsrl_curriculum_start_yaw_deg 30 \
-  --dsrl_curriculum_end_yaw_deg 45 \
-  --timesteps 200000 \
-  --seed 42
+TACEX_DSRL_TIMESTEPS=200000 \
+  scripts/reinforcement_learning/dsrl/run_lab_pick_flow_gated_sac.sh
 ```
 
 Checkpoints and TensorBoard logs are written below
 `logs/skrl/lab_pick_slide/`. To continue a run, pass the saved checkpoint to
-the underlying SKRL entry point, keep the residual settings unchanged, and set
-`--dsrl_curriculum_start_step` to the already completed outer-step count:
+the underlying SKRL entry point and keep the gate settings unchanged:
 
 ```bash
 env -u LD_PRELOAD -u VGL_ISACTIVE -u VGL_DISPLAY -u DISPLAY \
@@ -355,45 +338,29 @@ env -u LD_PRELOAD -u VGL_ISACTIVE -u VGL_DISPLAY -u DISPLAY \
   --task TacEx-LabPick-Slide-DSRL-Base-v0 \
   --num_envs 1 \
   --headless --enable_cameras \
-  --dsrl_policy outputs/lab_pick_flow_matching/best.pt \
+  --dsrl_policy outputs/lab_pick_flow_bc50_strong48n_pos8_50_final/best.pt \
   --dsrl_policy_type flow_matching \
-  --dsrl_action_mode residual \
-  --dsrl_residual_position_scale_m 0.03 0.03 0.01 \
-  --dsrl_residual_width_scale_m 0.002 \
-  --dsrl_residual_penalty_scale 5.0 \
-  --dsrl_residual_penalty_end_scale 1.0 \
-  --dsrl_residual_penalty_decay_start_step 2000 \
-  --dsrl_residual_penalty_decay_steps 50000 \
-  --dsrl_curriculum_steps 100000 \
-  --dsrl_curriculum_start_step <completed_outer_steps> \
-  --dsrl_curriculum_start_xy_m 0.05 0.05 \
-  --dsrl_curriculum_end_xy_m 0.10 0.10 \
-  --dsrl_curriculum_start_yaw_deg 30 \
-  --dsrl_curriculum_end_yaw_deg 45 \
+  --dsrl_gate --dsrl_gate_init 0.1 \
+  --dsrl_gate_temperature 0.5 --dsrl_gate_penalty 0.1 \
+  --dsrl_gate_max 0.3 \
   --checkpoint logs/skrl/lab_pick_slide/<run>/checkpoints/agent_<step>.pt \
   --timesteps 100000
 ```
 
-Evaluate a residual checkpoint on the final wide distribution with the same
-residual scales:
+Evaluate a gated checkpoint on the same full distribution:
 
 ```bash
 env -u LD_PRELOAD -u VGL_ISACTIVE -u VGL_DISPLAY -u DISPLAY \
   "$ISAAC_PYTHON" scripts/reinforcement_learning/dsrl/eval_lab_pick_dsrl_sac.py \
-  --policy outputs/lab_pick_flow_matching/best.pt \
+  --policy outputs/lab_pick_flow_bc50_strong48n_pos8_50_final/best.pt \
   --checkpoint logs/skrl/lab_pick_slide/<run>/checkpoints/agent_<step>.pt \
-  --dsrl_action_mode residual \
-  --dsrl_residual_position_scale_m 0.03 0.03 0.01 \
-  --dsrl_residual_width_scale_m 0.002 \
+  --gate --gate_temperature 0.5 --gate_penalty 0.1 --gate_max 0.3 \
   --labware_random_xy 0.10 0.10 \
   --labware_random_yaw 0.7853981634 \
   --num_trials 50 --seed 0 --policy_seed 42 \
-  --output logs/lab_pick_eval/sac_residual_wide_seed0_49.json \
+  --output logs/lab_pick_eval/sac_gated_wide_seed0_49.json \
   --headless
 ```
-
-Existing full-noise checkpoints remain supported by omitting
-`--dsrl_action_mode residual`; `noise` is the compatibility default.
 
 Use `systemd-run --user` for long unattended jobs. Do not terminate unrelated
 Isaac or GPU processes when checking a running job; inspect the unit with:

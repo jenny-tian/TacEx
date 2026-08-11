@@ -24,6 +24,7 @@ def write_record(
     success: bool,
     value: int,
     observation_timing: str | None = None,
+    demonstration_mode: str | None = None,
 ) -> Path:
     record = root / f"record_{index:06d}"
     aligned = record / "aligned"
@@ -44,6 +45,8 @@ def write_record(
     }
     if observation_timing is not None:
         metadata["observation_timing"] = np.asarray(observation_timing)
+    if demonstration_mode is not None:
+        metadata["demonstration_mode"] = np.asarray(demonstration_mode)
     np.savez(record / "metadata.npz", **metadata)
     return record
 
@@ -131,6 +134,56 @@ def test_phase_conditioning_appends_normalized_progress(tmp_path):
     np.testing.assert_allclose(sample["obs"]["robot0_pos"][:, -1].numpy(), [-1.0, 0.0])
 
 
+def test_demo_mode_conditioning_distinguishes_three_outcome_modes(tmp_path):
+    import sys
+
+    policy_root = str(ROOT / "bc_policy")
+    if policy_root not in sys.path:
+        sys.path.insert(0, policy_root)
+    from sim_robot.data.sequence_dataset import SimRobotHDF5SequenceDataset, compute_normalizer
+
+    converter = load_converter()
+    records = tmp_path / "records"
+    write_record(
+        records, 0, success=True, value=3, observation_timing="pre_action", demonstration_mode="safe"
+    )
+    write_record(
+        records,
+        1,
+        success=False,
+        value=7,
+        observation_timing="pre_action",
+        demonstration_mode="overforce",
+    )
+    write_record(
+        records,
+        2,
+        success=False,
+        value=9,
+        observation_timing="pre_action",
+        demonstration_mode="position_failure",
+    )
+    output = tmp_path / "modes.hdf5"
+    converter.convert_records(records, output, success_only=False)
+
+    episode_ids = np.asarray([0, 1, 2])
+    normalizer = compute_normalizer(output, episode_ids, include_demo_mode=True)
+    dataset = SimRobotHDF5SequenceDataset(
+        output, episode_ids, normalizer, include_demo_mode=True
+    )
+
+    assert dataset.robot0_pos_dim == 11
+    np.testing.assert_allclose(dataset[0]["obs"]["robot0_pos"][:, -1].numpy(), 0.0)
+    overforce_index = dataset.episodes[0].length
+    np.testing.assert_allclose(
+        dataset[overforce_index]["obs"]["robot0_pos"][:, -1].numpy(), 1.0
+    )
+    position_index = dataset.episodes[0].length + dataset.episodes[1].length
+    np.testing.assert_allclose(
+        dataset[position_index]["obs"]["robot0_pos"][:, -1].numpy(), -1.0
+    )
+
+
 def test_phase_conditioned_runner_appends_phase():
     import sys
     from types import SimpleNamespace
@@ -147,6 +200,95 @@ def test_phase_conditioned_runner_appends_phase():
     state = runner._prepare_state(np.zeros(10, dtype=np.float32), phase=0.25)
     assert state.shape == (11,)
     assert state[-1] == np.float32(0.25)
+
+
+def test_runner_appends_phase_and_demo_mode():
+    import sys
+    from types import SimpleNamespace
+
+    policy_root = str(ROOT / "bc_policy")
+    if policy_root not in sys.path:
+        sys.path.insert(0, policy_root)
+    from sim_robot.deployment.policy_runner import SimActionChunkPolicyRunner
+
+    runner = SimActionChunkPolicyRunner.__new__(SimActionChunkPolicyRunner)
+    runner.include_phase = True
+    runner.include_demo_mode = True
+    runner.demonstration_mode = "overforce"
+    runner.config = SimpleNamespace(robot0_pos_dim=12)
+
+    state = runner._prepare_state(np.zeros(10, dtype=np.float32), phase=0.25)
+    np.testing.assert_allclose(state[-2:], [0.25, 1.0])
+
+    runner.demonstration_mode = "position_failure"
+    state = runner._prepare_state(np.zeros(10, dtype=np.float32), phase=0.25)
+    np.testing.assert_allclose(state[-2:], [0.25, -1.0])
+
+    runner.project_demo_mode_width = True
+    state = runner._prepare_state(np.zeros(10, dtype=np.float32), phase=0.25)
+    np.testing.assert_allclose(state[-2:], [0.25, -1.0])
+
+
+def test_runner_projects_conditioned_close_width_without_changing_open_actions():
+    import sys
+
+    policy_root = str(ROOT / "bc_policy")
+    if policy_root not in sys.path:
+        sys.path.insert(0, policy_root)
+    from sim_robot.deployment.policy_runner import SimActionChunkPolicyRunner
+
+    runner = SimActionChunkPolicyRunner.__new__(SimActionChunkPolicyRunner)
+    runner.include_demo_mode = True
+    runner.project_demo_mode_width = True
+    runner.safe_close_width_m = 0.0065
+    runner.overforce_close_width_m = 0.0055
+    runner.overforce_projection_phase = 0.30
+    runner.position_failure_offset_m = 0.03
+    runner.position_failure_projection_phase = 0.30
+    runner.current_phase = 0.20
+    runner.close_projection_onset_width_m = 0.02
+    actions = np.zeros((3, 10), dtype=np.float32)
+    actions[:, -1] = [0.04, 0.01, 0.004]
+
+    runner.demonstration_mode = "safe"
+    safe = runner._apply_demo_mode_width(actions)
+    np.testing.assert_allclose(safe[:, -1], [0.04, 0.01, 0.0065])
+
+    runner.demonstration_mode = "overforce"
+    overforce = runner._apply_demo_mode_width(actions)
+    np.testing.assert_allclose(overforce[:, -1], [0.04, 0.01, 0.004])
+    runner.current_phase = 0.35
+    overforce = runner._apply_demo_mode_width(actions)
+    np.testing.assert_allclose(overforce[:, -1], [0.0055, 0.0055, 0.004])
+
+    runner.demonstration_mode = "position_failure"
+    runner.current_phase = 0.50
+    position_failure = runner._apply_demo_mode_width(actions)
+    np.testing.assert_allclose(position_failure[:, 1], 0.03)
+    np.testing.assert_allclose(position_failure[:, -1], [0.04, 0.01, 0.0065])
+
+
+def test_mode_conditioned_checkpoint_does_not_force_action_projection(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    import torch
+
+    policy_root = str(ROOT / "bc_policy")
+    if policy_root not in sys.path:
+        sys.path.insert(0, policy_root)
+    from sim_robot.deployment import policy_runner
+
+    model = SimpleNamespace(
+        config=SimpleNamespace(image_keys=("robot0_image",), n_state_obs_steps=2, n_image_obs_steps=2),
+        parameters=lambda: iter([torch.zeros(1)]),
+    )
+    checkpoint = {"train_config": {"include_demo_mode": True}}
+    monkeypatch.setattr(policy_runner, "load_policy", lambda *args, **kwargs: (model, object(), checkpoint))
+
+    runner = policy_runner.SimActionChunkPolicyRunner("unused.pt", device="cpu")
+    assert runner.include_demo_mode is True
+    assert runner.project_demo_mode_width is False
 
 
 def test_multi_camera_dataset_returns_wrist_and_third_images(tmp_path):
@@ -289,9 +431,11 @@ def test_runner_locks_visual_xy_at_phase_threshold_and_reset_clears_lock():
 
 
 
-def _load_dsrl_wrapper(monkeypatch):
+def test_dsrl_episode_metrics_are_not_terminal_step_frequency(monkeypatch):
     import sys
     import types
+
+    import torch
 
     module_names = (
         "lerobot",
@@ -311,29 +455,10 @@ def _load_dsrl_wrapper(monkeypatch):
         sys.path.insert(0, dsrl_root)
     from lab_pick_dsrl_wrapper import LabPickDSRLWrapper
 
-    return LabPickDSRLWrapper
-
-
-def test_dsrl_episode_metrics_are_not_terminal_step_frequency(monkeypatch):
-    import types
-
-    import torch
-
-    LabPickDSRLWrapper = _load_dsrl_wrapper(monkeypatch)
     wrapper = LabPickDSRLWrapper.__new__(LabPickDSRLWrapper)
     wrapper._completed_episodes = 0
     wrapper._successful_episodes = 0
     wrapper._broken_episodes = 0
-    wrapper.action_mode = "noise"
-    wrapper._curriculum_progress = 0.0
-    wrapper.env = types.SimpleNamespace(
-        unwrapped=types.SimpleNamespace(
-            cfg=types.SimpleNamespace(
-                labware_pos_randomization_xy=(0.05, 0.05),
-                labware_yaw_randomization=0.5235987756,
-            )
-        )
-    )
 
     ongoing = wrapper._add_episode_metrics(
         {"log": {"LabPick/success_terminal_step": torch.tensor([0.0])}},
@@ -358,94 +483,22 @@ def test_dsrl_episode_metrics_are_not_terminal_step_frequency(monkeypatch):
     assert failure["log"]["LabPick/episode_broken_rate"] == 0.5
     assert failure["log"]["LabPick/completed_episodes"] == 2.0
 
+    wrapper.gate_enabled = True
+    wrapper.noise_dim = 4
+    wrapper.gate_temperature = 0.5
+    wrapper.gate_penalty = 0.1
+    wrapper.gate_max = 0.3
+    flat_action = torch.zeros((1, 5))
+    native_noise = torch.ones((1, 4))
+    blended, gate, returned_native = wrapper._blend_gated_noise(flat_action, native_noise=native_noise)
+    torch.testing.assert_close(gate, torch.full((1, 1), 0.15))
+    torch.testing.assert_close(blended, torch.full((1, 4), 0.85))
+    torch.testing.assert_close(returned_native, native_noise)
 
-def test_dsrl_flow_residual_offsets_xyz_and_only_closed_width(monkeypatch):
-    import torch
-
-    LabPickDSRLWrapper = _load_dsrl_wrapper(monkeypatch)
-    wrapper = LabPickDSRLWrapper.__new__(LabPickDSRLWrapper)
-    wrapper.residual_position_scale_m = (0.03, 0.02, 0.01)
-    wrapper.residual_width_scale_m = 0.002
-
-    action_chunk = torch.zeros(3, 10)
-    action_chunk[:, 9] = torch.tensor([0.040, 0.037, 0.0065])
-    original = action_chunk.clone()
-    adjusted = wrapper._apply_flow_residual(
-        action_chunk,
-        torch.tensor([[1.0, -0.5, 0.5, -1.0]]),
-    )
-
-    torch.testing.assert_close(
-        adjusted[:, :3],
-        torch.tensor([[0.03, -0.01, 0.005]]).expand(3, -1),
-    )
-    torch.testing.assert_close(adjusted[:, 9], torch.tensor([0.040, 0.035, 0.006]))
-    torch.testing.assert_close(action_chunk, original)
-
-
-def test_dsrl_residual_penalty_anchors_frozen_bc_prior(monkeypatch):
-    import torch
-
-    LabPickDSRLWrapper = _load_dsrl_wrapper(monkeypatch)
-    wrapper = LabPickDSRLWrapper.__new__(LabPickDSRLWrapper)
-    wrapper.action_mode = "residual"
-    wrapper.residual_penalty_scale = 4.0
-    wrapper.residual_penalty_end_scale = 1.0
-    wrapper.residual_penalty_decay_start_step = 10
-    wrapper.residual_penalty_decay_steps = 20
-    wrapper._outer_steps = 0
-    info = {"log": {}}
-    result = (
-        torch.zeros(1, 23),
-        torch.tensor([10.0]),
-        torch.zeros(1, dtype=torch.bool),
-        torch.zeros(1, dtype=torch.bool),
-        info,
-    )
-
-    adjusted = wrapper._apply_residual_penalty(result, torch.ones(1, 4))
-
-    torch.testing.assert_close(adjusted[1], torch.tensor([6.0]))
-    torch.testing.assert_close(info["dsrl/residual_penalty"], torch.tensor(4.0))
-    torch.testing.assert_close(info["log"]["LabPick/residual_penalty"], torch.tensor(4.0))
-    torch.testing.assert_close(info["dsrl/residual_penalty_scale"], torch.tensor(4.0))
-
-    wrapper._outer_steps = 20
-    assert wrapper._current_residual_penalty_scale() == 2.5
-    wrapper._outer_steps = 40
-    assert wrapper._current_residual_penalty_scale() == 1.0
-
-
-def test_dsrl_randomization_curriculum_interpolates_and_saturates(monkeypatch):
-    import math
-    import types
-
-    LabPickDSRLWrapper = _load_dsrl_wrapper(monkeypatch)
-    wrapper = LabPickDSRLWrapper.__new__(LabPickDSRLWrapper)
-    wrapper.curriculum_steps = 100
-    wrapper.curriculum_start_xy_m = (0.05, 0.05)
-    wrapper.curriculum_end_xy_m = (0.10, 0.10)
-    wrapper.curriculum_start_yaw_rad = math.radians(30.0)
-    wrapper.curriculum_end_yaw_rad = math.radians(45.0)
-    cfg = types.SimpleNamespace(
-        randomize_labware_position=False,
-        labware_pos_randomization_xy=(0.0, 0.0),
-        labware_yaw_randomization=0.0,
-    )
-    wrapper.env = types.SimpleNamespace(unwrapped=types.SimpleNamespace(cfg=cfg))
-
-    wrapper._outer_steps = 50
-    wrapper._update_randomization_curriculum()
-    assert wrapper._curriculum_progress == 0.5
-    assert cfg.randomize_labware_position is True
-    assert cfg.labware_pos_randomization_xy == (0.07500000000000001, 0.07500000000000001)
-    assert math.isclose(cfg.labware_yaw_randomization, math.radians(37.5))
-
-    wrapper._outer_steps = 200
-    wrapper._update_randomization_curriculum()
-    assert wrapper._curriculum_progress == 1.0
-    assert cfg.labware_pos_randomization_xy == (0.10, 0.10)
-    assert math.isclose(cfg.labware_yaw_randomization, math.radians(45.0))
+    reward, gated_info = wrapper._apply_gate_reward_and_metrics(torch.ones(1), {"log": {}}, gate)
+    torch.testing.assert_close(reward, torch.tensor([0.99775]))
+    assert abs(gated_info["dsrl/gate"] - 0.15) < 1.0e-6
+    torch.testing.assert_close(gated_info["log"]["DSRL/gate_mean"], torch.tensor(0.15))
 
 
 def test_old_policy_config_defaults_to_raw_image_range():

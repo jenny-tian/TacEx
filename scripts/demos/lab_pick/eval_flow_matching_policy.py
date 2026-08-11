@@ -5,6 +5,7 @@ import json
 import os
 import random
 import sys
+from collections import Counter
 from pathlib import Path
 
 
@@ -49,6 +50,12 @@ parser.add_argument("--phase_horizon_steps", type=int, default=383, help="60 Hz 
 parser.add_argument("--camera_warmup_steps", type=int, default=8, help="Held physics steps after reset so camera frames match the new scene.")
 parser.add_argument("--visual_xy_lock_phase", type=float, default=0.30, help="Freeze visual XY before gripper closing; negative disables locking.")
 parser.add_argument(
+    "--use_visual_xy_override",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Replace the Flow Matching action XY with the auxiliary visual-head prediction.",
+)
+parser.add_argument(
     "--close_onset_width_m",
     type=float,
     default=0.038,
@@ -77,13 +84,36 @@ parser.add_argument(
     nargs=2,
     metavar=("X", "Y"),
     default=None,
-    help="Uniform reset half-range in meters for labware x/y.",
+    help="Uniform reset range in meters for labware x/y.",
 )
 parser.add_argument(
     "--labware_random_yaw",
     type=float,
     default=None,
-    help="Uniform reset yaw half-range in radians.",
+    help="Uniform reset yaw range in radians.",
+)
+parser.add_argument(
+    "--break_force_threshold_n",
+    type=float,
+    default=0.0,
+    help="Override the per-finger break threshold; <=0 keeps the environment default.",
+)
+parser.add_argument(
+    "--overforce_trial_fraction",
+    type=float,
+    default=0.25,
+    help="Fraction of trials conditioned on overforce demonstrations when supported by the checkpoint.",
+)
+parser.add_argument(
+    "--position_failure_trial_fraction",
+    type=float,
+    default=0.25,
+    help="Fraction of trials conditioned on intentional position-failure demonstrations.",
+)
+parser.add_argument(
+    "--force_demo_mode_projection",
+    action="store_true",
+    help="Apply force and position mode projection even when the checkpoint has no mode input.",
 )
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -153,6 +183,14 @@ def main() -> None:
         raise ValueError("--camera_warmup_steps must be non-negative")
     if not 0.0 < args_cli.close_onset_width_m < 0.04:
         raise ValueError("--close_onset_width_m must be in (0, 0.04)")
+    if not 0.0 <= args_cli.overforce_trial_fraction <= 1.0:
+        raise ValueError("--overforce_trial_fraction must be in [0, 1]")
+    if not 0.0 <= args_cli.position_failure_trial_fraction <= 1.0:
+        raise ValueError("--position_failure_trial_fraction must be in [0, 1]")
+    if args_cli.overforce_trial_fraction + args_cli.position_failure_trial_fraction > 1.0:
+        raise ValueError(
+            "--overforce_trial_fraction + --position_failure_trial_fraction must be <= 1"
+        )
 
     policy_root = args_cli.policy_root.expanduser().resolve()
     if str(policy_root) not in sys.path:
@@ -164,11 +202,11 @@ def main() -> None:
     cfg.seed = args_cli.seed
     cfg.randomize_labware_position = not args_cli.no_randomize_labware
     if args_cli.labware_random_xy is not None:
-        cfg.randomize_labware_position = True
         cfg.labware_pos_randomization_xy = tuple(args_cli.labware_random_xy)
     if args_cli.labware_random_yaw is not None:
-        cfg.randomize_labware_position = True
         cfg.labware_yaw_randomization = args_cli.labware_random_yaw
+    if args_cli.break_force_threshold_n > 0.0:
+        cfg.terminate_break_force_threshold_n = args_cli.break_force_threshold_n
     cfg.rl_normalized_actions = False
     # Data collection uses the yaw-aligned scripted target quaternion. The
     # policy predicts the same rotation, while this setting executes the
@@ -185,6 +223,8 @@ def main() -> None:
         num_inference_steps=args_cli.num_inference_steps,
         seed=args_cli.seed,
         visual_xy_lock_phase=(None if args_cli.visual_xy_lock_phase < 0.0 else args_cli.visual_xy_lock_phase),
+        use_visual_xy_override=args_cli.use_visual_xy_override,
+        force_demo_mode_projection=args_cli.force_demo_mode_projection,
     )
     observation_camera = "wrist" if len(runner.image_keys) > 1 else args_cli.policy_camera
 
@@ -193,6 +233,17 @@ def main() -> None:
     video_dir.mkdir(parents=True, exist_ok=True)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     results: list[dict] = []
+    overforce_trials = int(round(args_cli.num_trials * args_cli.overforce_trial_fraction))
+    position_failure_trials = int(
+        round(args_cli.num_trials * args_cli.position_failure_trial_fraction)
+    )
+    safe_trials = args_cli.num_trials - overforce_trials - position_failure_trials
+    trial_modes = (
+        ["overforce"] * overforce_trials
+        + ["position_failure"] * position_failure_trials
+        + ["safe"] * safe_trials
+    )
+    random.Random(args_cli.seed).shuffle(trial_modes)
 
     print(
         "[INFO] Canonical Flow Matching BC evaluation "
@@ -218,12 +269,23 @@ def main() -> None:
                 _step_physics(env, hold_action)
             env.step_count.zero_()
             env.has_touched.zero_()
-            runner.reset()
             policy_trial_seed = (
                 args_cli.policy_seed if args_cli.policy_seed is not None else trial_seed
             )
             if runner.generator is not None:
                 runner.generator.manual_seed(policy_trial_seed)
+            explicit_mode_mix = (
+                args_cli.overforce_trial_fraction + args_cli.position_failure_trial_fraction > 0.0
+            )
+            requested_mode = (
+                trial_modes[trial]
+                if runner.uses_demonstration_mode and explicit_mode_mix
+                else None
+            )
+            runner.reset(demonstration_mode=requested_mode)
+            demonstration_mode = (
+                runner.demonstration_mode if runner.include_demo_mode else "unconditioned"
+            )
             runner.update(_policy_observation(env, observation_camera, phase=0.0))
 
             reset_pos = env.labware_reset_pos_w[0].detach().cpu().tolist()
@@ -360,6 +422,7 @@ def main() -> None:
             result = {
                 "trial": trial,
                 "seed": trial_seed,
+                "demonstration_mode": demonstration_mode,
                 "success": success,
                 "broken": broken,
                 "touched": touched,
@@ -391,7 +454,8 @@ def main() -> None:
             results.append(result)
             print(
                 "[RESULT] "
-                f"trial={trial} seed={trial_seed} success={success} broken={broken} touched={touched} "
+                f"trial={trial} seed={trial_seed} mode={demonstration_mode} "
+                f"success={success} broken={broken} touched={touched} "
                 f"reason={terminal_reason} max_lift={max_lift_m:.4f}m "
                 f"first_contact_xy={(first_contact_xy_error_m if first_contact_xy_error_m is not None else float('nan')):.4f}m "
                 f"peak_break_force={peak_break_force_n:.4f}N peak_net_force={peak_net_force_n:.4f}N "
@@ -405,6 +469,20 @@ def main() -> None:
     successes = sum(int(item["success"]) for item in results)
     broken_count = sum(int(item["broken"]) for item in results)
     touched_count = sum(int(item["touched"]) for item in results)
+    failures = len(results) - successes
+    failure_counts = Counter(item["terminal_reason"] for item in results if not item["success"])
+    non_break_failures = failures - broken_count
+    position_failure_count = non_break_failures
+    mode_counts = Counter(item["demonstration_mode"] for item in results)
+    successes_by_mode = {
+        mode: sum(int(item["success"]) for item in results if item["demonstration_mode"] == mode)
+        for mode in mode_counts
+    }
+    breaks_by_mode = {
+        mode: sum(int(item["broken"]) for item in results if item["demonstration_mode"] == mode)
+        for mode in mode_counts
+    }
+
     summary = {
         "checkpoint": str(args_cli.checkpoint.expanduser().resolve()),
         "num_trials": len(results),
@@ -414,6 +492,22 @@ def main() -> None:
         "broken_rate": broken_count / max(len(results), 1),
         "touched": touched_count,
         "touch_rate": touched_count / max(len(results), 1),
+        "failures": failures,
+        "failure_counts": dict(failure_counts),
+        "non_break_failures": non_break_failures,
+        "position_failures": position_failure_count,
+        "break_failure_fraction": broken_count / max(failures, 1),
+        "position_failure_fraction": position_failure_count / max(failures, 1),
+        "failure_balance_gap": abs(broken_count - position_failure_count) / max(failures, 1),
+        "overforce_trial_fraction": args_cli.overforce_trial_fraction,
+        "position_failure_trial_fraction": args_cli.position_failure_trial_fraction,
+        "force_demo_mode_projection": args_cli.force_demo_mode_projection,
+        "mode_counts": dict(mode_counts),
+        "successes_by_mode": successes_by_mode,
+        "breaks_by_mode": breaks_by_mode,
+        "break_force_threshold_n": cfg.terminate_break_force_threshold_n,
+        "labware_random_xy_m": list(cfg.labware_pos_randomization_xy),
+        "labware_random_yaw_degrees": float(np.rad2deg(cfg.labware_yaw_randomization)),
         "seed": args_cli.seed,
         "policy_seed": args_cli.policy_seed,
         "reset_policy_noise_each_chunk": args_cli.reset_policy_noise_each_chunk,
@@ -425,8 +519,7 @@ def main() -> None:
         "phase_horizon_steps": args_cli.phase_horizon_steps,
         "camera_warmup_steps": args_cli.camera_warmup_steps,
         "visual_xy_lock_phase": args_cli.visual_xy_lock_phase,
-        "labware_random_xy": args_cli.labware_random_xy,
-        "labware_random_yaw": args_cli.labware_random_yaw,
+        "use_visual_xy_override": args_cli.use_visual_xy_override,
         "close_onset_width_m": args_cli.close_onset_width_m,
         "results": results,
     }

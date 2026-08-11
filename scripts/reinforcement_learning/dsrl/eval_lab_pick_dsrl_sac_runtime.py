@@ -20,39 +20,30 @@ parser.add_argument("--policy_seed", type=int, default=42)
 parser.add_argument("--stochastic", action="store_true", help="Sample the actor instead of using its deterministic mean.")
 parser.add_argument("--policy_device", type=str, default="cuda")
 parser.add_argument("--noise_magnitude", type=float, default=3.0)
-parser.add_argument("--dsrl_action_mode", choices=["noise", "residual"], default="noise")
-parser.add_argument(
-    "--dsrl_residual_position_scale_m",
-    type=float,
-    nargs=3,
-    default=(0.03, 0.03, 0.01),
-    metavar=("X", "Y", "Z"),
-)
-parser.add_argument("--dsrl_residual_width_scale_m", type=float, default=0.002)
-parser.add_argument("--dsrl_residual_penalty_scale", type=float, default=0.0)
-parser.add_argument("--dsrl_residual_penalty_end_scale", type=float, default=None)
-parser.add_argument("--dsrl_residual_penalty_decay_start_step", type=int, default=2000)
-parser.add_argument("--dsrl_residual_penalty_decay_steps", type=int, default=0)
+parser.add_argument("--action_repeat", type=int, default=2)
+parser.add_argument("--flow_num_inference_steps", type=int, default=20)
+parser.add_argument("--flow_chunk_execute_steps", type=int, default=32)
+parser.add_argument("--flow_phase_horizon_steps", type=int, default=383)
+parser.add_argument("--flow_camera_warmup_steps", type=int, default=8)
+parser.add_argument("--gate", action=argparse.BooleanOptionalAction, default=True)
+parser.add_argument("--gate_temperature", type=float, default=0.5)
+parser.add_argument("--gate_penalty", type=float, default=0.1)
+parser.add_argument("--gate_max", type=float, default=0.3)
+parser.add_argument("--max_outer_steps", type=int, default=0, help="0 derives the limit from the environment horizon.")
 parser.add_argument(
     "--labware_random_xy",
     type=float,
     nargs=2,
     metavar=("X", "Y"),
     default=None,
-    help="Uniform reset half-range in meters for labware x/y.",
+    help="Uniform reset range in meters for labware x/y.",
 )
 parser.add_argument(
     "--labware_random_yaw",
     type=float,
     default=None,
-    help="Uniform reset yaw half-range in radians.",
+    help="Uniform reset yaw range in radians.",
 )
-parser.add_argument("--action_repeat", type=int, default=2)
-parser.add_argument("--flow_num_inference_steps", type=int, default=20)
-parser.add_argument("--flow_chunk_execute_steps", type=int, default=32)
-parser.add_argument("--flow_phase_horizon_steps", type=int, default=383)
-parser.add_argument("--flow_camera_warmup_steps", type=int, default=8)
-parser.add_argument("--max_outer_steps", type=int, default=0, help="0 derives the limit from the environment horizon.")
 parser.add_argument("--hidden_dims", type=int, nargs="+", default=[512, 512, 512])
 parser.add_argument(
     "--output",
@@ -147,14 +138,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, _age
 
     env_cfg.scene.num_envs = 1
     env_cfg.seed = args_cli.seed
-    if args_cli.labware_random_xy is not None:
-        env_cfg.randomize_labware_position = True
-        env_cfg.labware_pos_randomization_xy = tuple(args_cli.labware_random_xy)
-    if args_cli.labware_random_yaw is not None:
-        env_cfg.randomize_labware_position = True
-        env_cfg.labware_yaw_randomization = args_cli.labware_random_yaw
     if args_cli.device is not None:
         env_cfg.sim.device = args_cli.device
+    if args_cli.labware_random_xy is not None:
+        env_cfg.labware_pos_randomization_xy = tuple(args_cli.labware_random_xy)
+    if args_cli.labware_random_yaw is not None:
+        env_cfg.labware_yaw_randomization = args_cli.labware_random_yaw
 
     base_env = gym.make(args_cli.task, cfg=env_cfg)
     env = LabPickDSRLWrapper(
@@ -164,17 +153,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, _age
         noise_magnitude=args_cli.noise_magnitude,
         action_repeat=args_cli.action_repeat,
         policy_type="flow_matching",
-        action_mode=args_cli.dsrl_action_mode,
-        residual_position_scale_m=tuple(args_cli.dsrl_residual_position_scale_m),
-        residual_width_scale_m=args_cli.dsrl_residual_width_scale_m,
-        residual_penalty_scale=args_cli.dsrl_residual_penalty_scale,
-        residual_penalty_end_scale=args_cli.dsrl_residual_penalty_end_scale,
-        residual_penalty_decay_start_step=args_cli.dsrl_residual_penalty_decay_start_step,
-        residual_penalty_decay_steps=args_cli.dsrl_residual_penalty_decay_steps,
         flow_num_inference_steps=args_cli.flow_num_inference_steps,
         flow_chunk_execute_steps=args_cli.flow_chunk_execute_steps,
         flow_phase_horizon_steps=args_cli.flow_phase_horizon_steps,
         flow_camera_warmup_steps=args_cli.flow_camera_warmup_steps,
+        gate_enabled=args_cli.gate,
+        gate_temperature=args_cli.gate_temperature,
+        gate_penalty=args_cli.gate_penalty,
+        gate_max=args_cli.gate_max,
     )
     base = env.unwrapped
     device = torch.device(base.device)
@@ -199,7 +185,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, _age
     print(
         "[INFO] DSRL-SAC episodic evaluation "
         f"checkpoint={checkpoint_path} trials={args_cli.num_trials} seed={args_cli.seed} "
-        f"mode={mode} action_mode={args_cli.dsrl_action_mode} max_outer_steps={max_outer_steps}",
+        f"mode={mode} max_outer_steps={max_outer_steps}",
         flush=True,
     )
 
@@ -223,6 +209,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, _age
             broken = False
             terminated = truncated = None
             outer_steps = 0
+            gate_sum = 0.0
+            gated_steps = 0
 
             while simulation_app.is_running() and outer_steps < max_outer_steps:
                 inputs = {"observations": _policy_observation(observation, device)}
@@ -233,6 +221,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, _age
                         action = actor.compute(inputs, role="policy")[0]
                 observation, reward, terminated, truncated, info = env.step(action)
                 outer_steps += 1
+                if "dsrl/gate" in info:
+                    gate_sum += _scalar(info["dsrl/gate"])
+                    gated_steps += 1
                 episode_reward += _scalar(reward)
                 success = success or max(
                     _log_value(info, "LabPick/success_terminal_step"),
@@ -261,6 +252,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, _age
                 "min_grasp_distance_m": min_grasp_distance_m,
                 "peak_force_n": peak_force_n,
                 "outer_steps": outer_steps,
+                "mean_gate": gate_sum / max(gated_steps, 1),
                 "reset_pos_w": reset_pos,
                 "reset_quat_w": reset_quat,
                 "terminated": _bool(terminated) if terminated is not None else False,
@@ -272,7 +264,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, _age
                 f"trial={trial} seed={trial_seed} success={success} broken={broken} "
                 f"reward={episode_reward:.4f} max_lift={max_lift_m:.4f}m "
                 f"min_grasp_distance={min_grasp_distance_m:.4f}m peak_force={peak_force_n:.4f}N "
-                f"outer_steps={outer_steps}",
+                f"mean_gate={result['mean_gate']:.4f} outer_steps={outer_steps}",
                 flush=True,
             )
     finally:
@@ -285,15 +277,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, _age
         "checkpoint": str(checkpoint_path),
         "task": args_cli.task,
         "mode": mode,
-        "dsrl_action_mode": args_cli.dsrl_action_mode,
-        "dsrl_residual_position_scale_m": list(args_cli.dsrl_residual_position_scale_m),
-        "dsrl_residual_width_scale_m": args_cli.dsrl_residual_width_scale_m,
-        "dsrl_residual_penalty_scale": args_cli.dsrl_residual_penalty_scale,
-        "dsrl_residual_penalty_end_scale": args_cli.dsrl_residual_penalty_end_scale,
-        "dsrl_residual_penalty_decay_start_step": args_cli.dsrl_residual_penalty_decay_start_step,
-        "dsrl_residual_penalty_decay_steps": args_cli.dsrl_residual_penalty_decay_steps,
-        "labware_random_xy": args_cli.labware_random_xy,
-        "labware_random_yaw": args_cli.labware_random_yaw,
         "num_trials": len(results),
         "successes": successes,
         "success_rate": successes / max(len(results), 1),
@@ -301,6 +284,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, _age
         "broken_rate": broken_count / max(len(results), 1),
         "seed": args_cli.seed,
         "policy_seed": args_cli.policy_seed,
+        "gate_enabled": args_cli.gate,
+        "gate_temperature": args_cli.gate_temperature,
+        "gate_penalty": args_cli.gate_penalty,
+        "gate_max": args_cli.gate_max,
+        "mean_gate": sum(result["mean_gate"] for result in results) / max(len(results), 1),
         "results": results,
     }
     output_path.write_text(json.dumps(summary, indent=2) + "\n")

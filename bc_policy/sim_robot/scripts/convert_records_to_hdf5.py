@@ -213,6 +213,12 @@ def convert_records(
             demo.attrs["action_alignment"] = alignment
             demo.attrs["observation_timing"] = _metadata_text(metadata, "observation_timing") or "legacy_post_action"
             demo.attrs["instruction"] = instruction
+            for key in ("demonstration_mode", "failure_reason"):
+                value = _metadata_text(metadata, key)
+                if value is not None:
+                    demo.attrs[key] = value
+            if "peak_break_force_n" in metadata:
+                demo.attrs["peak_break_force_n"] = float(np.asarray(metadata["peak_break_force_n"]).item())
             if "labware_reset_pos_w" in metadata:
                 demo.attrs["labware_reset_pos_w"] = metadata["labware_reset_pos_w"].astype(np.float32)
             if "labware_reset_quat_w" in metadata:

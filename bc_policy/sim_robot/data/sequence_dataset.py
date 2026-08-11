@@ -33,6 +33,24 @@ def normalize_image_keys(image_key: str | tuple[str, ...] | list[str]) -> tuple[
     return keys
 
 
+def demonstration_mode_value(demo: h5py.Group) -> float:
+    mode = demo.attrs.get("demonstration_mode", "safe")
+    if isinstance(mode, bytes):
+        mode = mode.decode("utf-8")
+    return {
+        "position_failure": -1.0,
+        "safe": 0.0,
+        "overforce": 1.0,
+    }.get(str(mode), 0.0)
+
+
+def demonstration_mode_name(demo: h5py.Group) -> str:
+    mode = demo.attrs.get("demonstration_mode", "safe")
+    if isinstance(mode, bytes):
+        mode = mode.decode("utf-8")
+    return str(mode)
+
+
 def _read_episode_length(
     demo: h5py.Group, action_key: str, state_key: str, image_key: str | tuple[str, ...] | list[str]
 ) -> int:
@@ -85,6 +103,8 @@ def compute_normalizer(
     image_key: str = "robot0_image",
     mode: str = "limits",
     include_phase: bool = False,
+    include_demo_mode: bool = False,
+    overforce_close_width_m: float | None = None,
 ) -> LinearNormalizer:
     pos_parts = []
     action_parts = []
@@ -97,8 +117,24 @@ def compute_normalizer(
             if include_phase:
                 phase = np.linspace(0.0, 1.0, num=length, dtype=np.float32)[:, None]
                 pos = np.concatenate((pos, phase), axis=-1)
+            if include_demo_mode:
+                mode_feature = np.full(
+                    (length, 1), demonstration_mode_value(demo), dtype=np.float32
+                )
+                pos = np.concatenate((pos, mode_feature), axis=-1)
             pos_parts.append(pos)
-            action_parts.append(demo["actions"][action_key][:length])
+            actions = demo["actions"][action_key][:length]
+            if (
+                include_demo_mode
+                and overforce_close_width_m is not None
+                and demonstration_mode_name(demo) == "overforce"
+            ):
+                actions = np.asarray(actions).copy()
+                closing = actions[:, -1] < 0.02
+                actions[closing, -1] = np.minimum(
+                    actions[closing, -1], float(overforce_close_width_m)
+                )
+            action_parts.append(actions)
     stats = {
         "robot0_pos": ArrayStats.from_array(np.concatenate(pos_parts, axis=0)),
         "action": ArrayStats.from_array(np.concatenate(action_parts, axis=0)),
@@ -120,6 +156,8 @@ class SimRobotHDF5SequenceDataset(Dataset):
         image_key: str = "robot0_image",
         cache_images: bool = False,
         include_phase: bool = False,
+        include_demo_mode: bool = False,
+        overforce_close_width_m: float | None = None,
     ) -> None:
         super().__init__()
         self.hdf5_path = str(hdf5_path)
@@ -134,6 +172,10 @@ class SimRobotHDF5SequenceDataset(Dataset):
         self.image_key = self.image_keys[0]
         self.cache_images = cache_images
         self.include_phase = bool(include_phase)
+        self.include_demo_mode = bool(include_demo_mode)
+        self.overforce_close_width_m = (
+            None if overforce_close_width_m is None else float(overforce_close_width_m)
+        )
         self._file: h5py.File | None = None
         self._image_cache: dict[tuple[int, int, str], np.ndarray] = {}
 
@@ -161,8 +203,16 @@ class SimRobotHDF5SequenceDataset(Dataset):
             ]
             if not self.episodes:
                 raise ValueError("No episodes selected.")
+            self.episode_modes = {
+                episode.index: demonstration_mode_name(f["data"][episode.name])
+                for episode in self.episodes
+            }
             first = f["data"][self.episodes[0].name]
-            self.robot0_pos_dim = int(first["obs"][state_key].shape[-1]) + int(self.include_phase)
+            self.robot0_pos_dim = (
+                int(first["obs"][state_key].shape[-1])
+                + int(self.include_phase)
+                + int(self.include_demo_mode)
+            )
             self.action_dim = int(first["actions"][action_key].shape[-1])
             self.image_shape = tuple(first["obs"][self.image_keys[0]].shape[1:])
             self.image_shapes = {key: tuple(first["obs"][key].shape[1:]) for key in self.image_keys}
@@ -194,6 +244,24 @@ class SimRobotHDF5SequenceDataset(Dataset):
 
     def __len__(self) -> int:
         return len(self.samples)
+
+    def sample_weights(
+        self,
+        safe_weight: float = 1.0,
+        overforce_weight: float = 1.0,
+        position_failure_weight: float = 1.0,
+    ) -> torch.DoubleTensor:
+        weights = {
+            "safe": float(safe_weight),
+            "overforce": float(overforce_weight),
+            "position_failure": float(position_failure_weight),
+        }
+        if any(value <= 0.0 for value in weights.values()):
+            raise ValueError("All demonstration mode sample weights must be positive.")
+        return torch.tensor(
+            [weights[self.episode_modes[episode_id]] for episode_id, _, _ in self.samples],
+            dtype=torch.double,
+        )
 
     @staticmethod
     def _clamp_indices(length: int, indices: np.ndarray) -> np.ndarray:
@@ -227,7 +295,19 @@ class SimRobotHDF5SequenceDataset(Dataset):
         if self.include_phase:
             phase = (state_idx.astype(np.float32) / max(length - 1, 1))[:, None]
             robot0_pos = np.concatenate((robot0_pos, phase), axis=-1)
+        if self.include_demo_mode:
+            mode_feature = np.full(
+                (len(state_idx), 1), demonstration_mode_value(demo), dtype=np.float32
+            )
+            robot0_pos = np.concatenate((robot0_pos, mode_feature), axis=-1)
         action = self._read_rows(demo["actions"][self.action_key], action_idx).astype(np.float32)
+        if (
+            self.include_demo_mode
+            and self.overforce_close_width_m is not None
+            and demonstration_mode_name(demo) == "overforce"
+        ):
+            closing = action[:, -1] < 0.02
+            action[closing, -1] = np.minimum(action[closing, -1], self.overforce_close_width_m)
         robot0_pos = self.normalizer.normalize_numpy("robot0_pos", robot0_pos)
         action = self.normalizer.normalize_numpy("action", action)
 
@@ -258,6 +338,8 @@ def build_datasets(
     success_only: bool = False,
     cache_images: bool = False,
     include_phase: bool = False,
+    include_demo_mode: bool = False,
+    overforce_close_width_m: float | None = None,
 ) -> tuple[SimRobotHDF5SequenceDataset, SimRobotHDF5SequenceDataset | None, LinearNormalizer]:
     image_keys = normalize_image_keys(image_key)
     episodes = list_episodes(
@@ -279,6 +361,8 @@ def build_datasets(
         image_key=image_key,
         mode=normalizer_mode,
         include_phase=include_phase,
+        include_demo_mode=include_demo_mode,
+        overforce_close_width_m=overforce_close_width_m,
     )
     train_set = SimRobotHDF5SequenceDataset(
         hdf5_path=hdf5_path,
@@ -292,6 +376,8 @@ def build_datasets(
         image_key=image_keys,
         cache_images=cache_images,
         include_phase=include_phase,
+        include_demo_mode=include_demo_mode,
+        overforce_close_width_m=overforce_close_width_m,
     )
     val_set = None
     if len(val_ids) > 0:
@@ -307,6 +393,7 @@ def build_datasets(
             image_key=image_keys,
             cache_images=cache_images,
             include_phase=include_phase,
+            include_demo_mode=include_demo_mode,
+            overforce_close_width_m=overforce_close_width_m,
         )
     return train_set, val_set, normalizer
-
