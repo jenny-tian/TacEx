@@ -118,6 +118,11 @@ parser.add_argument(
 parser.add_argument("--safe_close_width_m", type=float, default=0.0065)
 parser.add_argument("--overforce_close_width_m", type=float, default=0.0015)
 parser.add_argument(
+    "--require_expected_mode_outcome",
+    action="store_true",
+    help="Record safe demos only on success and failure-mode demos only on their expected failure.",
+)
+parser.add_argument(
     "--position_failure_offset_m",
     type=float,
     default=0.03,
@@ -512,12 +517,15 @@ def main():
                 success = bool((lift_delta[0] > env.cfg.success_lift_height).item())
                 if success and not episode_failed:
                     successful += 1
-                    if args_cli.failure_only:
+                    expected_success = demonstration_mode == "safe"
+                    if args_cli.failure_only or (
+                        args_cli.require_expected_mode_outcome and not expected_success
+                    ):
                         writer.clear_episode()
                         exported = True
                         print(
-                            f"[INFO] skipped_success attempt={attempted} "
-                            f"recorded={recorded}/{args_cli.num_demos} failure_only=True"
+                            f"[INFO] skipped_success attempt={attempted} mode={demonstration_mode} "
+                            f"recorded={recorded}/{args_cli.num_demos}"
                         )
                     else:
                         exported = writer.flush_episode(
@@ -558,8 +566,22 @@ def main():
                         failure_reason=failure_reason,
                         break_force_threshold_n=env.cfg.terminate_break_force_threshold_n,
                     )
-                if args_cli.success_only:
+                expected_failure = (
+                    demonstration_mode == "overforce" and "break_force" in failure_reason
+                ) or (
+                    demonstration_mode == "position_failure" and demonstration_mode != "safe"
+                )
+                reject_unexpected = args_cli.require_expected_mode_outcome and (
+                    demonstration_mode == "safe" or not expected_failure
+                )
+                if args_cli.success_only or reject_unexpected:
                     writer.clear_episode()
+                    if reject_unexpected:
+                        print(
+                            f"[INFO] skipped_unexpected_failure attempt={attempted} "
+                            f"mode={demonstration_mode} reason={failure_reason} "
+                            f"recorded={recorded}/{args_cli.num_demos}"
+                        )
                 else:
                     exported = writer.flush_episode(
                         success=False,

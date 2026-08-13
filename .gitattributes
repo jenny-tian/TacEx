@@ -3,3 +3,4 @@
 *.sh text eol=LF
 outputs/lab_pick_flow_bc50_strong48n_pos8_50_final/best.pt filter=lfs diff=lfs merge=lfs -text
 outputs/lab_pick_flow_bc50_strong48n_pos8_50_unconditioned_balanced/epoch_0001.pt filter=lfs diff=lfs merge=lfs -text
+outputs/lab_pick_flow_bc100_scratch_rawclose_safe70_overforce24_pos6/best.pt filter=lfs diff=lfs merge=lfs -text

@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 PYTHON="${TACEX_ISAAC_PYTHON:-/home/tjx/miniforge3/envs/env_isaaclab/bin/python}"
-BC_POLICY="${TACEX_DSRL_BC_POLICY:-${REPO_ROOT}/outputs/lab_pick_flow_bc50_strong48n_pos8_50_unconditioned_balanced/epoch_0001.pt}"
+BC_POLICY="${TACEX_DSRL_BC_POLICY:-${REPO_ROOT}/outputs/lab_pick_flow_bc100_scratch_rawclose_safe70_overforce24_pos6/best.pt}"
 TIMESTEPS="${TACEX_DSRL_TIMESTEPS:-200000}"
 SEED="${TACEX_DSRL_SEED:-42}"
 NOISE_MAGNITUDE="${TACEX_DSRL_NOISE_MAGNITUDE:-1.5}"

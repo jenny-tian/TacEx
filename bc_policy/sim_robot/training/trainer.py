@@ -359,6 +359,8 @@ def main() -> None:
     )
     parser.add_argument("--safe-close-width-m", type=float, default=0.0065)
     parser.add_argument("--overforce-close-width-m", type=float, default=0.0015)
+    parser.add_argument("--safe-close-phase", type=float, default=0.4)
+    parser.add_argument("--safe-close-phase-weight", type=float, default=1.0)
     parser.add_argument("--safe-sample-weight", type=float, default=1.0)
     parser.add_argument("--overforce-sample-weight", type=float, default=1.0)
     parser.add_argument("--position-failure-sample-weight", type=float, default=1.0)
@@ -399,6 +401,10 @@ def main() -> None:
     dataset_image_key = args.image_keys if args.image_keys.strip() else args.image_key
     resolved_image_keys = tuple(part.strip() for part in dataset_image_key.split(",") if part.strip())
     model_image_keys = resolved_image_keys if len(resolved_image_keys) > 1 else ("robot0_image",)
+    safe_close_width_m = args.safe_close_width_m if args.safe_close_width_m > 0.0 else None
+    overforce_close_width_m = (
+        args.overforce_close_width_m if args.overforce_close_width_m > 0.0 else None
+    )
 
     train_set, val_set, normalizer = build_datasets(
         hdf5_path=args.dataset,
@@ -415,13 +421,16 @@ def main() -> None:
         cache_images=args.cache_images,
         include_phase=args.include_phase,
         include_demo_mode=args.include_demo_mode,
-        overforce_close_width_m=args.overforce_close_width_m,
+        safe_close_width_m=safe_close_width_m,
+        overforce_close_width_m=overforce_close_width_m,
     )
     train_sampler = WeightedRandomSampler(
         train_set.sample_weights(
             safe_weight=args.safe_sample_weight,
             overforce_weight=args.overforce_sample_weight,
             position_failure_weight=args.position_failure_sample_weight,
+            safe_close_phase=args.safe_close_phase,
+            safe_close_phase_weight=args.safe_close_phase_weight,
         ),
         num_samples=len(train_set),
         replacement=True,

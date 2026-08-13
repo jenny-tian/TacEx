@@ -104,6 +104,7 @@ def compute_normalizer(
     mode: str = "limits",
     include_phase: bool = False,
     include_demo_mode: bool = False,
+    safe_close_width_m: float | None = None,
     overforce_close_width_m: float | None = None,
 ) -> LinearNormalizer:
     pos_parts = []
@@ -124,6 +125,10 @@ def compute_normalizer(
                 pos = np.concatenate((pos, mode_feature), axis=-1)
             pos_parts.append(pos)
             actions = demo["actions"][action_key][:length]
+            if safe_close_width_m is not None and demonstration_mode_name(demo) == "safe":
+                actions = np.asarray(actions).copy()
+                closing = actions[:, -1] < 0.02
+                actions[closing, -1] = np.minimum(actions[closing, -1], float(safe_close_width_m))
             if (
                 overforce_close_width_m is not None
                 and demonstration_mode_name(demo) == "overforce"
@@ -156,6 +161,7 @@ class SimRobotHDF5SequenceDataset(Dataset):
         cache_images: bool = False,
         include_phase: bool = False,
         include_demo_mode: bool = False,
+        safe_close_width_m: float | None = None,
         overforce_close_width_m: float | None = None,
     ) -> None:
         super().__init__()
@@ -172,6 +178,7 @@ class SimRobotHDF5SequenceDataset(Dataset):
         self.cache_images = cache_images
         self.include_phase = bool(include_phase)
         self.include_demo_mode = bool(include_demo_mode)
+        self.safe_close_width_m = None if safe_close_width_m is None else float(safe_close_width_m)
         self.overforce_close_width_m = (
             None if overforce_close_width_m is None else float(overforce_close_width_m)
         )
@@ -249,6 +256,8 @@ class SimRobotHDF5SequenceDataset(Dataset):
         safe_weight: float = 1.0,
         overforce_weight: float = 1.0,
         position_failure_weight: float = 1.0,
+        safe_close_phase: float = 0.4,
+        safe_close_phase_weight: float = 1.0,
     ) -> torch.DoubleTensor:
         weights = {
             "safe": float(safe_weight),
@@ -257,8 +266,10 @@ class SimRobotHDF5SequenceDataset(Dataset):
         }
         if any(value <= 0.0 for value in weights.values()):
             raise ValueError("All demonstration mode sample weights must be positive.")
+        if safe_close_phase_weight <= 0.0:
+            raise ValueError("safe_close_phase_weight must be positive.")
         return torch.tensor(
-            [weights[self.episode_modes[episode_id]] for episode_id, _, _ in self.samples],
+            [weights[self.episode_modes[episode_id]] * (float(safe_close_phase_weight) if self.episode_modes[episode_id] == "safe" and t / max(length - 1, 1) >= float(safe_close_phase) else 1.0) for episode_id, length, t in self.samples],
             dtype=torch.double,
         )
 
@@ -300,6 +311,9 @@ class SimRobotHDF5SequenceDataset(Dataset):
             )
             robot0_pos = np.concatenate((robot0_pos, mode_feature), axis=-1)
         action = self._read_rows(demo["actions"][self.action_key], action_idx).astype(np.float32)
+        if self.safe_close_width_m is not None and demonstration_mode_name(demo) == "safe":
+            closing = action[:, -1] < 0.02
+            action[closing, -1] = np.minimum(action[closing, -1], self.safe_close_width_m)
         if (
             self.overforce_close_width_m is not None
             and demonstration_mode_name(demo) == "overforce"
@@ -337,6 +351,7 @@ def build_datasets(
     cache_images: bool = False,
     include_phase: bool = False,
     include_demo_mode: bool = False,
+    safe_close_width_m: float | None = None,
     overforce_close_width_m: float | None = None,
 ) -> tuple[SimRobotHDF5SequenceDataset, SimRobotHDF5SequenceDataset | None, LinearNormalizer]:
     image_keys = normalize_image_keys(image_key)
@@ -360,6 +375,7 @@ def build_datasets(
         mode=normalizer_mode,
         include_phase=include_phase,
         include_demo_mode=include_demo_mode,
+        safe_close_width_m=safe_close_width_m,
         overforce_close_width_m=overforce_close_width_m,
     )
     train_set = SimRobotHDF5SequenceDataset(
@@ -375,6 +391,7 @@ def build_datasets(
         cache_images=cache_images,
         include_phase=include_phase,
         include_demo_mode=include_demo_mode,
+        safe_close_width_m=safe_close_width_m,
         overforce_close_width_m=overforce_close_width_m,
     )
     val_set = None
@@ -392,6 +409,7 @@ def build_datasets(
             cache_images=cache_images,
             include_phase=include_phase,
             include_demo_mode=include_demo_mode,
+            safe_close_width_m=safe_close_width_m,
             overforce_close_width_m=overforce_close_width_m,
         )
     return train_set, val_set, normalizer

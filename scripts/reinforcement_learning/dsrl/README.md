@@ -18,7 +18,7 @@ Task: `TacEx-LabPick-Slide-SAC-v0`
 - observation: normalized 23-D privileged state;
 - action: `[dx, dy, dz, gripper_width]` in a normalized 4-D space;
 - success: slide lift at least `0.20 m`;
-- break termination: fingertip force above `6 N` after contact;
+- break termination: fingertip force above `4 N` after contact;
 - shaping: reach progress, lift progress, first/bilateral contact, success bonus, force and failure penalties.
 
 After explicitly accepting the NVIDIA Omniverse EULA, smoke-test 200 steps:
@@ -132,12 +132,16 @@ TACEX_DSRL_TIMESTEPS=200000 \
 ```
 
 The default checkpoint is
-`outputs/lab_pick_flow_bc50_strong48n_pos8_50_unconditioned_balanced/epoch_0001.pt`.
-It was trained from the existing 50 mixed demonstrations without exposing the
-demonstration category to the policy (`include_demo_mode=False`). A normal
-10-trial evaluation over +/-10 cm and +/-45 degrees produced 3 successes,
-3 overforce breakages, and 4 position/timeout failures; the evaluator did not
-request any failure mode. Training starts
+`outputs/lab_pick_flow_bc100_scratch_rawclose_safe70_overforce24_pos6/best.pt`.
+It was trained from scratch on 100 mixed demonstrations: 70 successful, 24
+overforce-break, and 6 position-failure episodes. Sample weights were all 1.0,
+and the demonstration category was not exposed to the policy
+(`include_demo_mode=False`). A normal unconditioned 100-trial evaluation over
++/-10 cm and +/-45 degrees at the 4 N break threshold produced 65 successes,
+22 overforce breakages, and 13 position/timeout failures. Thus 62.9% of the 35
+failures were breakages. The evaluator did not request a failure mode. See the
+checkpoint's `validation_summary.json` for the complete aggregate result.
+Training starts
 with a gate of `0.1`, temperature `0.5`, penalty `0.1`, and maximum gate `0.3`;
 `DSRL/gate_mean` and `DSRL/gate_penalty` are written to the normal SKRL/IsaacLab
 logs. Set `TACEX_DSRL_GATE_INIT`, `TACEX_DSRL_GATE_TEMPERATURE`,
