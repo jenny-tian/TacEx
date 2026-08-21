@@ -535,6 +535,30 @@ class LabPickEnv(DirectRLEnv):
         tool_pos_b, tool_quat_b = self._compute_frame_pose()
         return tool_pos_b + math_utils.quat_apply(tool_quat_b, self.gripper_center_offset_tool)
 
+    def get_privileged_object_pose(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the live object pose used by the clean residual policy.
+
+        Both outputs are expressed in the robot-base frame. The relative
+        position follows the existing privileged SAC convention: object
+        center minus calibrated gripper center, divided by 0.25 m and clipped
+        to ``[-2, 2]``. Rotation uses the same row-interleaved Rot6D encoding
+        as CAFE actions.
+        """
+
+        root_pos_w = self._robot.data.root_link_pos_w
+        root_quat_w = self._robot.data.root_link_quat_w
+        object_pos_b, object_quat_b = math_utils.subtract_frame_transforms(
+            root_pos_w,
+            root_quat_w,
+            self.labware.data.root_pos_w,
+            self.labware.data.root_quat_w,
+        )
+        relative_position = (
+            (object_pos_b - self._gripper_center_pos_b()) / 0.25
+        ).clamp(-2.0, 2.0)
+        object_rot6d = self._quat_to_rot6d(object_quat_b)
+        return relative_position.detach().clone(), object_rot6d.detach().clone()
+
     def _get_rl_observation(self) -> torch.Tensor:
         """Return a normalized 23-D privileged state for the SAC baseline."""
 

@@ -371,3 +371,16 @@ class LabPickSlideDSRLBaseEnvCfg(LabPickSlideEnvCfg):
     rl_success_reward = 60.0
     rl_failure_penalty = 20.0
     rl_timeout_penalty = 10.0
+
+
+@configclass
+class LabPickSlideCleanResidualSACEnvCfg(LabPickSlideDSRLBaseEnvCfg):
+    """Physical CAFE environment for the isolated clean residual-SAC path.
+
+    The wrapper replaces the public 10-D action space with a 4-D residual.
+    Rotation is deliberately removed from the learned action: reset-time
+    simulator yaw supplies the end-effector orientation for the whole episode.
+    """
+
+    rl_align_cafe_action_yaw = True
+    rl_action_penalty_scale = 0.0
