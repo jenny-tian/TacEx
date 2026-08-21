@@ -1,5 +1,10 @@
 # TacEx LabPick SAC / DSRL training
 
+For the isolated, review-oriented 4-D residual baseline, see
+[CLEAN_RESIDUAL_SAC.md](CLEAN_RESIDUAL_SAC.md). That entrypoint does not share
+the staged, H-step, trust-region, gated-noise, or entropy-loss experiments
+described elsewhere in this file.
+
 This pipeline keeps simulation and policy training isolated:
 
 - `env_isaaclab`: Isaac Sim, LabPick, SKRL SAC, online DSRL rollouts.
