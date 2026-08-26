@@ -257,7 +257,31 @@ def main() -> None:
     ]:
         add_bullet(doc, text)
 
-    add_heading(doc, "2.3 三组训练数据", 2)
+    add_heading(doc, "2.3 训练3相对前两条的具体改动", 2)
+    add_bullet(doc, "训练3不是从训练1或训练2续训，而是使用冻结BC重新初始化SAC，seed=45；前两条分别使用seed=42和seed=43。")
+    table = doc.add_table(rows=1, cols=4)
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.style = "Table Grid"
+    headers = ["配置项", "训练1/2", "训练3", "改动目的"]
+    for index, text in enumerate(headers):
+        set_cell_shading(table.rows[0].cells[index], "4472C4")
+        set_cell_text(table.rows[0].cells[index], text, bold=True, color="FFFFFF", size=8.5)
+    changes = [
+        ("超时处理", "未显式启用终止修复", "显式\n--sac_terminal_timeouts", "把失败超时作为terminal，禁止从自动reset观测进行Q值自举"),
+        ("终止回放", "普通随机回放", "至少25%终止样本\n--sac_terminal_sample_fraction 0.25", "提高成功、破损和超时信号在SAC batch中的比例"),
+        ("SAC折扣", "0.95", "0.99", "减少宏动作折扣造成的远期成功信号衰减"),
+        ("超时惩罚", "-20", "-40", "降低通过等待到超时获得相对安全回报的倾向"),
+        ("晚期无进展", "未启用或为0", "系数0.25，进度50%后递增", "对已经接触但长期没有抬升进展的轨迹施加压力"),
+        ("门控范围/初值", "init=0.01，max=0.35，penalty=0.1", "init=0.025，min=0.02，max=0.20，penalty=5", "让残差从接近BC开始，并限制早期修正幅度"),
+        ("其余控制", "action_repeat=2，chunk=16，4段物理残差", "保持一致", "隔离变量，确保差异主要来自终止、回放、奖励和门控设置"),
+    ]
+    for row in changes:
+        cells = table.add_row().cells
+        for cell, value in zip(cells, row):
+            set_cell_text(cell, value, size=8.0)
+    add_bullet(doc, "训练3的设计目标是同时解决三类问题：超时自动reset导致的错误价值自举、终止失败样本过少，以及单一门控过大导致的残差不稳定。它并没有改变4 N破碎阈值，也没有解冻BC。")
+
+    add_heading(doc, "2.4 三组训练数据", 2)
     table = doc.add_table(rows=1, cols=8)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
     table.style = "Table Grid"
@@ -285,7 +309,7 @@ def main() -> None:
     doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
     add_caption(doc, "图1  三条DSRL/SAC训练的累计回合结果；虚线为冻结BC的59%成功率基线。")
 
-    add_heading(doc, "2.4 训练趋势与诊断", 2)
+    add_heading(doc, "2.5 训练趋势与诊断", 2)
     doc.add_picture(str(trend_chart), width=Cm(14.8))
     doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
     add_caption(doc, "图2  最近8个统计窗口的成功率变化，显示三组训练仍存在明显波动。")
