@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
@@ -24,7 +26,9 @@ class LabPickEnvCfg(DirectRLEnvCfg):
     terminate_object_drop_height: float = 0.010
     terminate_object_xy_distance: float = 0.30
     terminate_ee_workspace_margin: float = 0.05
-    terminate_break_force_threshold_n: float = 6.0
+    # Glass failure is based on the larger individual fingertip load. Keep the
+    # online DSRL threshold aligned with the BC validation threshold.
+    terminate_break_force_threshold_n: float = 4.0
     contact_force_n_per_mm: float = 8.0
     contact_torque_arm_m: float = 0.018
     marker2d_rows: int = 14
@@ -37,10 +41,34 @@ class LabPickEnvCfg(DirectRLEnvCfg):
     scripted_nominal_ee_quat_b: tuple[float, float, float, float] = (0.0, 1.0, 0.0, 0.0)
     reset_hold_steps: int = 24
     scripted_lift_steps: int = 180
+    scripted_slide_close_width_m: float = 0.0065
     tactile_threshold_mm: float = 0.0
     randomize_labware_position: bool = True
-    labware_pos_randomization_xy: tuple[float, float] = (0.05, 0.05)
-    labware_yaw_randomization: float = 3.1415/180*30
+    # Half ranges: x/y are sampled in [-10 cm, 10 cm], yaw in [-45 deg, 45 deg].
+    labware_pos_randomization_xy: tuple[float, float] = (0.10, 0.10)
+    labware_yaw_randomization: float = math.radians(45.0)
+    labware_yaw_randomization_min_abs: float = 0.0
+
+    # RL-only behavior is opt-in so the existing absolute 10-D CAFE/BC action
+    # interface remains unchanged for data collection and policy deployment.
+    rl_normalized_actions: bool = False
+    rl_privileged_observation: bool = False
+    rl_shaped_reward: bool = False
+    rl_terminate_on_success: bool = False
+    rl_align_cafe_action_yaw: bool = False
+    rl_position_action_scale_m: float = 0.004
+    rl_safe_force_n: float = 3.0
+    rl_reach_reward_scale: float = 20.0
+    rl_lift_reward_scale: float = 100.0
+    rl_first_contact_reward: float = 2.0
+    rl_both_contact_reward: float = 3.0
+    rl_success_reward: float = 50.0
+    rl_failure_penalty: float = 25.0
+    rl_timeout_penalty: float = 0.0
+    rl_late_no_progress_penalty_scale: float = 0.0
+    rl_late_no_progress_onset: float = 0.5
+    rl_force_penalty_scale: float = 0.25
+    rl_action_penalty_scale: float = 0.001
 
     viewer: ViewerCfg = ViewerCfg(
         eye=(1.15, -1.15, 0.65),
@@ -53,7 +81,7 @@ class LabPickEnvCfg(DirectRLEnvCfg):
     decimation = 1
     episode_length_s = 8.0
     action_space = 10
-    observation_space = 14
+    observation_space = 16
     state_space = 0
 
     sim: SimulationCfg = SimulationCfg(
@@ -305,3 +333,48 @@ class LabPickCoverslipEnvCfg(LabPickEnvCfg):
 @configclass
 class LabPickCupEnvCfg(LabPickEnvCfg):
     labware_name = "cup"
+
+
+@configclass
+class LabPickSlideSACEnvCfg(LabPickSlideEnvCfg):
+    """State-based SAC baseline for slide grasping.
+
+    The policy controls Cartesian position increments and absolute gripper
+    width. Slide yaw is handled by the same deterministic alignment used by
+    the successful scripted demonstrations. This keeps the first RL baseline
+    focused on reach, contact-force regulation, grasp closure, and lifting.
+    """
+
+    action_space = 4
+    observation_space = 23
+    rl_normalized_actions = True
+    rl_privileged_observation = True
+    rl_shaped_reward = True
+    rl_terminate_on_success = True
+
+
+@configclass
+class LabPickSlideDSRLBaseEnvCfg(LabPickSlideEnvCfg):
+    """Physical-action environment wrapped by the DSRL noise decoder.
+
+    The wrapper replaces this 10-D CAFE action space with the flattened DDIM
+    noise space seen by SAC. The underlying environment still receives decoded
+    xyz + rot6d + width actions from the frozen Diffusion Policy.
+    """
+
+    action_space = 10
+    observation_space = 16
+    rl_privileged_observation = False
+    rl_shaped_reward = True
+    rl_terminate_on_success = True
+    rl_align_cafe_action_yaw = False
+    rl_reach_reward_scale = 40.0
+    rl_first_contact_reward = 4.0
+    rl_both_contact_reward = 6.0
+    rl_success_reward = 120.0
+    rl_failure_penalty = 30.0
+    # An unsuccessful time limit is a task failure, not a safer alternative
+    # to a normal terminal failure.
+    rl_timeout_penalty = 40.0
+    rl_late_no_progress_penalty_scale = 0.25
+    rl_late_no_progress_onset = 0.5

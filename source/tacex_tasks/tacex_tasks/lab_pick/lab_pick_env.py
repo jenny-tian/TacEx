@@ -67,6 +67,11 @@ class LabPickEnv(DirectRLEnv):
         self.last_object_pos_b = self.initial_object_pos_b.clone()
         self.reset_hold_remaining_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._reset_hold_root_state = torch.zeros_like(self.labware.data.default_root_state)
+        self._rl_last_actions = torch.zeros((self.num_envs, self.cfg.action_space), device=self.device)
+        self._rl_prev_grasp_distance = torch.zeros(self.num_envs, device=self.device)
+        self._rl_prev_lift_delta = torch.zeros(self.num_envs, device=self.device)
+        self._rl_prev_left_contact = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._rl_prev_right_contact = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
@@ -233,12 +238,28 @@ class LabPickEnv(DirectRLEnv):
 
     def _pre_physics_step(self, actions: torch.Tensor | None):
         if actions is not None and actions.numel() > 0:
-            target_pos_b = torch.minimum(torch.maximum(actions[:, :3], self.workspace_min_b), self.workspace_max_b)
+            if self.cfg.rl_normalized_actions:
+                if actions.shape[-1] != 4:
+                    raise ValueError(f"LabPick SAC expects 4 actions, received shape {tuple(actions.shape)}")
+                normalized_actions = actions.clamp(-1.0, 1.0)
+                target_pos_b = self.last_target_pos_b + normalized_actions[:, :3] * self.cfg.rl_position_action_scale_m
+                target_pos_b = torch.minimum(torch.maximum(target_pos_b, self.workspace_min_b), self.workspace_max_b)
+                target_quat_b = self.scripted_target_quat_b
+                gripper_width = (normalized_actions[:, 3:4] + 1.0) * 0.5 * 0.04
+                self._rl_last_actions[:] = normalized_actions
+            else:
+                target_pos_b = torch.minimum(torch.maximum(actions[:, :3], self.workspace_min_b), self.workspace_max_b)
+                target_quat_b = (
+                    self.scripted_target_quat_b
+                    if self.cfg.rl_align_cafe_action_yaw
+                    else self._rot6d_to_quat(actions[:, 3:9])
+                )
+                gripper_width = actions[:, 9:10].clamp(0.0, 0.04)
             self.ik_commands[:, :3] = target_pos_b
-            self.ik_commands[:, 3:7] = self.nominal_ee_quat_b
-            self.gripper_width[:] = actions[:, 9:10].clamp(0.0, 0.04)
+            self.ik_commands[:, 3:7] = target_quat_b
+            self.gripper_width[:] = gripper_width
             self.last_target_pos_b[:] = target_pos_b
-            self.last_target_quat_b[:] = self.nominal_ee_quat_b
+            self.last_target_quat_b[:] = target_quat_b
         self._hold_labware_at_reset_pose()
         self._ik_controller.set_command(self.ik_commands)
 
@@ -268,35 +289,128 @@ class LabPickEnv(DirectRLEnv):
         self.labware.write_root_state_to_sim(root_state, env_ids=hold_env_ids)
         self.reset_hold_remaining_steps[hold_env_ids] -= 1
 
-    def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
+    def _get_termination_flags(self) -> dict[str, torch.Tensor]:
+        """Compute task terminal conditions without changing BC defaults."""
+
         object_pos_b = self.labware.data.root_pos_w - self._robot.data.root_link_pos_w
         object_drop_delta = self.labware.data.root_pos_w[:, 2] - self.initial_object_height
         object_dropped = object_drop_delta < -self.cfg.terminate_object_drop_height
-
         object_xy_delta = object_pos_b[:, :2] - self.initial_object_pos_b[:, :2]
         object_too_far = torch.linalg.norm(object_xy_delta, dim=1) > self.cfg.terminate_object_xy_distance
-
         ee_pos_b, _ = self._compute_frame_pose()
         workspace_min = self.workspace_min_b - self.cfg.terminate_ee_workspace_margin
         workspace_max = self.workspace_max_b + self.cfg.terminate_ee_workspace_margin
         ee_outside_workspace = torch.any((ee_pos_b < workspace_min) | (ee_pos_b > workspace_max), dim=1)
-
         left_touch, right_touch = self.tactile_contact_depths()
         touched = (left_touch > self.cfg.tactile_threshold_mm) | (right_touch > self.cfg.tactile_threshold_mm)
         self.has_touched |= touched
-        ft = self.get_cafe_ft()
-        force_norm = torch.linalg.norm(ft[:, :3], dim=1)
-        object_broken = self.has_touched & (force_norm > self.cfg.terminate_break_force_threshold_n)
+        contact_forces = self.get_contact_force_metrics()
+        force_norm = contact_forces["net_force_n"]
+        break_force_n = contact_forces["max_finger_force_n"]
+        object_broken = self.has_touched & (break_force_n > self.cfg.terminate_break_force_threshold_n)
+        success = object_drop_delta >= self.cfg.success_lift_height
 
-        terminated = object_dropped | object_too_far | ee_outside_workspace | object_broken
+        return {
+            "object_dropped": object_dropped,
+            "object_too_far": object_too_far,
+            "ee_outside_workspace": ee_outside_workspace,
+            "object_broken": object_broken,
+            "success": success,
+            "force_norm": force_norm,
+            "net_force_n": force_norm,
+            "left_finger_force_n": contact_forces["left_finger_force_n"],
+            "right_finger_force_n": contact_forces["right_finger_force_n"],
+            "grip_force_n": contact_forces["grip_force_n"],
+            "break_force_n": break_force_n,
+        }
+
+    def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
+        flags = self._get_termination_flags()
+        terminated = (
+            flags["object_dropped"]
+            | flags["object_too_far"]
+            | flags["ee_outside_workspace"]
+            | flags["object_broken"]
+        )
+        if self.cfg.rl_terminate_on_success:
+            terminated |= flags["success"]
+
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         return terminated, time_out
 
     def _get_rewards(self) -> torch.Tensor:
         lift_delta = self.labware.data.root_pos_w[:, 2] - self.initial_object_height
-        return torch.clamp(lift_delta, min=0.0)
+        if not self.cfg.rl_shaped_reward:
+            return torch.clamp(lift_delta, min=0.0)
+
+        flags = self._get_termination_flags()
+        object_pos_b = self.labware.data.root_pos_w - self._robot.data.root_link_pos_w
+        grasp_distance = torch.linalg.norm(object_pos_b - self._gripper_center_pos_b(), dim=1)
+        reach_progress = self._rl_prev_grasp_distance - grasp_distance
+        lift_progress = lift_delta - self._rl_prev_lift_delta
+
+        left_touch, right_touch = self.tactile_contact_depths()
+        left_contact = left_touch > self.cfg.tactile_threshold_mm
+        right_contact = right_touch > self.cfg.tactile_threshold_mm
+        any_contact = left_contact | right_contact
+        both_contact = left_contact & right_contact
+        previous_any_contact = self._rl_prev_left_contact | self._rl_prev_right_contact
+        previous_both_contact = self._rl_prev_left_contact & self._rl_prev_right_contact
+
+        reward = self.cfg.rl_reach_reward_scale * reach_progress
+        reward += self.cfg.rl_lift_reward_scale * lift_progress
+        reward += self.cfg.rl_first_contact_reward * (any_contact & ~previous_any_contact).float()
+        reward += self.cfg.rl_both_contact_reward * (both_contact & ~previous_both_contact).float()
+        reward += self.cfg.rl_success_reward * flags["success"].float()
+
+        failed = (
+            flags["object_dropped"]
+            | flags["object_too_far"]
+            | flags["ee_outside_workspace"]
+            | flags["object_broken"]
+        )
+        reward -= self.cfg.rl_failure_penalty * failed.float()
+        time_out = self.episode_length_buf >= self.max_episode_length - 1
+        unsuccessful_time_out = time_out & ~flags["success"] & ~failed
+        reward -= self.cfg.rl_timeout_penalty * unsuccessful_time_out.float()
+        episode_progress = self.episode_length_buf.float() / float(self.max_episode_length)
+        late_urgency = torch.clamp(
+            (episode_progress - self.cfg.rl_late_no_progress_onset)
+            / max(1.0 - self.cfg.rl_late_no_progress_onset, 1.0e-6),
+            min=0.0,
+            max=1.0,
+        )
+        normalized_lift = torch.clamp(lift_delta / self.cfg.success_lift_height, min=0.0, max=1.0)
+        incomplete = torch.where(both_contact, 1.0 - normalized_lift, torch.ones_like(normalized_lift))
+        late_no_progress_penalty = (
+            self.cfg.rl_late_no_progress_penalty_scale * late_urgency.square() * incomplete
+        )
+        reward -= late_no_progress_penalty
+        force_excess = torch.clamp(flags["break_force_n"] - self.cfg.rl_safe_force_n, min=0.0)
+        reward -= self.cfg.rl_force_penalty_scale * force_excess.square()
+        reward -= self.cfg.rl_action_penalty_scale * self._rl_last_actions.square().mean(dim=1)
+
+        self._rl_prev_grasp_distance[:] = grasp_distance
+        self._rl_prev_lift_delta[:] = lift_delta
+        self._rl_prev_left_contact[:] = left_contact
+        self._rl_prev_right_contact[:] = right_contact
+        self.extras["log"] = {
+            "LabPick/lift_m": lift_delta.mean(),
+            "LabPick/grasp_distance_m": grasp_distance.mean(),
+            "LabPick/contact_force_n": flags["break_force_n"].mean(),
+            "LabPick/net_contact_force_n": flags["net_force_n"].mean(),
+            "LabPick/success_terminal_step": flags["success"].float().mean(),
+            "LabPick/broken_terminal_step": flags["object_broken"].float().mean(),
+            "LabPick/success_rate": flags["success"].float().mean(),
+            "LabPick/broken_rate": flags["object_broken"].float().mean(),
+            "LabPick/timeout_terminal_step": unsuccessful_time_out.float().mean(),
+            "LabPick/late_no_progress_penalty": late_no_progress_penalty.mean(),
+        }
+        return reward
 
     def _get_observations(self) -> dict:
+        if self.cfg.rl_privileged_observation:
+            return {"policy": self._get_rl_observation()}
         obs = self.get_cafe_observation()
         policy = torch.cat((obs["robot0_pos"], obs["robot0_force"]), dim=-1)
         return {"policy": policy}
@@ -319,7 +433,16 @@ class LabPickEnv(DirectRLEnv):
             root_state[:, 0:2] += xy_noise
 
             yaw_range = self.cfg.labware_yaw_randomization
-            yaw = (2.0 * torch.rand((len(env_ids),), dtype=root_state.dtype, device=self.device) - 1.0) * yaw_range
+            yaw_min_abs = min(max(self.cfg.labware_yaw_randomization_min_abs, 0.0), yaw_range)
+            yaw_abs = yaw_min_abs + torch.rand(
+                (len(env_ids),), dtype=root_state.dtype, device=self.device
+            ) * (yaw_range - yaw_min_abs)
+            yaw_sign = torch.where(
+                torch.rand((len(env_ids),), dtype=root_state.dtype, device=self.device) < 0.5,
+                -torch.ones((len(env_ids),), dtype=root_state.dtype, device=self.device),
+                torch.ones((len(env_ids),), dtype=root_state.dtype, device=self.device),
+            )
+            yaw = yaw_sign * yaw_abs
             yaw_quat = math_utils.quat_from_euler_xyz(
                 torch.zeros_like(yaw),
                 torch.zeros_like(yaw),
@@ -366,6 +489,15 @@ class LabPickEnv(DirectRLEnv):
         self.reset_keyboard_target(env_ids)
         self.gsmini_left.reset(env_ids=env_ids)
         self.gsmini_right.reset(env_ids=env_ids)
+        if self.cfg.rl_shaped_reward:
+            object_pos_b = self.labware.data.root_pos_w - self._robot.data.root_link_pos_w
+            self._rl_prev_grasp_distance[env_ids] = torch.linalg.norm(
+                object_pos_b[env_ids] - self._gripper_center_pos_b()[env_ids], dim=1
+            )
+            self._rl_prev_lift_delta[env_ids] = 0.0
+            self._rl_prev_left_contact[env_ids] = False
+            self._rl_prev_right_contact[env_ids] = False
+            self._rl_last_actions[env_ids] = 0.0
 
     def _calibrate_gripper_center_offset(self, env_ids: torch.Tensor):
         left_pos_w = self._robot.data.body_link_pos_w[:, self._left_finger_body_idx]
@@ -409,6 +541,66 @@ class LabPickEnv(DirectRLEnv):
         rot_mat = math_utils.matrix_from_quat(quat_wxyz)
         return rot_mat[:, :, :2].reshape(quat_wxyz.shape[0], 6)
 
+    @staticmethod
+    def _rot6d_to_quat(rot6d: torch.Tensor) -> torch.Tensor:
+        matrix_3x2 = rot6d.reshape(-1, 3, 2)
+        first = F.normalize(matrix_3x2[:, :, 0], dim=-1, eps=1.0e-6)
+        second_raw = matrix_3x2[:, :, 1]
+        second = F.normalize(
+            second_raw - (first * second_raw).sum(dim=-1, keepdim=True) * first,
+            dim=-1,
+            eps=1.0e-6,
+        )
+        third = torch.cross(first, second, dim=-1)
+        return math_utils.quat_from_matrix(torch.stack((first, second, third), dim=-1))
+
+    def _gripper_center_pos_b(self) -> torch.Tensor:
+        tool_pos_b, tool_quat_b = self._compute_frame_pose()
+        return tool_pos_b + math_utils.quat_apply(tool_quat_b, self.gripper_center_offset_tool)
+
+    def _get_rl_observation(self) -> torch.Tensor:
+        """Return a normalized 23-D privileged state for the SAC baseline."""
+
+        tool_pos_b, _ = self._compute_frame_pose()
+        workspace_center = 0.5 * (self.workspace_min_b + self.workspace_max_b)
+        workspace_half_range = 0.5 * (self.workspace_max_b - self.workspace_min_b)
+        normalized_tool_pos = ((tool_pos_b - workspace_center) / workspace_half_range).clamp(-2.0, 2.0)
+
+        root_pos_w = self._robot.data.root_link_pos_w
+        root_quat_w = self._robot.data.root_link_quat_w
+        object_pos_b = self.labware.data.root_pos_w - root_pos_w
+        relative_object_pos = ((object_pos_b - self._gripper_center_pos_b()) / 0.25).clamp(-2.0, 2.0)
+        object_quat_b = math_utils.quat_mul(math_utils.quat_inv(root_quat_w), self.labware.data.root_quat_w)
+        object_rot6d_b = self._quat_to_rot6d(object_quat_b)
+
+        normalized_width = (2.0 * self.gripper_width[:, :1] / 0.04 - 1.0).clamp(-1.0, 1.0)
+        ft = self.get_cafe_ft()
+        force_scale = max(self.cfg.terminate_break_force_threshold_n, 1.0e-6)
+        torque_scale = max(force_scale * self.cfg.contact_torque_arm_m, 1.0e-6)
+        normalized_ft = torch.cat((ft[:, :3] / force_scale, ft[:, 3:] / torque_scale), dim=-1).clamp(-2.0, 2.0)
+
+        left_touch, right_touch = self.tactile_contact_depths()
+        touch_scale = max(force_scale / (2.0 * self.cfg.contact_force_n_per_mm), 1.0e-6)
+        normalized_touch = torch.stack((left_touch, right_touch), dim=-1).div(touch_scale).clamp(0.0, 2.0)
+        lift_progress = (
+            (self.labware.data.root_pos_w[:, 2] - self.initial_object_height) / self.cfg.success_lift_height
+        ).clamp(-1.0, 2.0).unsqueeze(-1)
+        touched = self.has_touched.float().unsqueeze(-1)
+
+        return torch.cat(
+            (
+                normalized_tool_pos,
+                relative_object_pos,
+                object_rot6d_b,
+                normalized_width,
+                normalized_ft,
+                normalized_touch,
+                lift_progress,
+                touched,
+            ),
+            dim=-1,
+        )
+
     def get_cafe_observation(self) -> dict[str, torch.Tensor]:
         tool_pos_b, tool_quat_b = self._compute_frame_pose()
         tool_rot6d_b = self._quat_to_rot6d(tool_quat_b)
@@ -425,6 +617,31 @@ class LabPickEnv(DirectRLEnv):
         if contact_ft is not None:
             return contact_ft
         return self._indentation_ft()
+
+    def get_contact_force_metrics(self) -> dict[str, torch.Tensor]:
+        """Return per-finger loads separately from the CAFE net wrench."""
+
+        if hasattr(self, "left_finger_contact_sensor") and hasattr(self, "right_finger_contact_sensor"):
+            left_force_w = self._contact_force_from_sensor(self.left_finger_contact_sensor)
+            right_force_w = self._contact_force_from_sensor(self.right_finger_contact_sensor)
+            if torch.all(torch.isfinite(left_force_w)) and torch.all(torch.isfinite(right_force_w)):
+                left_force_n = torch.linalg.norm(left_force_w, dim=1)
+                right_force_n = torch.linalg.norm(right_force_w, dim=1)
+                net_force_n = torch.linalg.norm(left_force_w + right_force_w, dim=1)
+            else:
+                left_force_n, right_force_n = self._estimate_contact_forces_from_tactile()
+                net_force_n = left_force_n + right_force_n
+        else:
+            left_force_n, right_force_n = self._estimate_contact_forces_from_tactile()
+            net_force_n = left_force_n + right_force_n
+
+        return {
+            "left_finger_force_n": left_force_n,
+            "right_finger_force_n": right_force_n,
+            "grip_force_n": 0.5 * (left_force_n + right_force_n),
+            "max_finger_force_n": torch.maximum(left_force_n, right_force_n),
+            "net_force_n": net_force_n,
+        }
 
     def _indentation_ft(self) -> torch.Tensor:
         left_force_n, right_force_n = self._estimate_contact_forces_from_tactile()
@@ -519,7 +736,7 @@ class LabPickEnv(DirectRLEnv):
         rgb = rgb.permute(0, 2, 3, 1).clamp(0, 255).byte()
         return rgb.detach().clone()
 
-    def command_pick_state_machine(self):
+    def command_pick_state_machine(self, slide_close_width_m: float | None = None):
         center_target_b = self.initial_object_pos_b.clone()
         target_quat_b = self.scripted_target_quat_b
         touch_left, touch_right = self.tactile_contact_depths()
@@ -538,7 +755,11 @@ class LabPickEnv(DirectRLEnv):
             hover_height = 0.048
             grasp_height = 0.0006
             lift_height = 0.25
-            close_width = 0.006
+            close_width = (
+                self.cfg.scripted_slide_close_width_m
+                if slide_close_width_m is None
+                else float(slide_close_width_m)
+            )
             close_start = 300
             close_end = 420
             squeeze_steps = 180

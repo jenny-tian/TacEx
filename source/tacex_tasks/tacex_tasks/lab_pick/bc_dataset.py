@@ -174,6 +174,9 @@ class CafeRecordWriter:
         success: bool,
         labware_reset_pos_w: np.ndarray,
         labware_reset_quat_w: np.ndarray,
+        demonstration_mode: str = "",
+        failure_reason: str = "",
+        peak_break_force_n: float = 0.0,
     ):
         if not self.aligned_samples:
             self.clear_episode()
@@ -223,8 +226,13 @@ class CafeRecordWriter:
         np.savez(
             self.record_dir / "metadata.npz",
             success=np.asarray(success, dtype=np.bool_),
+            schema_version=np.asarray(2, dtype=np.int64),
+            observation_timing=np.asarray("pre_action"),
             labware_reset_pos_w=np.asarray(labware_reset_pos_w, dtype=np.float32).reshape(3),
             labware_reset_quat_w=np.asarray(labware_reset_quat_w, dtype=np.float32).reshape(4),
+            demonstration_mode=np.asarray(demonstration_mode),
+            failure_reason=np.asarray(failure_reason),
+            peak_break_force_n=np.asarray(peak_break_force_n, dtype=np.float32),
         )
 
         self.clear_episode()

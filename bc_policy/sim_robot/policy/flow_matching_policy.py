@@ -18,6 +18,8 @@ class SimFlowMatchingConfig:
     action_dim: int = 10
     n_state_obs_steps: int = 2
     n_image_obs_steps: int = 2
+    image_keys: tuple[str, ...] = ("robot0_image",)
+    image_normalization: str = "none"
     n_action_steps: int = 32
     image_feature_dim: int = 1024
     obs_feature_dim: int = 1024
@@ -30,6 +32,11 @@ class SimFlowMatchingConfig:
     num_inference_steps: int = 100
     ode_solver: str = "euler"
     clip_sample: bool = True
+    visual_xy_loss_weight: float = 0.0
+    rotation_loss_weight: float = 0.0
+    visual_rotation_loss_weight: float = 0.0
+    action_normalizer_center: tuple[float, ...] = ()
+    action_normalizer_scale: tuple[float, ...] = ()
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -54,6 +61,8 @@ class SimFlowMatchingPolicy(nn.Module):
             image_feature_dim=config.image_feature_dim,
             step_feature_dim=config.obs_feature_dim,
             dropout=config.dropout,
+            image_keys=tuple(config.image_keys),
+            image_normalization=config.image_normalization,
         )
         self.velocity_net = CrossAttentionTransformer(
             input_dim=config.action_dim,
@@ -68,6 +77,45 @@ class SimFlowMatchingPolicy(nn.Module):
             p_drop_attn=config.dropout,
             n_cond_layers=config.transformer_cond_layers,
         )
+        self.visual_xy_head = None
+        if config.visual_xy_loss_weight > 0.0:
+            self.visual_xy_head = nn.Sequential(
+                nn.LayerNorm(config.obs_feature_dim),
+                nn.Linear(config.obs_feature_dim, 2),
+            )
+        self.visual_rotation_head = None
+        if config.visual_rotation_loss_weight > 0.0:
+            self.visual_rotation_head = nn.Sequential(
+                nn.LayerNorm(config.obs_feature_dim),
+                nn.Linear(config.obs_feature_dim, 6),
+            )
+
+    @staticmethod
+    def _rot6d_to_matrix(rot6d: torch.Tensor) -> torch.Tensor:
+        matrix_3x2 = rot6d.reshape(*rot6d.shape[:-1], 3, 2)
+        first = F.normalize(matrix_3x2[..., :, 0], dim=-1, eps=1.0e-6)
+        second_raw = matrix_3x2[..., :, 1]
+        second = F.normalize(
+            second_raw - (first * second_raw).sum(dim=-1, keepdim=True) * first,
+            dim=-1,
+            eps=1.0e-6,
+        )
+        third = torch.cross(first, second, dim=-1)
+        return torch.stack((first, second, third), dim=-1)
+
+    def _physical_rot6d(self, normalized_action: torch.Tensor) -> torch.Tensor:
+        if len(self.config.action_normalizer_center) != self.config.action_dim:
+            return normalized_action[..., 3:9]
+        center = normalized_action.new_tensor(self.config.action_normalizer_center[3:9])
+        scale = normalized_action.new_tensor(self.config.action_normalizer_scale[3:9])
+        return normalized_action[..., 3:9] * scale + center
+
+    def _rotation_loss(self, prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        pred_matrix = self._rot6d_to_matrix(self._physical_rot6d(prediction))
+        target_matrix = self._rot6d_to_matrix(self._physical_rot6d(target))
+        relative = pred_matrix.transpose(-1, -2) @ target_matrix
+        cosine = ((relative.diagonal(dim1=-2, dim2=-1).sum(dim=-1) - 1.0) * 0.5).clamp(-1.0, 1.0)
+        return (1.0 - cosine).mean()
 
     def _model_time(self, t: torch.Tensor) -> torch.Tensor:
         return t * float(self.config.time_embed_scale)
@@ -86,9 +134,32 @@ class SimFlowMatchingPolicy(nn.Module):
         t_view = t.view(batch_size, *([1] * (action.ndim - 1)))
         xt = (1.0 - t_view) * x0 + t_view * x1
         target_velocity = x1 - x0
-        pred_velocity = self._model_forward(xt, t, obs)
-        loss = F.mse_loss(pred_velocity, target_velocity)
-        return {"loss": loss}
+        cond_tokens, _ = self.obs_encoder(obs)
+        pred_velocity = self.velocity_net(xt, self._model_time(t), cond_tokens=cond_tokens)
+        flow_loss = F.mse_loss(pred_velocity, target_velocity)
+        loss = flow_loss
+        result = {"loss": loss, "flow_loss": flow_loss}
+        if self.config.rotation_loss_weight > 0.0:
+            predicted_action = x0 + pred_velocity
+            rotation_loss = self._rotation_loss(predicted_action, action)
+            loss = loss + self.config.rotation_loss_weight * rotation_loss
+            result["rotation_loss"] = rotation_loss
+        if self.visual_xy_head is not None:
+            image_tokens = cond_tokens[:, self.config.n_state_obs_steps :]
+            pred_xy = self.visual_xy_head(image_tokens.mean(dim=1))
+            visual_xy_loss = F.mse_loss(pred_xy, action[:, 0, :2])
+            loss = loss + self.config.visual_xy_loss_weight * visual_xy_loss
+            result["visual_xy_loss"] = visual_xy_loss
+        if self.visual_rotation_head is not None:
+            image_tokens = cond_tokens[:, self.config.n_state_obs_steps :]
+            pred_rotation = self.visual_rotation_head(image_tokens.mean(dim=1))
+            visual_action = action[:, 0].clone()
+            visual_action[:, 3:9] = pred_rotation
+            visual_rotation_loss = self._rotation_loss(visual_action, action[:, 0])
+            loss = loss + self.config.visual_rotation_loss_weight * visual_rotation_loss
+            result["visual_rotation_loss"] = visual_rotation_loss
+        result["loss"] = loss
+        return result
 
     @torch.no_grad()
     def predict_action(
@@ -96,6 +167,7 @@ class SimFlowMatchingPolicy(nn.Module):
         obs: dict[str, torch.Tensor],
         generator: torch.Generator | None = None,
         num_inference_steps: int | None = None,
+        initial_noise: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         device = next(self.parameters()).device
         obs = {key: value.to(device) for key, value in obs.items()}
@@ -104,13 +176,23 @@ class SimFlowMatchingPolicy(nn.Module):
         if steps < 1:
             raise ValueError("num_inference_steps must be >= 1")
 
-        action = torch.randn(
+        expected_noise_shape = (
             batch_size,
             self.config.n_action_steps,
             self.config.action_dim,
-            device=device,
-            generator=generator,
         )
+        if initial_noise is None:
+            action = torch.randn(
+                *expected_noise_shape,
+                device=device,
+                generator=generator,
+            )
+        else:
+            if tuple(initial_noise.shape) != expected_noise_shape:
+                raise ValueError(
+                    f"initial_noise must have shape {expected_noise_shape}, got {tuple(initial_noise.shape)}"
+                )
+            action = initial_noise.to(device=device, dtype=obs["robot0_pos"].dtype).clone()
         dt = 1.0 / float(steps)
         for i in range(steps):
             t0 = torch.full((batch_size,), i / float(steps), device=device, dtype=action.dtype)
@@ -124,9 +206,21 @@ class SimFlowMatchingPolicy(nn.Module):
                 action = action + dt * v0
             if self.config.clip_sample:
                 action = action.clamp(-1.0, 1.0)
+        visual_xy = None
+        visual_rotation = None
+        if self.visual_xy_head is not None or self.visual_rotation_head is not None:
+            cond_tokens, _ = self.obs_encoder(obs)
+            image_tokens = cond_tokens[:, self.config.n_state_obs_steps :]
+            pooled_image = image_tokens.mean(dim=1)
+            if self.visual_xy_head is not None:
+                visual_xy = self.visual_xy_head(pooled_image)
+            if self.visual_rotation_head is not None:
+                visual_rotation = self.visual_rotation_head(pooled_image)
         return {
             "action": action,
             "action_pred": action,
+            "visual_xy": visual_xy,
+            "visual_rotation": visual_rotation,
         }
 
 
@@ -176,4 +270,3 @@ def load_policy(
     normalizer = LinearNormalizer()
     normalizer.load_state_dict(ckpt["normalizer"])
     return model, normalizer, ckpt
-
