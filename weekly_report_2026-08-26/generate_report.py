@@ -247,7 +247,17 @@ def main() -> None:
     ]:
         add_bullet(doc, text)
 
-    add_heading(doc, "2.2 DSRL/SAC结构与本周改动", 2)
+    add_heading(doc, "2.2 视觉输入改动", 2)
+    for text in [
+        "冻结BC和DSRL统一使用两路相机：腕部RGB与第三视角RGB；每路保留2帧历史并调整为224×224，连同机器人状态和phase输入同一个BC视觉编码器。",
+        "DSRL不再使用relative_object_pos、object_rot6d等仿真物体真值。SAC接收冻结BC encoder产生的global_cond，因此视觉信息来自与BC完全相同的可观测图像和机器人本体状态。",
+        "新增独立VisualPoseProbe：从冻结BC的图像token池化特征和当前机器人状态推断归一化相对位置3维、相对旋转rot6d 6维及1维置信度，共10维；probe的仿真位姿只在离线训练时作为监督标签，运行时输入只有图像和机器人状态。",
+        "在物理残差模式下，probe输出的位姿前9维按置信度缩放，置信度作为最后一维保留；该10维视觉位姿摘要与BC编码、4段BC动作摘要和剩余时间一起提供给SAC。",
+        "视觉旋转头预测的rot6d直接写入BC动作执行链路；DSRL只在此动作上学习物理残差，不再用ground-truth物体朝向或脚本yaw替换BC旋转。",
+    ]:
+        add_bullet(doc, text)
+
+    add_heading(doc, "2.3 DSRL/SAC结构与本周改动", 2)
     for text in [
         "残差策略采用4段×10维物理动作残差加1维软门控，共41维；每段修正xyz、rot6d和夹爪宽度，冻结BC仍负责生成完整动作轨迹。",
         "Actor和Critic均使用3层512维MLP，每层加入LayerNorm和ELU。Actor从近零残差初始化，避免训练开始即破坏BC行为。",
@@ -257,7 +267,7 @@ def main() -> None:
     ]:
         add_bullet(doc, text)
 
-    add_heading(doc, "2.3 训练3相对前两条的具体改动", 2)
+    add_heading(doc, "2.4 训练3相对前两条的具体改动", 2)
     add_bullet(doc, "训练3不是从训练1或训练2续训，而是使用冻结BC重新初始化SAC，seed=45；前两条分别使用seed=42和seed=43。")
     table = doc.add_table(rows=1, cols=4)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
@@ -281,7 +291,7 @@ def main() -> None:
             set_cell_text(cell, value, size=8.0)
     add_bullet(doc, "训练3的设计目标是同时解决三类问题：超时自动reset导致的错误价值自举、终止失败样本过少，以及单一门控过大导致的残差不稳定。它并没有改变4 N破碎阈值，也没有解冻BC。")
 
-    add_heading(doc, "2.4 三组训练数据", 2)
+    add_heading(doc, "2.5 三组训练数据", 2)
     table = doc.add_table(rows=1, cols=8)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
     table.style = "Table Grid"
@@ -309,7 +319,7 @@ def main() -> None:
     doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
     add_caption(doc, "图1  三条DSRL/SAC训练的累计回合结果；虚线为冻结BC的59%成功率基线。")
 
-    add_heading(doc, "2.5 训练趋势与诊断", 2)
+    add_heading(doc, "2.6 训练趋势与诊断", 2)
     doc.add_picture(str(trend_chart), width=Cm(14.8))
     doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
     add_caption(doc, "图2  最近8个统计窗口的成功率变化，显示三组训练仍存在明显波动。")
