@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 from typing import Any
 
 import numpy as np
@@ -12,7 +13,7 @@ from sim_robot.deployment.policy_runner import SimActionChunkPolicyRunner
 class FlowMatchingNoiseAdapter:
     """Expose a frozen sim_robot Flow Matching prior as a DSRL action space."""
 
-    def __init__(self, runner: SimActionChunkPolicyRunner) -> None:
+    def __init__(self, runner: Any) -> None:
         self.runner = runner
         self.horizon = int(runner.config.n_action_steps)
         self.action_dim = int(runner.config.action_dim)
@@ -30,8 +31,24 @@ class FlowMatchingNoiseAdapter:
         use_visual_xy_override: bool = True,
         seed: int | None = None,
     ) -> "FlowMatchingNoiseAdapter":
-        runner = SimActionChunkPolicyRunner(
-            checkpoint_path=checkpoint,
+        checkpoint_path = Path(checkpoint).expanduser().resolve()
+        try:
+            payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        except TypeError:
+            payload = torch.load(checkpoint_path, map_location="cpu")
+        model_type = payload.get("model_type")
+        del payload
+        runner_type: Any = SimActionChunkPolicyRunner
+        if model_type == "tacex_dinov3_flow_matching_bc_v2":
+            repo_root = Path(__file__).resolve().parents[3]
+            bc_training = repo_root / "scripts" / "bc_training"
+            if str(bc_training) not in sys.path:
+                sys.path.insert(0, str(bc_training))
+            from dinov3_flow import DINOv3FlowRunner
+
+            runner_type = DINOv3FlowRunner
+        runner = runner_type(
+            checkpoint_path=checkpoint_path,
             device=device,
             use_ema=True,
             num_inference_steps=num_inference_steps,
@@ -47,6 +64,8 @@ class FlowMatchingNoiseAdapter:
 
     @property
     def observation_dim(self) -> int:
+        if hasattr(self.runner, "observation_dim"):
+            return int(self.runner.observation_dim)
         return int(self.runner.model.obs_encoder.global_cond_dim)
 
     @property
@@ -88,17 +107,19 @@ class FlowMatchingNoiseAdapter:
             extras.append(
                 {"position_failure": -1.0, "safe": 0.0, "overforce": 1.0}[mode]
             )
+        expected_dim = int(self.runner.config.robot0_pos_dim)
+        physical_dim = int(physical_proprioception.shape[-1])
         model_state = physical_proprioception
-        if extras:
+        if expected_dim == physical_dim + len(extras) and extras:
             conditioning = physical_proprioception.new_tensor(extras).expand(
                 physical_proprioception.shape[0], -1
             )
             model_state = torch.cat((physical_proprioception, conditioning), dim=-1)
-        if model_state.shape[-1] != int(self.runner.config.robot0_pos_dim):
+        if model_state.shape[-1] != expected_dim:
             raise ValueError(
                 "Flow checkpoint state mismatch: prepared "
                 f"{model_state.shape[-1]} values, expected "
-                f"{self.runner.config.robot0_pos_dim}."
+                f"{expected_dim}."
             )
         normalized = self.runner.normalizer.normalize_tensor("robot0_pos", model_state)
         return normalized[:, :10]
@@ -116,8 +137,23 @@ class FlowMatchingNoiseAdapter:
         return torch.as_tensor(action_chunk, dtype=torch.float32, device=self.runner.device)
 
     @torch.inference_mode()
-    def decode_with_normalized(self) -> tuple[torch.Tensor, torch.Tensor]:
-        """Decode one native BC chunk in physical and normalized coordinates."""
+    def decode_with_normalized(
+        self,
+        *,
+        noise_seed: int | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Decode one BC chunk, optionally reusing a deterministic noise template."""
+
+        if noise_seed is not None:
+            if isinstance(noise_seed, bool) or not isinstance(noise_seed, int):
+                raise TypeError("noise_seed must be an integer or None.")
+            if noise_seed < 0:
+                raise ValueError("noise_seed must be non-negative when provided.")
+            if self.runner.generator is None:
+                raise RuntimeError(
+                    "A fixed Flow noise seed requires the policy runner to own a generator."
+                )
+            self.runner.generator.manual_seed(noise_seed)
 
         physical = self.decode(None)
         normalized = self.runner.normalizer.normalize_tensor("action", physical)

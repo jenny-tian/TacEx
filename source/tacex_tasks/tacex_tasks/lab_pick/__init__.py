@@ -13,6 +13,7 @@ from .lab_pick_env_cfg import (
 SAC_CFG_ENTRY_POINT = f"{agents.__name__}:skrl_sac_cfg.yaml"
 DSRL_SAC_CFG_ENTRY_POINT = f"{agents.__name__}:skrl_dsrl_sac_cfg.yaml"
 CLEAN_RESIDUAL_SAC_CFG_ENTRY_POINT = f"{agents.__name__}:skrl_clean_residual_sac_cfg.yaml"
+CLEAN_DSRL_SAC_CFG_ENTRY_POINT = f"{agents.__name__}:skrl_clean_dsrl_sac_cfg.yaml"
 
 gym.register(
     id="TacEx-LabPick-Slide-Direct-v0",
@@ -65,5 +66,16 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": LabPickSlideCleanResidualSACEnvCfg,
         "skrl_clean_sac_cfg_entry_point": CLEAN_RESIDUAL_SAC_CFG_ENTRY_POINT,
+    },
+)
+
+
+gym.register(
+    id="TacEx-LabPick-Slide-Clean-DSRL-SAC-v0",
+    entry_point=f"{__name__}.lab_pick_env:LabPickEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": LabPickSlideDSRLBaseEnvCfg,
+        "skrl_clean_dsrl_cfg_entry_point": CLEAN_DSRL_SAC_CFG_ENTRY_POINT,
     },
 )

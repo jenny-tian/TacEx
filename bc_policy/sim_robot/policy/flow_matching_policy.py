@@ -143,14 +143,21 @@ class SimFlowMatchingPolicy(nn.Module):
                     f"initial_noise must have shape {expected_noise_shape}, got {tuple(initial_noise.shape)}"
                 )
             action = initial_noise.to(device=device, dtype=obs["robot0_pos"].dtype).clone()
+
+        # The observation is constant throughout one ODE solve. Encoding it in
+        # every velocity evaluation needlessly repeats the ResNet forward pass
+        # (and is especially expensive for multi-camera observation histories).
+        # Keep the cache local to this prediction so it can never become stale
+        # across replans.
+        cond_tokens, _ = self.obs_encoder(obs)
         dt = 1.0 / float(steps)
         for i in range(steps):
             t0 = torch.full((batch_size,), i / float(steps), device=device, dtype=action.dtype)
-            v0 = self._model_forward(action, t0, obs)
+            v0 = self.velocity_net(action, self._model_time(t0), cond_tokens=cond_tokens)
             if self.config.ode_solver == "heun" and i < steps - 1:
                 proposal = action + dt * v0
                 t1 = torch.full((batch_size,), (i + 1) / float(steps), device=device, dtype=action.dtype)
-                v1 = self._model_forward(proposal, t1, obs)
+                v1 = self.velocity_net(proposal, self._model_time(t1), cond_tokens=cond_tokens)
                 action = action + 0.5 * dt * (v0 + v1)
             else:
                 action = action + dt * v0
@@ -158,7 +165,6 @@ class SimFlowMatchingPolicy(nn.Module):
                 action = action.clamp(-1.0, 1.0)
         visual_xy = None
         if self.visual_xy_head is not None:
-            cond_tokens, _ = self.obs_encoder(obs)
             image_tokens = cond_tokens[:, self.config.n_state_obs_steps :]
             visual_xy = self.visual_xy_head(image_tokens.mean(dim=1))
         return {
@@ -214,4 +220,3 @@ def load_policy(
     normalizer = LinearNormalizer()
     normalizer.load_state_dict(ckpt["normalizer"])
     return model, normalizer, ckpt
-

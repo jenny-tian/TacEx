@@ -28,9 +28,27 @@ parser.add_argument("--batch_size", type=int, default=None)
 parser.add_argument("--checkpoint_interval", type=int, default=None)
 parser.add_argument("--write_interval", type=int, default=None)
 parser.add_argument("--bc_policy", type=str, default=None, help="Required Flow BC checkpoint.")
+parser.add_argument(
+    "--resume_checkpoint",
+    type=str,
+    default=None,
+    help="Optional SKRL agent checkpoint used to continue actor, critics, targets, and optimizers.",
+)
+parser.add_argument(
+    "--resume_step",
+    type=int,
+    default=0,
+    help="Completed training steps represented by --resume_checkpoint (metadata and run naming only).",
+)
 parser.add_argument("--bc_device", type=str, default="cuda:0")
 parser.add_argument("--residual_scale", type=float, default=0.15)
 parser.add_argument("--flow_num_inference_steps", type=int, default=20)
+parser.add_argument(
+    "--flow_noise_seed",
+    type=int,
+    default=None,
+    help="Base seed for the per-episode Flow noise template; defaults to --seed.",
+)
 parser.add_argument("--phase_horizon_steps", type=int, default=383)
 parser.add_argument("--camera_warmup_steps", type=int, default=8)
 parser.add_argument("--labware_random_xy_m", type=float, nargs=2, default=(0.10, 0.10))
@@ -86,10 +104,18 @@ def _validate_cli() -> None:
         raise ValueError("--bc_policy is required.")
     if not os.path.isfile(args_cli.bc_policy):
         raise FileNotFoundError(f"Frozen Flow checkpoint not found: {args_cli.bc_policy}")
+    if args_cli.resume_checkpoint is not None and not os.path.isfile(args_cli.resume_checkpoint):
+        raise FileNotFoundError(f"Resume checkpoint not found: {args_cli.resume_checkpoint}")
+    if args_cli.resume_checkpoint is not None and args_cli.resume_step < 1:
+        raise ValueError("--resume_step must be positive when --resume_checkpoint is provided.")
+    if args_cli.resume_checkpoint is None and args_cli.resume_step != 0:
+        raise ValueError("--resume_step requires --resume_checkpoint.")
     if not math.isfinite(args_cli.residual_scale) or args_cli.residual_scale <= 0:
         raise ValueError("--residual_scale must be finite and positive.")
     if args_cli.flow_num_inference_steps < 1:
         raise ValueError("--flow_num_inference_steps must be positive.")
+    if args_cli.flow_noise_seed is not None and args_cli.flow_noise_seed < 0:
+        raise ValueError("--flow_noise_seed must be non-negative.")
     if args_cli.phase_horizon_steps < 1:
         raise ValueError("--phase_horizon_steps must be positive.")
     if args_cli.camera_warmup_steps < 1:
@@ -151,10 +177,17 @@ def main(
     if args_cli.write_interval is not None:
         agent_cfg["agent"]["experiment"]["write_interval"] = args_cli.write_interval
 
+    flow_noise_seed = (
+        args_cli.seed if args_cli.flow_noise_seed is None else args_cli.flow_noise_seed
+    )
     scale_tag = str(args_cli.residual_scale).replace(".", "p")
     agent_cfg["agent"]["experiment"]["experiment_name"] = (
-        f"clean_residual_sac_s{scale_tag}_v1"
+        f"clean_residual_sac_s{scale_tag}_fixednoise_chunk10_v3"
     )
+    if args_cli.resume_checkpoint is not None:
+        agent_cfg["agent"]["experiment"]["experiment_name"] += (
+            f"_resume{args_cli.resume_step}"
+        )
     log_root = os.path.abspath(
         os.path.join(
             "logs",
@@ -175,7 +208,7 @@ def main(
     dump_yaml(
         os.path.join(log_dir, "params", "clean_residual_sac.yaml"),
         {
-            "contract": "clean_residual_sac_oracle_yaw_xyz_width_v1",
+            "contract": "clean_residual_sac_oracle_yaw_xyz_width_fixednoise_chunk10_v3",
             "algorithm_name": "SAC",
             "objective": "alpha_zero_one_step_twin_q",
             "entropy_loss": False,
@@ -204,6 +237,8 @@ def main(
             "bc_checkpoint_bytes": os.path.getsize(args_cli.bc_policy),
             "bc_checkpoint_sha256": _sha256(args_cli.bc_policy),
             "flow_num_inference_steps": args_cli.flow_num_inference_steps,
+            "flow_noise_seed_base": flow_noise_seed,
+            "flow_noise_semantics": "fixed_within_episode_base_seed_plus_episode_index",
             "flow_phase_horizon_steps": args_cli.phase_horizon_steps,
             "flow_camera_warmup_steps": args_cli.camera_warmup_steps,
             "flow_visual_xy_override": True,
@@ -212,13 +247,26 @@ def main(
             "action_repeat": 2,
             "environment_reward_only": True,
             "environment_reward": "lab_pick_dense_shaped_reward",
+            "contact_reward_semantics": "first_any_and_first_bilateral_contact_once_per_episode",
             "agent_side_potential_shaping": False,
             "timeout_is_terminal_for_bootstrap": True,
             "discount_factor": agent_cfg["agent"]["discount_factor"],
             "polyak": agent_cfg["agent"]["polyak"],
             "learning_rate": agent_cfg["agent"]["learning_rate"],
             "learning_starts": agent_cfg["agent"]["learning_starts"],
-            "checkpoint_semantics": "fresh_training_only",
+            "checkpoint_semantics": (
+                "fresh_training_only"
+                if args_cli.resume_checkpoint is None
+                else "continued_model_and_optimizers_with_fresh_replay"
+            ),
+            "resume_checkpoint": (
+                None
+                if args_cli.resume_checkpoint is None
+                else os.path.abspath(args_cli.resume_checkpoint)
+            ),
+            "resume_step": args_cli.resume_step,
+            "additional_timesteps": agent_cfg["trainer"]["timesteps"],
+            "replay_buffer_restored": False,
         },
     )
 
@@ -235,7 +283,7 @@ def main(
         flow_num_inference_steps=args_cli.flow_num_inference_steps,
         phase_horizon_steps=args_cli.phase_horizon_steps,
         camera_warmup_steps=args_cli.camera_warmup_steps,
-        seed=args_cli.seed,
+        seed=flow_noise_seed,
     )
     layout = env.layout
 
@@ -296,6 +344,12 @@ def main(
         env=env,
         agents=agent,
     )
+    if args_cli.resume_checkpoint is not None:
+        agent.load(args_cli.resume_checkpoint)
+        print(
+            "[INFO] Restored actor, critics, target critics, and optimizers from "
+            f"{args_cli.resume_checkpoint}; replay memory starts empty."
+        )
     trainer.train()
     env.close()
 

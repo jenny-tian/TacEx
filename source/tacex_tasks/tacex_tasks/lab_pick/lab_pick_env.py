@@ -70,8 +70,8 @@ class LabPickEnv(DirectRLEnv):
         self._rl_last_actions = torch.zeros((self.num_envs, self.cfg.action_space), device=self.device)
         self._rl_prev_grasp_distance = torch.zeros(self.num_envs, device=self.device)
         self._rl_prev_lift_delta = torch.zeros(self.num_envs, device=self.device)
-        self._rl_prev_left_contact = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        self._rl_prev_right_contact = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._rl_any_contact_rewarded = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._rl_both_contact_rewarded = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
@@ -354,14 +354,14 @@ class LabPickEnv(DirectRLEnv):
         right_contact = right_touch > self.cfg.tactile_threshold_mm
         any_contact = left_contact | right_contact
         both_contact = left_contact & right_contact
-        previous_any_contact = self._rl_prev_left_contact | self._rl_prev_right_contact
-        previous_both_contact = self._rl_prev_left_contact & self._rl_prev_right_contact
+        first_contact_event = any_contact & ~self._rl_any_contact_rewarded
+        first_both_contact_event = both_contact & ~self._rl_both_contact_rewarded
 
-        reward = self.cfg.rl_reach_reward_scale * reach_progress
-        reward += self.cfg.rl_lift_reward_scale * lift_progress
-        reward += self.cfg.rl_first_contact_reward * (any_contact & ~previous_any_contact).float()
-        reward += self.cfg.rl_both_contact_reward * (both_contact & ~previous_both_contact).float()
-        reward += self.cfg.rl_success_reward * flags["success"].float()
+        reach_reward = self.cfg.rl_reach_reward_scale * reach_progress
+        lift_reward = self.cfg.rl_lift_reward_scale * lift_progress
+        first_contact_reward = self.cfg.rl_first_contact_reward * first_contact_event.float()
+        both_contact_reward = self.cfg.rl_both_contact_reward * first_both_contact_event.float()
+        success_reward = self.cfg.rl_success_reward * flags["success"].float()
 
         failed = (
             flags["object_dropped"]
@@ -369,18 +369,29 @@ class LabPickEnv(DirectRLEnv):
             | flags["ee_outside_workspace"]
             | flags["object_broken"]
         )
-        reward -= self.cfg.rl_failure_penalty * failed.float()
+        failure_penalty = self.cfg.rl_failure_penalty * failed.float()
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         unsuccessful_time_out = time_out & ~flags["success"] & ~failed
-        reward -= self.cfg.rl_timeout_penalty * unsuccessful_time_out.float()
+        timeout_penalty = self.cfg.rl_timeout_penalty * unsuccessful_time_out.float()
         force_excess = torch.clamp(flags["break_force_n"] - self.cfg.rl_safe_force_n, min=0.0)
-        reward -= self.cfg.rl_force_penalty_scale * force_excess.square()
-        reward -= self.cfg.rl_action_penalty_scale * self._rl_last_actions.square().mean(dim=1)
+        force_penalty = self.cfg.rl_force_penalty_scale * force_excess.square()
+        action_penalty = self.cfg.rl_action_penalty_scale * self._rl_last_actions.square().mean(dim=1)
+        reward = (
+            reach_reward
+            + lift_reward
+            + first_contact_reward
+            + both_contact_reward
+            + success_reward
+            - failure_penalty
+            - timeout_penalty
+            - force_penalty
+            - action_penalty
+        )
 
         self._rl_prev_grasp_distance[:] = grasp_distance
         self._rl_prev_lift_delta[:] = lift_delta
-        self._rl_prev_left_contact[:] = left_contact
-        self._rl_prev_right_contact[:] = right_contact
+        self._rl_any_contact_rewarded |= any_contact
+        self._rl_both_contact_rewarded |= both_contact
         self.extras["log"] = {
             "LabPick/lift_m": lift_delta.mean(),
             "LabPick/grasp_distance_m": grasp_distance.mean(),
@@ -388,9 +399,24 @@ class LabPickEnv(DirectRLEnv):
             "LabPick/net_contact_force_n": flags["net_force_n"].mean(),
             "LabPick/success_terminal_step": flags["success"].float().mean(),
             "LabPick/broken_terminal_step": flags["object_broken"].float().mean(),
+            "LabPick/object_dropped_terminal_step": flags["object_dropped"].float().mean(),
+            "LabPick/object_too_far_terminal_step": flags["object_too_far"].float().mean(),
+            "LabPick/ee_outside_workspace_terminal_step": flags[
+                "ee_outside_workspace"
+            ].float().mean(),
             "LabPick/success_rate": flags["success"].float().mean(),
             "LabPick/broken_rate": flags["object_broken"].float().mean(),
             "LabPick/timeout_terminal_step": unsuccessful_time_out.float().mean(),
+            "LabPick/reward_reach": reach_reward.mean(),
+            "LabPick/reward_lift": lift_reward.mean(),
+            "LabPick/reward_first_contact": first_contact_reward.mean(),
+            "LabPick/reward_both_contact": both_contact_reward.mean(),
+            "LabPick/reward_success": success_reward.mean(),
+            "LabPick/penalty_failure": failure_penalty.mean(),
+            "LabPick/penalty_timeout": timeout_penalty.mean(),
+            "LabPick/penalty_force": force_penalty.mean(),
+            "LabPick/penalty_action": action_penalty.mean(),
+            "LabPick/reward_total": reward.mean(),
         }
         return reward
 
@@ -472,8 +498,8 @@ class LabPickEnv(DirectRLEnv):
                 object_pos_b[env_ids] - self._gripper_center_pos_b()[env_ids], dim=1
             )
             self._rl_prev_lift_delta[env_ids] = 0.0
-            self._rl_prev_left_contact[env_ids] = False
-            self._rl_prev_right_contact[env_ids] = False
+            self._rl_any_contact_rewarded[env_ids] = False
+            self._rl_both_contact_rewarded[env_ids] = False
             self._rl_last_actions[env_ids] = 0.0
 
     def _calibrate_gripper_center_offset(self, env_ids: torch.Tensor):

@@ -371,7 +371,53 @@ journalctl --user -u <unit>.service -f
 ```
 
 The older `scripts/bc_training/train_bc.py` examples are not the entry point
-for this branch; use the Flow Matching command above.
+for the ResNet Flow Matching path above.
+
+#### DINOv3-ACT BC for fixed-yaw experiments
+
+For the yaw-zero LabPick setting, the repository also provides a deterministic
+DINOv3 action-chunking policy. It trains only on successful demonstrations,
+checks that every recorded reset yaw is zero, uses the data's `xyzw` quaternion
+order explicitly, and caches frozen DINOv3 spatial features before training:
+
+```bash
+TACEX_ISAAC_PYTHON="$ISAAC_PYTHON" \
+  scripts/bc_training/run_dinov3_act_bc200_yaw0.sh
+```
+
+The pipeline collects 200 successful trajectories with XY randomization of
+`+/-0.10 m` and yaw fixed to `0`, trains `best.pt`, and evaluates 100 trials
+on seeds 3200--3299 in the same fixed-yaw environment without a yaw oracle.
+Individual stages are available in:
+
+- `scripts/bc_training/train_dinov3_act.py`
+- `scripts/bc_training/eval_dinov3_act_sim.py`
+- `scripts/bc_training/diagnose_dinov3_act.py`
+- `scripts/bc_training/generate_dinov3_act_report.py`
+
+The DINOv3 snapshot is discovered from the Hugging Face cache by default; pass
+`--dino-path` to `train_dinov3_act.py` when it is stored elsewhere.
+
+#### DINOv3 Flow Matching BC for DSRL
+
+Use the Flow Matching variant when the downstream controller must optimize the
+policy's initial noise (for example DSRL). It keeps the frozen DINOv3 visual
+encoder and 32-step action chunks, but replaces ACT with a conditional velocity
+field and exposes a 320-D flattened noise action through
+`FlowMatchingNoiseAdapter`:
+
+```bash
+python scripts/bc_training/train_dinov3_flow.py \
+  --data-root datasets/lab_pick_slide_bc200_success_yaw0_seed270828 \
+  --output-dir outputs/lab_pick_dinov3_flow_bc200_yaw0 \
+  --feature-cache-dir outputs/lab_pick_dinov3_act_bc200_yaw0_visualxy/dino_feature_cache
+```
+
+`train_dinov3_flow.py` accepts only successful records by default and rejects
+non-zero-yaw records. The trained checkpoint is recognized automatically by
+`scripts/reinforcement_learning/dsrl/flow_matching_noise_adapter.py`. The
+single-run BC200 result and evaluation protocol are recorded in
+`reports/dinov3_flow_bc200_yaw0/report.md`.
 
 ### Analyze failed attempts with a VLM
 

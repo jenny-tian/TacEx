@@ -578,6 +578,7 @@ class _FakeFlowAdapter:
         self.decode_calls = 0
         self.reset_calls = 0
         self.unnormalized_inputs: list[torch.Tensor] = []
+        self.decode_noise_seeds: list[int | None] = []
 
     @property
     def is_ready(self) -> bool:
@@ -586,8 +587,9 @@ class _FakeFlowAdapter:
     def reset(self) -> None:
         self.reset_calls += 1
 
-    def decode_with_normalized(self):
+    def decode_with_normalized(self, *, noise_seed=None):
         self.decode_calls += 1
+        self.decode_noise_seeds.append(noise_seed)
         normalized = self.normalized_chunk.clone()
         return normalized + 50.0, normalized
 
@@ -709,3 +711,30 @@ def test_clean_wrapper_executes_exact_composed_action_and_masks_timeout(monkeypa
     assert info["clean_residual/action_repeat"] == 1
     assert info["clean_residual/replanned"] is True
     assert adapter.decode_calls == 2
+    assert adapter.decode_noise_seeds == [17, 18]
+
+
+def test_clean_wrapper_reuses_fixed_flow_noise_for_every_ten_action_replan(monkeypatch):
+    adapter = _FakeFlowAdapter()
+    monkeypatch.setattr(
+        clean_wrapper.FlowMatchingNoiseAdapter,
+        "from_pretrained",
+        staticmethod(lambda checkpoint, **kwargs: adapter),
+    )
+    wrapper = CleanResidualLabPickWrapper(
+        _FakeLabPickEnv(truncated=False),
+        "fake_flow.pt",
+        device="cpu",
+        camera_warmup_steps=0,
+        seed=23,
+    )
+    monkeypatch.setattr(wrapper, "_raw_flow_observation", lambda: {})
+
+    wrapper.reset()
+    for _ in range(clean_wrapper.REPLAN_STEPS):
+        wrapper.step(torch.zeros(1, 4))
+
+    assert clean_wrapper.REPLAN_STEPS == 10
+    assert wrapper.flow_noise_seed == 23
+    assert adapter.decode_calls == 2
+    assert adapter.decode_noise_seeds == [23, 23]

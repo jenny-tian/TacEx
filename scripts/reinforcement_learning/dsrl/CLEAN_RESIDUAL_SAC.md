@@ -19,9 +19,14 @@ absent from both losses and there is no temperature optimizer.
   leave Rot6D unchanged, then unnormalize once.
 - Critic input (33D): privileged state 19 + complete BC action 10 + raw
   residual 4.
-- Reward: the existing dense LabPick reward (reach/lift progress, contact,
-  success/failure, timeout, and force terms) without any wrapper- or
-  agent-side shaping. Timeouts are terminal for bootstrapping.
+- Reward: the existing dense LabPick reward (reach/lift progress, success,
+  failure, timeout, and force terms), with first-any-contact and
+  first-bilateral-contact bonuses each emitted at most once per episode.
+  There is no wrapper- or agent-side shaping. Timeouts are terminal for
+  bootstrapping.
+- Flow execution: exactly 10 actions are executed from each 32-action chunk.
+  Every replan within an episode reuses one fixed Flow noise template; the
+  template seed advances by one at each episode boundary.
 
 The frozen BC retains its deployed visual-XY override and locks visual XY
 after phase `0.30`; both choices are pinned and recorded in the run metadata.
@@ -71,6 +76,7 @@ TACEX_ISAAC_PYTHON=/path/to/isaaclab/python \
 python scripts/reinforcement_learning/dsrl/train_lab_pick_clean_residual_sac.py \
   --bc_policy outputs/lab_pick_flow_bc100_scratch_rawclose_safe70_overforce24_pos6/best.pt \
   --residual_scale 0.15 \
+  --flow_noise_seed 42 \
   --timesteps 50000 \
   --seed 42
 ```

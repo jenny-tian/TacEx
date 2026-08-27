@@ -72,3 +72,5 @@ dataset_lerobot
 #model
 trained_model
 checkpoints
+reports
+datasets

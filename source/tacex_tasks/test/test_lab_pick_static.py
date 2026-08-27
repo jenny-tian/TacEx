@@ -24,6 +24,8 @@ def test_lab_pick_package_registers_labware_and_sac_tasks():
     assert '"env_cfg_entry_point": LabPickSlideEnvCfg' in source
     assert '"env_cfg_entry_point": LabPickCoverslipEnvCfg' in source
     assert '"env_cfg_entry_point": LabPickCupEnvCfg' in source
+    assert 'id="TacEx-LabPick-Slide-Clean-DSRL-SAC-v0"' in source
+    assert '"skrl_clean_dsrl_cfg_entry_point": CLEAN_DSRL_SAC_CFG_ENTRY_POINT' in source
 
 
 def test_lab_pick_cfg_defines_scene_assets_randomization_and_termination_thresholds():
@@ -535,6 +537,15 @@ def test_lab_pick_sac_baseline_has_task_config_actions_rewards_and_skrl_entrypoi
     assert "self.cfg.rl_success_reward" in env_source
     assert "self.cfg.rl_force_penalty_scale" in env_source
     assert 'terminated |= flags["success"]' in env_source
+    assert "first_contact_event = any_contact & ~self._rl_any_contact_rewarded" in env_source
+    assert "first_both_contact_event = both_contact & ~self._rl_both_contact_rewarded" in env_source
+    assert "self._rl_any_contact_rewarded |= any_contact" in env_source
+    assert "self._rl_both_contact_rewarded |= both_contact" in env_source
+    assert '"LabPick/reward_first_contact": first_contact_reward.mean()' in env_source
+    assert '"LabPick/reward_both_contact": both_contact_reward.mean()' in env_source
+    assert '"LabPick/object_dropped_terminal_step"' in env_source
+    assert '"LabPick/object_too_far_terminal_step"' in env_source
+    assert '"LabPick/ee_outside_workspace_terminal_step"' in env_source
 
     assert "hidden_dims: [256, 256, 256]" in agent_source
     assert "memory_size: 200000" in agent_source

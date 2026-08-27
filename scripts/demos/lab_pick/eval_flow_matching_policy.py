@@ -153,13 +153,14 @@ def _policy_observation(
     return observation
 
 
-def _step_physics(env: LabPickEnv, action: torch.Tensor) -> None:
+def _step_physics(env: LabPickEnv, action: torch.Tensor, *, render: bool = True) -> None:
     env._pre_physics_step(action)
     env._apply_action()
     env.scene.write_data_to_sim()
     env.sim.step(render=False)
     env.scene.update(dt=env.physics_dt)
-    env.sim.render()
+    if render:
+        env.sim.render()
 
 
 def _scalar(value: torch.Tensor) -> float:
@@ -326,8 +327,12 @@ def main() -> None:
                         device=env.device,
                         dtype=torch.float32,
                     ).view(1, -1)
-                    for _ in range(args_cli.action_repeat):
-                        _step_physics(env, action)
+                    for repeat_index in range(args_cli.action_repeat):
+                        _step_physics(
+                            env,
+                            action,
+                            render=repeat_index == args_cli.action_repeat - 1,
+                        )
                         physics_steps += 1
 
                         flags = env._get_termination_flags()

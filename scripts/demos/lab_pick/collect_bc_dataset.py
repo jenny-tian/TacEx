@@ -99,6 +99,12 @@ parser.add_argument("--max_attempts", type=int, default=0, help="Stop after this
 parser.add_argument("--max_episode_steps", type=int, default=960)
 parser.add_argument("--aligned_hz", type=float, default=60.0)
 parser.add_argument("--camera_hz", type=float, default=30.0, help="Deprecated; camera streams are saved only in aligned.")
+parser.add_argument(
+    "--render_every_n_steps",
+    type=int,
+    default=1,
+    help="Render cameras every N physics steps; use 4 for 30 Hz RGB with the default 120 Hz simulator.",
+)
 parser.add_argument("--ft_hz", type=float, default=90.0)
 parser.add_argument("--tracker_hz", type=float, default=300.0)
 parser.add_argument("--seed", type=int, default=0)
@@ -158,6 +164,8 @@ if not 0.0 <= args_cli.overforce_close_width_m <= 0.04:
     parser.error("--overforce_close_width_m must be in [0, 0.04]")
 if args_cli.position_failure_offset_m <= 0.0:
     parser.error("--position_failure_offset_m must be > 0")
+if args_cli.render_every_n_steps <= 0:
+    parser.error("--render_every_n_steps must be > 0")
 args_cli.enable_cameras = True
 
 _patch_isaaclab_missing_exports()
@@ -408,6 +416,7 @@ def main():
         "break_force_threshold_n": env_cfg.terminate_break_force_threshold_n,
         "labware_random_xy_m": list(env_cfg.labware_pos_randomization_xy),
         "labware_random_yaw_degrees": float(np.rad2deg(env_cfg.labware_yaw_randomization)),
+        "render_every_n_steps": args_cli.render_every_n_steps,
         "seed": args_cli.seed,
     }
     (record_dir / "collection_config.json").write_text(
@@ -495,7 +504,11 @@ def main():
                 env.scene.write_data_to_sim()
                 env.sim.step(render=False)
                 env.scene.update(dt=env.physics_dt)
-                env.sim.render()
+                # Rendering is the dominant collection cost.  RGB is only
+                # recorded in the aligned stream, so callers may render at the
+                # desired RGB cadence while physics/contact sensors stay at 120 Hz.
+                if (step + 1) % args_cli.render_every_n_steps == 0:
+                    env.sim.render()
 
                 flags = env._get_termination_flags()
                 peak_break_force_n = max(peak_break_force_n, float(flags["break_force_n"][0].item()))

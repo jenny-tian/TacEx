@@ -421,6 +421,49 @@ def test_visual_xy_auxiliary_loss_uses_image_tokens():
     torch.testing.assert_close(first["action"], second["action"])
 
 
+def test_flow_prediction_encodes_observation_once_per_ode_solve():
+    import torch
+
+    from sim_robot.policy.flow_matching_policy import SimFlowMatchingConfig, SimFlowMatchingPolicy
+
+    config = SimFlowMatchingConfig(
+        robot0_pos_dim=10,
+        action_dim=4,
+        n_state_obs_steps=1,
+        n_image_obs_steps=1,
+        image_keys=("robot0_image",),
+        n_action_steps=2,
+        image_feature_dim=8,
+        obs_feature_dim=8,
+        transformer_layers=1,
+        transformer_heads=2,
+        transformer_embedding_dim=8,
+        transformer_cond_layers=1,
+        visual_xy_loss_weight=1.0,
+    )
+    model = SimFlowMatchingPolicy(config).eval()
+    obs = {
+        "robot0_pos": torch.zeros(1, 1, 10),
+        "robot0_image": torch.zeros(1, 1, 3, 32, 32),
+    }
+    encoder_calls: list[None] = []
+    hook = model.obs_encoder.register_forward_hook(
+        lambda _module, _inputs, _output: encoder_calls.append(None)
+    )
+    try:
+        result = model.predict_action(
+            obs,
+            num_inference_steps=3,
+            initial_noise=torch.zeros(1, 2, 4),
+        )
+    finally:
+        hook.remove()
+
+    assert result["action"].shape == (1, 2, 4)
+    assert result["visual_xy"].shape == (1, 2)
+    assert len(encoder_calls) == 1
+
+
 def test_runner_locks_visual_xy_at_phase_threshold_and_reset_clears_lock():
     import sys
     from types import SimpleNamespace

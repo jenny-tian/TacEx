@@ -5,8 +5,12 @@ corrects exactly one action at a time, and the BC is replanned after the first
 10 actions.  Its 4-D post-tanh action changes only normalized CAFE
 ``(x, y, z, width)``; the six BC Rot6D coordinates are preserved verbatim.
 
+Every replan within an episode decodes from the same Flow noise template. The
+template seed advances once per episode so training retains episode-level BC
+diversity without introducing discontinuous noise changes every 10 actions.
+
 This wrapper deliberately contains no reward shaping, residual penalty,
-warm-up noise, trust region, potential, or n-step-return logic.  Those belong
+warm-up noise, trust region, potential, or n-step-return logic. Those belong
 to neither the environment nor the clean one-step SAC contract.
 """
 
@@ -184,16 +188,20 @@ class CleanResidualLabPickWrapper(gym.Wrapper):
             if seed < 0:
                 raise ValueError("seed must be non-negative when provided.")
 
+        resolved_seed = 0 if seed is None else int(seed)
         self._layout = CleanResidualLayout(scale=residual_scale)
         self.phase_horizon_steps = int(phase_horizon_steps)
         self.camera_warmup_steps = int(camera_warmup_steps)
+        self._base_flow_noise_seed = resolved_seed
+        self._episode_index = 0
+        self._episode_flow_noise_seed = resolved_seed
         self.adapter = FlowMatchingNoiseAdapter.from_pretrained(
             policy_checkpoint,
             device=device,
             num_inference_steps=int(flow_num_inference_steps),
             visual_xy_lock_phase=0.30,
             use_visual_xy_override=True,
-            seed=seed,
+            seed=resolved_seed,
         )
         adapter_horizon = int(getattr(self.adapter, "n_action_steps", -1))
         adapter_action_dim = int(getattr(self.adapter, "action_dim", -1))
@@ -264,6 +272,12 @@ class CleanResidualLabPickWrapper(gym.Wrapper):
         return self._chunk_offset
 
     @property
+    def flow_noise_seed(self) -> int:
+        """Seed of the Flow noise template reused for the current episode."""
+
+        return self._episode_flow_noise_seed
+
+    @property
     def current_bc_action(self) -> torch.Tensor:
         """Return a defensive copy of the normalized 10-D BC action to execute next."""
 
@@ -324,7 +338,9 @@ class CleanResidualLabPickWrapper(gym.Wrapper):
 
     def _prepare_bc_chunk(self) -> None:
         self._ensure_flow_observation_ready()
-        physical, normalized = self.adapter.decode_with_normalized()
+        physical, normalized = self.adapter.decode_with_normalized(
+            noise_seed=self._episode_flow_noise_seed,
+        )
         _validate_matrix(physical, name="physical_bc_chunk", width=10)
         _validate_matrix(normalized, name="normalized_bc_chunk", width=10)
         if physical.shape[0] != self.flow_horizon or normalized.shape[0] != self.flow_horizon:
@@ -375,6 +391,15 @@ class CleanResidualLabPickWrapper(gym.Wrapper):
 
     @torch.inference_mode()
     def reset(self, **kwargs):
+        requested_seed = kwargs.pop("flow_noise_seed", kwargs.get("seed"))
+        if requested_seed is not None:
+            if isinstance(requested_seed, bool) or not isinstance(requested_seed, int):
+                raise TypeError("reset seed must be an integer or None.")
+            if requested_seed < 0:
+                raise ValueError("reset seed must be non-negative when provided.")
+            self._base_flow_noise_seed = requested_seed
+        self._episode_index = 0
+        self._episode_flow_noise_seed = self._base_flow_noise_seed
         self.adapter.reset()
         self._flow_policy_steps = 0
         self._flow_needs_warmup = True
@@ -386,6 +411,7 @@ class CleanResidualLabPickWrapper(gym.Wrapper):
 
     @torch.inference_mode()
     def step(self, residual):
+        action_flow_noise_seed = self._episode_flow_noise_seed
         residual = torch.as_tensor(residual, dtype=torch.float32, device=self.device)
         if residual.ndim == 1:
             residual = residual.unsqueeze(0)
@@ -433,6 +459,10 @@ class CleanResidualLabPickWrapper(gym.Wrapper):
             # reset observation, while the terminal mask below prevents SAC
             # from bootstrapping across the episode boundary.
             self.adapter.reset()
+            self._episode_index += 1
+            self._episode_flow_noise_seed = (
+                self._base_flow_noise_seed + self._episode_index
+            )
             self._flow_policy_steps = 0
             self._flow_needs_warmup = True
             self._normalized_bc_chunk = None
@@ -451,11 +481,13 @@ class CleanResidualLabPickWrapper(gym.Wrapper):
         info["clean_residual/action_index"] = action_index
         info["clean_residual/action_repeat"] = physics_steps
         info["clean_residual/replanned"] = replanned
+        info["clean_residual/fixed_flow_noise_seed"] = action_flow_noise_seed
         info["clean_residual/residual_rms"] = residual_rms
         info["clean_residual/effective_residual_rms"] = residual_rms * self.layout.scale
         log = dict(info.get("log", {}))
         log["CleanResidual/raw_residual_rms"] = residual_rms
         log["CleanResidual/effective_residual_rms"] = residual_rms * self.layout.scale
+        log["CleanResidual/fixed_flow_noise_seed"] = float(action_flow_noise_seed)
         info["log"] = log
         terminated_for_learning = terminated | truncated
         return (

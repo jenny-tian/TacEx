@@ -1,0 +1,44 @@
+seed: 42
+
+network:
+  actor_hidden_dims: [512, 512, 512]
+  critic_hidden_dims: [512, 512, 512]
+  initial_log_std: 0.0
+
+memory_size: 20000
+
+agent:
+  gradient_steps: 1
+  batch_size: 128
+  # The launcher replaces this with chunk_discount ** chunk_execute_steps.
+  discount_factor: 0.9043820750088044
+  polyak: 0.005
+  learning_rate: [0.00003, 0.00003, 0.00003]
+  learning_rate_scheduler: null
+  learning_rate_scheduler_kwargs: {}
+  observation_preprocessor: null
+  observation_preprocessor_kwargs: {}
+  state_preprocessor: null
+  state_preprocessor_kwargs: {}
+  random_timesteps: 0
+  learning_starts: 256
+  grad_norm_clip: 1.0
+  learn_entropy: true
+  initial_entropy_value: 0.01
+  target_entropy: -5.0
+  rewards_shaper: null
+  mixed_precision: false
+
+  experiment:
+    directory: "lab_pick_slide"
+    experiment_name: "clean_dsrl_sac"
+    write_interval: 25
+    checkpoint_interval: 500
+    store_separately: false
+    wandb: false
+    wandb_kwargs: {}
+
+trainer:
+  # Outer DSRL decisions; the default executes the full 32-action Flow chunk.
+  timesteps: 5000
+  environment_info: "log"
