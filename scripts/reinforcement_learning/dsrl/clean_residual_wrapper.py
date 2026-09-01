@@ -27,9 +27,11 @@ import torch.nn.functional as F
 try:
     from .clean_residual_sac import CleanResidualLayout
     from .flow_matching_noise_adapter import FlowMatchingNoiseAdapter
+    from .tactile_observation import build_tactile_actor_from_env
 except ImportError:
     from clean_residual_sac import CleanResidualLayout
     from flow_matching_noise_adapter import FlowMatchingNoiseAdapter
+    from tactile_observation import build_tactile_actor_from_env
 
 
 FLOW_HORIZON = 32
@@ -98,10 +100,11 @@ def pack_clean_residual_observation(
     relative_object_position: torch.Tensor,
     object_rot6d: torch.Tensor,
     current_bc_action: torch.Tensor,
+    tactile_actor: torch.Tensor,
     *,
     layout: CleanResidualLayout | None = None,
 ) -> dict[str, torch.Tensor]:
-    """Pack the public 29-D policy and 19-D asymmetric-Critic observations."""
+    """Pack the 34-D tactile policy and 19-D asymmetric-critic observations."""
 
     resolved_layout = CleanResidualLayout() if layout is None else layout
     if not isinstance(resolved_layout, CleanResidualLayout):
@@ -114,6 +117,7 @@ def pack_clean_residual_observation(
         (relative_object_position, "relative_object_position", 3),
         (object_rot6d, "object_rot6d", 6),
         (current_bc_action, "current_bc_action", 10),
+        (tactile_actor, "tactile_actor", resolved_layout.tactile_dim),
     )
     for tensor, name, width in fields:
         _validate_matrix(tensor, name=name, width=width)
@@ -127,11 +131,12 @@ def pack_clean_residual_observation(
     relative_object_position = relative_object_position.to(normalized_proprioception)
     object_rot6d = object_rot6d.to(normalized_proprioception)
     current_bc_action = current_bc_action.to(normalized_proprioception)
+    tactile_actor = tactile_actor.to(normalized_proprioception)
     critic = torch.cat(
         (normalized_proprioception, relative_object_position, object_rot6d),
         dim=-1,
     )
-    policy = torch.cat((critic, current_bc_action), dim=-1)
+    policy = torch.cat((critic, current_bc_action, tactile_actor), dim=-1)
     resolved_layout.validate_states(critic)
     resolved_layout.split_policy_observation(policy)
     return {"policy": policy, "critic": critic}
@@ -170,6 +175,10 @@ class CleanResidualLabPickWrapper(gym.Wrapper):
             raise TypeError("The wrapped environment must implement get_cafe_observation().")
         if not callable(getattr(base, "get_privileged_object_pose", None)):
             raise TypeError("The wrapped environment must implement get_privileged_object_pose().")
+        if not callable(getattr(base, "tactile_contact_depths", None)):
+            raise TypeError("The wrapped environment must implement tactile_contact_depths().")
+        if not hasattr(base, "has_touched"):
+            raise TypeError("The wrapped environment must expose has_touched.")
         if not isinstance(policy_checkpoint, (str, Path)) or not str(policy_checkpoint):
             raise TypeError("policy_checkpoint must be a non-empty path string.")
         integer_options = (
@@ -220,6 +229,11 @@ class CleanResidualLabPickWrapper(gym.Wrapper):
         self._flow_needs_warmup = True
         self._normalized_bc_chunk: torch.Tensor | None = None
         self._chunk_offset = 0
+        self._last_tactile_actor = torch.zeros(
+            (self.num_envs, self.layout.tactile_dim),
+            device=self.device,
+            dtype=torch.float32,
+        )
 
         single_action_space = gym.spaces.Box(
             low=-1.0,
@@ -374,11 +388,16 @@ class CleanResidualLabPickWrapper(gym.Wrapper):
             phase=self._current_phase(),
         ).to(device=self.device, dtype=torch.float32)
         relative_position, object_rot6d = base.get_privileged_object_pose()
+        tactile_actor = build_tactile_actor_from_env(base).to(
+            device=self.device, dtype=torch.float32
+        )
+        self._last_tactile_actor = tactile_actor.detach().clone()
         return pack_clean_residual_observation(
             normalized_proprioception,
             relative_position.to(device=self.device, dtype=torch.float32),
             object_rot6d.to(device=self.device, dtype=torch.float32),
             self.current_bc_action,
+            tactile_actor,
             layout=self.layout,
         )
 
@@ -412,6 +431,7 @@ class CleanResidualLabPickWrapper(gym.Wrapper):
     @torch.inference_mode()
     def step(self, residual):
         action_flow_noise_seed = self._episode_flow_noise_seed
+        decision_tactile_actor = self._last_tactile_actor.detach().clone()
         residual = torch.as_tensor(residual, dtype=torch.float32, device=self.device)
         if residual.ndim == 1:
             residual = residual.unsqueeze(0)
@@ -484,6 +504,7 @@ class CleanResidualLabPickWrapper(gym.Wrapper):
         info["clean_residual/fixed_flow_noise_seed"] = action_flow_noise_seed
         info["clean_residual/residual_rms"] = residual_rms
         info["clean_residual/effective_residual_rms"] = residual_rms * self.layout.scale
+        info["tactile_actor"] = decision_tactile_actor
         log = dict(info.get("log", {}))
         log["CleanResidual/raw_residual_rms"] = residual_rms
         log["CleanResidual/effective_residual_rms"] = residual_rms * self.layout.scale

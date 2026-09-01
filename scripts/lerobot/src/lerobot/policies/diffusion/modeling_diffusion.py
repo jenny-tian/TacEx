@@ -138,14 +138,12 @@ class DiffusionPolicy(PreTrainedPolicy):
         action = self._queues[ACTION].popleft()
         return action
 
-    def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, None]:
+    def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict[str, float]]:
         """Run the batch through the model and compute the loss for training or validation."""
         if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
-        loss = self.diffusion.compute_loss(batch)
-        # no output_dict so returning None
-        return loss, None
+        return self.diffusion.compute_loss(batch)
 
 
 def _make_noise_scheduler(name: str, **kwargs: dict) -> DDPMScheduler | DDIMScheduler:
@@ -168,19 +166,36 @@ class DiffusionModel(nn.Module):
 
         # Build observation encoders (depending on which observations are provided).
         global_cond_dim = self.config.robot_state_feature.shape[0]
+        self.rgb_feature_dim = 0
         if self.config.image_features:
             num_images = len(self.config.image_features)
             if self.config.use_separate_rgb_encoder_per_camera:
                 encoders = [DiffusionRgbEncoder(config) for _ in range(num_images)]
                 self.rgb_encoder = nn.ModuleList(encoders)
+                self.rgb_feature_dim = int(encoders[0].feature_dim)
                 global_cond_dim += encoders[0].feature_dim * num_images
             else:
                 self.rgb_encoder = DiffusionRgbEncoder(config)
+                self.rgb_feature_dim = int(self.rgb_encoder.feature_dim)
                 global_cond_dim += self.rgb_encoder.feature_dim * num_images
         if self.config.env_state_feature:
             global_cond_dim += self.config.env_state_feature.shape[0]
 
-        self.unet = DiffusionConditionalUnet1d(config, global_cond_dim=global_cond_dim * config.n_obs_steps)
+        unet_global_cond_dim = global_cond_dim * config.n_obs_steps
+        if self.config.use_visual_xy_residual:
+            self.visual_xy_head = nn.Sequential(
+                nn.LayerNorm(self.rgb_feature_dim),
+                nn.Linear(self.rgb_feature_dim, self.config.visual_xy_head_hidden_dim),
+                nn.Mish(),
+                nn.Linear(self.config.visual_xy_head_hidden_dim, 2),
+            )
+            # The predicted x/y is also exposed to the denoiser.  It is
+            # detached there so only the direct image-only auxiliary target
+            # trains the estimator, while the shared RGB encoder still gets
+            # gradients from both objectives.
+            unet_global_cond_dim += 2
+
+        self.unet = DiffusionConditionalUnet1d(config, global_cond_dim=unet_global_cond_dim)
 
         self.noise_scheduler = _make_noise_scheduler(
             config.noise_scheduler_type,
@@ -235,10 +250,13 @@ class DiffusionModel(nn.Module):
 
         return sample
 
-    def _prepare_global_conditioning(self, batch: dict[str, Tensor]) -> Tensor:
-        """Encode image features and concatenate them all together along with the state vector."""
+    def _prepare_global_conditioning_and_visual_xy(
+        self, batch: dict[str, Tensor]
+    ) -> tuple[Tensor, Tensor | None]:
+        """Encode observations and optionally regress image-only normalized x/y."""
         batch_size, n_obs_steps = batch[OBS_STATE].shape[:2]
         global_cond_feats = [batch[OBS_STATE]]
+        visual_xy = None
         # Extract image features.
         if self.config.image_features:
             if self.config.use_separate_rgb_encoder_per_camera:
@@ -267,11 +285,71 @@ class DiffusionModel(nn.Module):
                 )
             global_cond_feats.append(img_features)
 
+            if self.config.use_visual_xy_residual:
+                visual_xy = self._visual_xy_from_image_features(img_features)
+
         if self.config.env_state_feature:
             global_cond_feats.append(batch[OBS_ENV_STATE])
 
         # Concatenate features then flatten to (B, global_cond_dim).
-        return torch.cat(global_cond_feats, dim=-1).flatten(start_dim=1)
+        global_cond = torch.cat(global_cond_feats, dim=-1).flatten(start_dim=1)
+        if self.config.use_visual_xy_residual:
+            if visual_xy is None:
+                raise RuntimeError("Visual x/y residual mode did not produce an image estimate.")
+            global_cond = torch.cat((global_cond, visual_xy.detach()), dim=-1)
+        return global_cond, visual_xy
+
+    def _visual_xy_from_image_features(self, image_features: Tensor) -> Tensor:
+        """Regress x/y from only the latest selected camera feature."""
+        if image_features.ndim != 3:
+            raise ValueError("image_features must have shape [B,S,N*F].")
+        camera_count = len(self.config.image_features)
+        expected = camera_count * self.rgb_feature_dim
+        if image_features.shape[-1] != expected:
+            raise ValueError(
+                f"Expected {expected} concatenated image features, got {image_features.shape[-1]}."
+            )
+        camera_index = int(self.config.visual_xy_camera_index) % camera_count
+        start = camera_index * self.rgb_feature_dim
+        end = start + self.rgb_feature_dim
+        # No state, phase, tactile, or privileged tensor enters this method.
+        return self.visual_xy_head(image_features[:, -1, start:end])
+
+    def _prepare_global_conditioning(self, batch: dict[str, Tensor]) -> Tensor:
+        """Backward-compatible condition API used by the DPPO wrapper."""
+        global_cond, _ = self._prepare_global_conditioning_and_visual_xy(batch)
+        return global_cond
+
+    def prepare_global_conditioning_and_visual_xy(
+        self, batch: dict[str, Tensor]
+    ) -> tuple[Tensor, Tensor]:
+        """Return the frozen DPPO condition and its visual translation anchor."""
+        global_cond, visual_xy = self._prepare_global_conditioning_and_visual_xy(batch)
+        if visual_xy is None:
+            raise RuntimeError("Checkpoint does not implement the visual x/y residual contract.")
+        return global_cond, visual_xy
+
+    @staticmethod
+    def action_to_visual_residual(action: Tensor, visual_xy: Tensor) -> Tensor:
+        """Translate absolute normalized action x/y into diffusion coordinates."""
+        if action.ndim != 3 or visual_xy.ndim != 2 or visual_xy.shape[-1] != 2:
+            raise ValueError("Expected action [B,T,D] and visual_xy [B,2].")
+        if action.shape[0] != visual_xy.shape[0] or action.shape[-1] < 2:
+            raise ValueError("Action and visual x/y shapes are incompatible.")
+        residual = action.clone()
+        residual[..., :2] = residual[..., :2] - visual_xy.unsqueeze(1)
+        return residual
+
+    @staticmethod
+    def visual_residual_to_action(residual: Tensor, visual_xy: Tensor) -> Tensor:
+        """Invert :meth:`action_to_visual_residual` without range clipping."""
+        if residual.ndim != 3 or visual_xy.ndim != 2 or visual_xy.shape[-1] != 2:
+            raise ValueError("Expected residual [B,T,D] and visual_xy [B,2].")
+        if residual.shape[0] != visual_xy.shape[0] or residual.shape[-1] < 2:
+            raise ValueError("Residual and visual x/y shapes are incompatible.")
+        action = residual.clone()
+        action[..., :2] = action[..., :2] + visual_xy.unsqueeze(1)
+        return action
 
     def generate_actions(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
         """
@@ -288,10 +366,14 @@ class DiffusionModel(nn.Module):
         assert n_obs_steps == self.config.n_obs_steps
 
         # Encode image features and concatenate them all together along with the state vector.
-        global_cond = self._prepare_global_conditioning(batch)  # (B, global_cond_dim)
+        global_cond, visual_xy = self._prepare_global_conditioning_and_visual_xy(batch)
 
         # run sampling
         actions = self.conditional_sample(batch_size, global_cond=global_cond, noise=noise)
+        if self.config.use_visual_xy_residual:
+            if visual_xy is None:
+                raise RuntimeError("Missing visual x/y estimate during action generation.")
+            actions = self.visual_residual_to_action(actions, visual_xy).clamp(-1.0, 1.0)
 
         # Extract `n_action_steps` steps worth of actions (from the current observation).
         start = n_obs_steps - 1
@@ -300,7 +382,7 @@ class DiffusionModel(nn.Module):
 
         return actions
 
-    def compute_loss(self, batch: dict[str, Tensor]) -> Tensor:
+    def compute_loss(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict[str, float]]:
         """
         This function expects `batch` to have (at least):
         {
@@ -323,10 +405,24 @@ class DiffusionModel(nn.Module):
         assert n_obs_steps == self.config.n_obs_steps
 
         # Encode image features and concatenate them all together along with the state vector.
-        global_cond = self._prepare_global_conditioning(batch)  # (B, global_cond_dim)
+        global_cond, visual_xy = self._prepare_global_conditioning_and_visual_xy(batch)
 
         # Forward diffusion.
         trajectory = batch[ACTION]
+        visual_xy_loss = None
+        if self.config.use_visual_xy_residual:
+            if visual_xy is None:
+                raise RuntimeError("Missing visual x/y estimate during training.")
+            current_action_index = int(self.config.n_obs_steps) - 1
+            visual_xy_loss = F.smooth_l1_loss(
+                visual_xy,
+                batch[ACTION][:, current_action_index, :2],
+                beta=float(self.config.visual_xy_smooth_l1_beta),
+            )
+            # The diffusion MDP is parameterized entirely in translated
+            # residual coordinates.  Detaching the anchor prevents a trivial
+            # moving-target solution for the denoising objective.
+            trajectory = self.action_to_visual_residual(trajectory, visual_xy.detach())
         # Sample noise to add to the trajectory.
         eps = torch.randn(trajectory.shape, device=trajectory.device)
         # Sample a random noising timestep for each item in the batch.
@@ -347,7 +443,7 @@ class DiffusionModel(nn.Module):
         if self.config.prediction_type == "epsilon":
             target = eps
         elif self.config.prediction_type == "sample":
-            target = batch[ACTION]
+            target = trajectory
         else:
             raise ValueError(f"Unsupported prediction type {self.config.prediction_type}")
 
@@ -363,7 +459,14 @@ class DiffusionModel(nn.Module):
             in_episode_bound = ~batch["action_is_pad"]
             loss = loss * in_episode_bound.unsqueeze(-1)
 
-        return loss.mean()
+        diffusion_loss = loss.mean()
+        total_loss = diffusion_loss
+        output_dict = {"diffusion_loss": diffusion_loss.item()}
+        if visual_xy_loss is not None:
+            total_loss = total_loss + float(self.config.visual_xy_loss_weight) * visual_xy_loss
+            output_dict["visual_xy_loss"] = visual_xy_loss.item()
+        output_dict["loss"] = total_loss.item()
+        return total_loss, output_dict
 
 
 class SpatialSoftmax(nn.Module):

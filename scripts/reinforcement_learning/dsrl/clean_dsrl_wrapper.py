@@ -13,9 +13,29 @@ import torch.nn.functional as F
 try:
     from .clean_dsrl_sac import CleanDSRLLayout
     from .flow_matching_noise_adapter import FlowMatchingNoiseAdapter
+    from .online_dsrl_metrics import (
+        FAILURE_FLAG_KEYS,
+        OnlineDSRLJSONLLogger,
+        any_flag,
+        classify_terminal,
+        extract_step_metrics,
+        scalar,
+        utc_now,
+    )
+    from .tactile_observation import TACTILE_ACTOR_DIM, build_tactile_actor_from_env
 except ImportError:
     from clean_dsrl_sac import CleanDSRLLayout
     from flow_matching_noise_adapter import FlowMatchingNoiseAdapter
+    from online_dsrl_metrics import (
+        FAILURE_FLAG_KEYS,
+        OnlineDSRLJSONLLogger,
+        any_flag,
+        classify_terminal,
+        extract_step_metrics,
+        scalar,
+        utc_now,
+    )
+    from tactile_observation import TACTILE_ACTOR_DIM, build_tactile_actor_from_env
 
 
 FLOW_HORIZON = 32
@@ -90,6 +110,7 @@ class CleanDSRLLabPickWrapper(gym.Wrapper):
         phase_horizon_steps: int = 383,
         camera_warmup_steps: int = 8,
         use_visual_xy_override: bool = True,
+        online_metrics_dir: str | Path | None = None,
         seed: int | None = None,
     ) -> None:
         super().__init__(env)
@@ -106,6 +127,10 @@ class CleanDSRLLabPickWrapper(gym.Wrapper):
             raise TypeError("The wrapped environment must implement get_cafe_observation().")
         if not callable(getattr(base, "get_privileged_object_pose", None)):
             raise TypeError("The wrapped environment must implement get_privileged_object_pose().")
+        if not callable(getattr(base, "tactile_contact_depths", None)):
+            raise TypeError("The wrapped environment must implement tactile_contact_depths().")
+        if not hasattr(base, "has_touched"):
+            raise TypeError("The wrapped environment must expose has_touched.")
         if not isinstance(policy_checkpoint, (str, Path)) or not str(policy_checkpoint):
             raise TypeError("policy_checkpoint must be a non-empty path string.")
         for value, name, minimum in (
@@ -128,6 +153,9 @@ class CleanDSRLLabPickWrapper(gym.Wrapper):
         self.chunk_discount = float(chunk_discount)
         self.phase_horizon_steps = int(phase_horizon_steps)
         self.camera_warmup_steps = int(camera_warmup_steps)
+        self.break_force_threshold_n = float(
+            getattr(cfg, "terminate_break_force_threshold_n", float("nan"))
+        )
         flow_noise_seed = 0 if seed is None else int(seed)
         self.adapter = FlowMatchingNoiseAdapter.from_pretrained(
             policy_checkpoint,
@@ -150,7 +178,7 @@ class CleanDSRLLabPickWrapper(gym.Wrapper):
                 f"received {adapter_action_dim}."
             )
         self._layout = CleanDSRLLayout(
-            policy=int(self.adapter.observation_dim),
+            policy=int(self.adapter.observation_dim) + TACTILE_ACTOR_DIM,
             noise_dim=adapter_action_dim,
             flow_horizon=adapter_horizon,
             learned_noise_steps=int(learned_noise_steps),
@@ -159,6 +187,17 @@ class CleanDSRLLabPickWrapper(gym.Wrapper):
         self._flow_policy_steps = 0
         self._flow_needs_warmup = True
         self.last_decoded_action_chunk: torch.Tensor | None = None
+        self._last_tactile_actor = torch.zeros(
+            (self.num_envs, TACTILE_ACTOR_DIM), device=self.device, dtype=torch.float32
+        )
+        self._online_logger = (
+            None
+            if online_metrics_dir is None
+            else OnlineDSRLJSONLLogger(online_metrics_dir)
+        )
+        self._online_interaction_index = 0
+        self._online_episode_index = 1
+        self._reset_online_episode_state()
 
         action_space = gym.spaces.Box(
             low=-1.0,
@@ -278,10 +317,20 @@ class CleanDSRLLabPickWrapper(gym.Wrapper):
 
     def _policy_observation(self) -> dict[str, torch.Tensor]:
         self._ensure_flow_observation_ready()
-        policy = self.adapter.encode_observation().to(
+        flow_condition_embedding = self.adapter.encode_observation().to(
             device=self.device,
             dtype=torch.float32,
         )
+        _validate_matrix(
+            flow_condition_embedding,
+            name="flow_condition_embedding",
+            width=self.layout.flow_condition_dim,
+        )
+        tactile_actor = build_tactile_actor_from_env(self.env.unwrapped).to(
+            device=self.device, dtype=torch.float32
+        )
+        self._last_tactile_actor = tactile_actor.detach().clone()
+        policy = torch.cat((flow_condition_embedding, tactile_actor), dim=-1)
         self.layout.validate_policy_observations(policy)
         return {"policy": policy, "critic": self._critic_state()}
 
@@ -296,6 +345,167 @@ class CleanDSRLLabPickWrapper(gym.Wrapper):
         self.adapter.reset()
         self._flow_policy_steps = 0
         self._flow_needs_warmup = True
+
+    def _reset_online_episode_state(self) -> None:
+        self._online_episode_step = 0
+        self._online_episode_return = 0.0
+        self._online_episode_action_steps = 0
+        self._online_episode_physics_steps = 0
+        self._online_episode_peak_contact_force_n = 0.0
+        self._online_episode_peak_net_contact_force_n = 0.0
+
+    def _after_episode_reset(self) -> None:
+        """Extension hook called after the physical environment is reset."""
+
+    def _transform_physical_action(
+        self, policy_action: torch.Tensor
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Extension hook for high-rate action arbitration.
+
+        The clean DSRL path is intentionally an identity transform. Specialized
+        wrappers may replace selected physical action dimensions while keeping
+        the decoded DSRL action available for replay and diagnostics.
+        """
+
+        return policy_action, {}
+
+    def _after_physics_step(
+        self,
+        *,
+        policy_action: torch.Tensor,
+        executed_action: torch.Tensor,
+        reward: Any,
+        terminated: Any,
+        truncated: Any,
+        info: dict[str, Any],
+        action_metadata: dict[str, Any],
+        final_metrics: dict[str, Any],
+    ) -> None:
+        """Extension hook called once after every physical interaction step."""
+
+    def _after_episode_complete(
+        self,
+        *,
+        total_reward: Any,
+        terminated: Any,
+        truncated: Any,
+        chunk_flags: dict[str, bool],
+        final_metrics: dict[str, Any],
+    ) -> None:
+        """Extension hook called exactly once after a terminal transition."""
+
+    def _log_online_transition(
+        self,
+        *,
+        reward: Any,
+        terminated: Any,
+        truncated: Any,
+        executed_actions: int,
+        physics_steps: int,
+        policy_noise_rms: Any,
+        decoder_noise_rms: Any,
+        chunk_flags: dict[str, bool],
+        chunk_peak_contact_force_n: float,
+        chunk_peak_net_contact_force_n: float,
+        final_metrics: dict[str, Any],
+    ) -> None:
+        if self._online_logger is None:
+            return
+
+        self._online_interaction_index += 1
+        self._online_episode_step += 1
+        reward_value = scalar(reward)
+        self._online_episode_return += reward_value
+        self._online_episode_action_steps += executed_actions
+        self._online_episode_physics_steps += physics_steps
+        self._online_episode_peak_contact_force_n = max(
+            self._online_episode_peak_contact_force_n,
+            chunk_peak_contact_force_n,
+        )
+        self._online_episode_peak_net_contact_force_n = max(
+            self._online_episode_peak_net_contact_force_n,
+            chunk_peak_net_contact_force_n,
+        )
+        terminated_value = any_flag(terminated)
+        truncated_value = any_flag(truncated)
+        terminal = terminated_value or truncated_value
+        status, success, failure_reason = classify_terminal(
+            chunk_flags,
+            terminated=terminated_value,
+            truncated=truncated_value,
+        )
+        if not terminal:
+            status = "ongoing"
+            success_value: bool | None = None
+            failure_reason = None
+            terminal_reason = None
+        else:
+            success_value = success
+            terminal_reason = "success" if success else failure_reason
+
+        interaction_row = {
+            "schema_version": 1,
+            "recorded_at_utc": utc_now(),
+            "interaction_index": self._online_interaction_index,
+            "episode_index": self._online_episode_index,
+            "episode_step": self._online_episode_step,
+            "status": status,
+            "terminal": terminal,
+            "terminated": terminated_value,
+            "truncated": truncated_value,
+            "success": success_value,
+            "failure_reason": failure_reason,
+            "terminal_reason": terminal_reason,
+            "reward": reward_value,
+            "episode_return_so_far": self._online_episode_return,
+            "action_steps_executed": executed_actions,
+            "physics_steps_executed": physics_steps,
+            "episode_action_steps_so_far": self._online_episode_action_steps,
+            "episode_physics_steps_so_far": self._online_episode_physics_steps,
+            "policy_noise_rms": scalar(policy_noise_rms),
+            "decoder_noise_rms": scalar(decoder_noise_rms),
+            "chunk_peak_contact_force_n": chunk_peak_contact_force_n,
+            "chunk_peak_net_contact_force_n": chunk_peak_net_contact_force_n,
+            "episode_peak_contact_force_n": self._online_episode_peak_contact_force_n,
+            "episode_peak_net_contact_force_n": self._online_episode_peak_net_contact_force_n,
+            "final_contact_force_n": final_metrics["contact_force_n"],
+            "final_net_contact_force_n": final_metrics["net_contact_force_n"],
+            "final_lift_m": final_metrics["lift_m"],
+            "final_grasp_distance_m": final_metrics["grasp_distance_m"],
+            "break_force_threshold_n": self.break_force_threshold_n,
+            "terminal_flags": dict(chunk_flags),
+            "tactile_actor": self._decision_tactile_actor[0].detach().cpu().tolist(),
+        }
+        self._online_logger.log_interaction(interaction_row)
+
+        if terminal:
+            episode_row = {
+                "schema_version": 1,
+                "recorded_at_utc": interaction_row["recorded_at_utc"],
+                "episode_index": self._online_episode_index,
+                "ending_interaction_index": self._online_interaction_index,
+                "num_interactions": self._online_episode_step,
+                "status": status,
+                "success": success_value,
+                "failure_reason": failure_reason,
+                "terminal_reason": terminal_reason,
+                "terminated": terminated_value,
+                "truncated": truncated_value,
+                "episode_return": self._online_episode_return,
+                "action_steps_executed": self._online_episode_action_steps,
+                "physics_steps_executed": self._online_episode_physics_steps,
+                "peak_contact_force_n": self._online_episode_peak_contact_force_n,
+                "peak_net_contact_force_n": self._online_episode_peak_net_contact_force_n,
+                "break_force_threshold_n": self.break_force_threshold_n,
+                "terminal_flags": dict(chunk_flags),
+                "terminal_tactile_actor": self._decision_tactile_actor[0]
+                .detach()
+                .cpu()
+                .tolist(),
+            }
+            self._online_logger.log_episode(episode_row)
+            self._online_episode_index += 1
+            self._reset_online_episode_state()
 
     @torch.inference_mode()
     def reset(self, **kwargs):
@@ -312,11 +522,13 @@ class CleanDSRLLabPickWrapper(gym.Wrapper):
                 raise RuntimeError("A native Flow noise seed requires a seeded policy runner.")
             generator.manual_seed(flow_noise_seed)
         _, info = self.env.reset(**kwargs)
+        self._after_episode_reset()
         return self._policy_observation(), info
 
     @torch.inference_mode()
     def _step_noise(self, policy_action: torch.Tensor | None):
         self._ensure_flow_observation_ready()
+        self._decision_tactile_actor = self._last_tactile_actor.detach().clone()
         if policy_action is None:
             action_chunk = self.adapter.decode(None)
             policy_noise_rms = torch.zeros((), device=self.device)
@@ -353,6 +565,11 @@ class CleanDSRLLabPickWrapper(gym.Wrapper):
         executed_actions = 0
         physics_steps = 0
         episode_done = False
+        chunk_flags = {reason: False for reason, _ in FAILURE_FLAG_KEYS}
+        chunk_flags.update({"success": False, "timeout": False})
+        chunk_peak_contact_force_n = 0.0
+        chunk_peak_net_contact_force_n = 0.0
+        final_metrics: dict[str, Any] | None = None
         for action_index in range(self.chunk_execute_steps):
             physical_action = action_chunk[action_index].reshape(1, -1).to(
                 device=self.device,
@@ -360,7 +577,47 @@ class CleanDSRLLabPickWrapper(gym.Wrapper):
             )
             reward_for_action = None
             for _ in range(self.action_repeat):
-                _, reward, terminated, truncated, info = self.env.step(physical_action)
+                executed_action, action_metadata = self._transform_physical_action(
+                    physical_action
+                )
+                action_metadata = dict(action_metadata)
+                action_metadata["tactile_actor"] = (
+                    self._decision_tactile_actor[0].detach().cpu().tolist()
+                )
+                action_metadata["outer_policy_decision"] = action_index == 0
+                _validate_matrix(
+                    executed_action,
+                    name="executed_physical_action",
+                    width=10,
+                )
+                if executed_action.shape != physical_action.shape:
+                    raise ValueError(
+                        "Physical action transform must preserve the action shape, "
+                        f"received {tuple(executed_action.shape)} instead of "
+                        f"{tuple(physical_action.shape)}."
+                    )
+                _, reward, terminated, truncated, info = self.env.step(executed_action)
+                final_metrics = extract_step_metrics(info)
+                self._after_physics_step(
+                    policy_action=physical_action,
+                    executed_action=executed_action,
+                    reward=reward,
+                    terminated=terminated,
+                    truncated=truncated,
+                    info=info,
+                    action_metadata=action_metadata,
+                    final_metrics=final_metrics,
+                )
+                for name, value in final_metrics["flags"].items():
+                    chunk_flags[name] |= bool(value)
+                chunk_peak_contact_force_n = max(
+                    chunk_peak_contact_force_n,
+                    final_metrics["contact_force_n"],
+                )
+                chunk_peak_net_contact_force_n = max(
+                    chunk_peak_net_contact_force_n,
+                    final_metrics["net_contact_force_n"],
+                )
                 reward_for_action = reward if reward_for_action is None else reward_for_action + reward
                 physics_steps += 1
                 episode_done = self._episode_done(terminated, truncated)
@@ -377,7 +634,13 @@ class CleanDSRLLabPickWrapper(gym.Wrapper):
                 break
             self.adapter.update(self._raw_flow_observation())
 
-        if total_reward is None or terminated is None or truncated is None or info is None:
+        if (
+            total_reward is None
+            or terminated is None
+            or truncated is None
+            or info is None
+            or final_metrics is None
+        ):
             raise RuntimeError("Clean DSRL wrapper executed no decoded action.")
 
         info = dict(info)
@@ -385,11 +648,33 @@ class CleanDSRLLabPickWrapper(gym.Wrapper):
         info["clean_dsrl/physics_steps_executed"] = physics_steps
         info["clean_dsrl/policy_noise_rms"] = policy_noise_rms
         info["clean_dsrl/decoder_noise_rms"] = decoder_noise_rms
+        info["tactile_actor"] = self._decision_tactile_actor.detach().clone()
         log = dict(info.get("log", {}))
         log["CleanDSRL/action_steps_executed"] = float(executed_actions)
         log["CleanDSRL/policy_noise_rms"] = policy_noise_rms
         log["CleanDSRL/decoder_noise_rms"] = decoder_noise_rms
         info["log"] = log
+        self._log_online_transition(
+            reward=total_reward,
+            terminated=terminated,
+            truncated=truncated,
+            executed_actions=executed_actions,
+            physics_steps=physics_steps,
+            policy_noise_rms=policy_noise_rms,
+            decoder_noise_rms=decoder_noise_rms,
+            chunk_flags=chunk_flags,
+            chunk_peak_contact_force_n=chunk_peak_contact_force_n,
+            chunk_peak_net_contact_force_n=chunk_peak_net_contact_force_n,
+            final_metrics=final_metrics,
+        )
+        if self._episode_done(terminated, truncated):
+            self._after_episode_complete(
+                total_reward=total_reward,
+                terminated=terminated,
+                truncated=truncated,
+                chunk_flags=chunk_flags,
+                final_metrics=final_metrics,
+            )
         terminated_for_learning = terminated | truncated
         return (
             self._policy_observation(),
@@ -406,6 +691,11 @@ class CleanDSRLLabPickWrapper(gym.Wrapper):
         """Execute a native independent-Gaussian Flow chunk for BC comparison."""
 
         return self._step_noise(None)
+
+    def close(self):
+        if self._online_logger is not None:
+            self._online_logger.close()
+        return super().close()
 
 
 __all__ = [

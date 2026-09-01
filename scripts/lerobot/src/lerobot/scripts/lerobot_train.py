@@ -39,6 +39,7 @@ from lerobot.scripts.lerobot_eval import eval_policy_all
 from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.logging_utils import AverageMeter, MetricsTracker
 from lerobot.utils.random_utils import set_seed
+from lerobot.utils.constants import OBS_STATE
 from lerobot.utils.train_utils import (
     get_step_checkpoint_dir,
     get_step_identifier,
@@ -145,6 +146,36 @@ def update_policy(
     train_metrics.lr = optimizer.param_groups[0]["lr"]
     train_metrics.update_s = time.perf_counter() - start_time
     return train_metrics, output_dict
+
+
+def apply_training_state_mask(
+    batch: dict[str, Any],
+    indices: list[int],
+    probability: float,
+) -> dict[str, Any]:
+    """Mask selected normalized state coordinates per sample during BC training.
+
+    One Bernoulli draw is shared across all observation timesteps of a sample,
+    preventing the history frame from leaking a coordinate that was masked in
+    the current frame. The function is a no-op under the upstream defaults.
+    """
+
+    if not indices or probability <= 0.0:
+        return batch
+    state = batch.get(OBS_STATE)
+    if not isinstance(state, torch.Tensor) or state.ndim < 2:
+        raise ValueError(f"Training state mask requires a tensor {OBS_STATE!r} with a batch dimension.")
+    if max(indices) >= state.shape[-1]:
+        raise ValueError(
+            f"Training state mask index {max(indices)} exceeds state width {state.shape[-1]}."
+        )
+    masked = state.clone()
+    row_shape = (state.shape[0],) + (1,) * (state.ndim - 1)
+    selected = masked[..., indices]
+    row_mask = torch.rand(row_shape, device=state.device) < probability
+    masked[..., indices] = torch.where(row_mask, torch.zeros_like(selected), selected)
+    batch[OBS_STATE] = masked
+    return batch
 
 
 @parser.wrap()
@@ -326,11 +357,33 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     # create dataloader for offline training
     if hasattr(cfg.policy, "drop_n_last_frames"):
         shuffle = False
+        if dataset.episodes is None:
+            sampler_from_indices = dataset.meta.episodes["dataset_from_index"]
+            sampler_to_indices = dataset.meta.episodes["dataset_to_index"]
+            sampler_episode_indices = None
+        else:
+            # A filtered Hugging Face dataset is densely re-indexed from zero,
+            # while its metadata keeps full-dataset absolute frame offsets.
+            # Build episode bounds in that relative index space so the sampler
+            # never emits an absolute index into a filtered dataset.
+            sampler_from_indices = []
+            sampler_to_indices = []
+            relative_start = 0
+            for episode_idx in dataset.episodes:
+                absolute_start = dataset.meta.episodes[episode_idx]["dataset_from_index"]
+                absolute_end = dataset.meta.episodes[episode_idx]["dataset_to_index"]
+                relative_end = relative_start + absolute_end - absolute_start
+                sampler_from_indices.append(relative_start)
+                sampler_to_indices.append(relative_end)
+                relative_start = relative_end
+            sampler_episode_indices = None
         sampler = EpisodeAwareSampler(
-            dataset.meta.episodes["dataset_from_index"],
-            dataset.meta.episodes["dataset_to_index"],
-            episode_indices_to_use=dataset.episodes,
+            sampler_from_indices,
+            sampler_to_indices,
+            episode_indices_to_use=sampler_episode_indices,
             drop_n_last_frames=cfg.policy.drop_n_last_frames,
+            oversample_first_n_frames=cfg.oversample_first_n_frames,
+            oversample_factor=cfg.oversample_factor,
             shuffle=True,
         )
     else:
@@ -385,6 +438,11 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         start_time = time.perf_counter()
         batch = next(dl_iter)
         batch = preprocessor(batch)
+        batch = apply_training_state_mask(
+            batch,
+            cfg.state_mask_indices,
+            cfg.state_mask_probability,
+        )
         train_tracker.dataloading_s = time.perf_counter() - start_time
 
         train_tracker, output_dict = update_policy(

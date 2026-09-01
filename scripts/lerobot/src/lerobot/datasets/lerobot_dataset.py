@@ -1027,10 +1027,14 @@ class LeRobotDataset(torch.utils.data.Dataset):
         self._ensure_hf_dataset_loaded()
         item = self.hf_dataset[idx]
         ep_idx = item["episode_index"].item()
+        # ``idx`` is relative to the filtered Hugging Face dataset when an
+        # episode subset is loaded.  Delta lookups, episode bounds, and the
+        # absolute-to-relative map all use the original dataset ``index``.
+        absolute_idx = item["index"].item()
 
         query_indices = None
         if self.delta_indices is not None:
-            query_indices, padding = self._get_query_indices(idx, ep_idx)
+            query_indices, padding = self._get_query_indices(absolute_idx, ep_idx)
             query_result = self._query_hf_dataset(query_indices)
             item = {**item, **padding}
             for key, val in query_result.items():

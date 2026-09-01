@@ -129,6 +129,15 @@ class DiffusionConfig(PreTrainedConfig):
     use_group_norm: bool = True
     spatial_softmax_num_keypoints: int = 32
     use_separate_rgb_encoder_per_camera: bool = False
+    # Matched LabPick Diffusion BC: regress normalized object x/y from the
+    # latest third-person image and diffuse action x/y as residuals around
+    # that visual estimate.  Disabled by default so generic LeRobot
+    # Diffusion checkpoints retain their original architecture.
+    use_visual_xy_residual: bool = False
+    visual_xy_camera_index: int = -1
+    visual_xy_head_hidden_dim: int = 256
+    visual_xy_loss_weight: float = 2.0
+    visual_xy_smooth_l1_beta: float = 0.05
     # Unet.
     down_dims: tuple[int, ...] = (512, 1024, 2048)
     kernel_size: int = 5
@@ -180,6 +189,14 @@ class DiffusionConfig(PreTrainedConfig):
                 f"Got {self.noise_scheduler_type}."
             )
 
+        if self.use_visual_xy_residual:
+            if self.visual_xy_head_hidden_dim < 1:
+                raise ValueError("visual_xy_head_hidden_dim must be positive.")
+            if self.visual_xy_loss_weight <= 0.0:
+                raise ValueError("visual_xy_loss_weight must be positive.")
+            if self.visual_xy_smooth_l1_beta <= 0.0:
+                raise ValueError("visual_xy_smooth_l1_beta must be positive.")
+
         # Check that the horizon size and U-Net downsampling is compatible.
         # U-Net downsamples by 2 with each stage.
         downsampling_factor = 2 ** len(self.down_dims)
@@ -206,6 +223,17 @@ class DiffusionConfig(PreTrainedConfig):
     def validate_features(self) -> None:
         if len(self.image_features) == 0 and self.env_state_feature is None:
             raise ValueError("You must provide at least one image or the environment state among the inputs.")
+
+        if self.use_visual_xy_residual:
+            camera_count = len(self.image_features)
+            if camera_count == 0:
+                raise ValueError("Visual x/y residual mode requires at least one image feature.")
+            camera_index = int(self.visual_xy_camera_index)
+            if not -camera_count <= camera_index < camera_count:
+                raise ValueError(
+                    "visual_xy_camera_index is outside the configured image features: "
+                    f"index={camera_index}, cameras={camera_count}."
+                )
 
         if self.crop_shape is not None:
             for key, image_ft in self.image_features.items():

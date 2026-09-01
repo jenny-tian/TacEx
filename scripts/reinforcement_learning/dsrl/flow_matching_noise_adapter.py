@@ -10,6 +10,22 @@ import torch
 from sim_robot.deployment.policy_runner import SimActionChunkPolicyRunner
 
 
+def _install_numpy_pickle_compatibility_aliases() -> None:
+    """Allow NumPy-2 checkpoints to load in IsaacLab's NumPy-1 environment."""
+
+    try:
+        import numpy._core  # noqa: F401
+    except ModuleNotFoundError:
+        aliases = {
+            "numpy._core": np.core,
+            "numpy._core.multiarray": np.core.multiarray,
+            "numpy._core.numeric": np.core.numeric,
+            "numpy._core._multiarray_umath": np.core._multiarray_umath,
+        }
+        for name, module in aliases.items():
+            sys.modules.setdefault(name, module)
+
+
 class FlowMatchingNoiseAdapter:
     """Expose a frozen sim_robot Flow Matching prior as a DSRL action space."""
 
@@ -32,6 +48,7 @@ class FlowMatchingNoiseAdapter:
         seed: int | None = None,
     ) -> "FlowMatchingNoiseAdapter":
         checkpoint_path = Path(checkpoint).expanduser().resolve()
+        _install_numpy_pickle_compatibility_aliases()
         try:
             payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         except TypeError:

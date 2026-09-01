@@ -16,6 +16,7 @@
 import logging
 from pprint import pformat
 
+import numpy as np
 import torch
 
 from lerobot.configs.policies import PreTrainedConfig
@@ -25,9 +26,10 @@ from lerobot.datasets.lerobot_dataset import (
     LeRobotDatasetMetadata,
     MultiLeRobotDataset,
 )
+from lerobot.datasets.compute_stats import get_feature_stats
 from lerobot.datasets.streaming_dataset import StreamingLeRobotDataset
 from lerobot.datasets.transforms import ImageTransforms
-from lerobot.utils.constants import ACTION, OBS_PREFIX, REWARD
+from lerobot.utils.constants import ACTION, OBS_PREFIX, OBS_STATE, REWARD
 
 IMAGENET_STATS = {
     "mean": [[[0.485]], [[0.456]], [[0.406]]],  # (c,1,1)
@@ -129,5 +131,23 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
         for key in dataset.meta.camera_keys:
             for stats_type, stats in IMAGENET_STATS.items():
                 dataset.meta.stats[key][stats_type] = torch.tensor(stats, dtype=torch.float32)
+
+    if cfg.dataset.episodes is not None and not cfg.dataset.streaming:
+        # Metadata stats cover the full repository. Recompute the numerical
+        # policy inputs/targets on the selected training episodes so a held-out
+        # validation split cannot leak through normalization extrema or moments.
+        for key in (OBS_STATE, ACTION):
+            if key not in dataset.hf_dataset.column_names:
+                continue
+            values = np.asarray(dataset.hf_dataset[key], dtype=np.float32)
+            dataset.meta.stats[key] = get_feature_stats(
+                values,
+                axis=0,
+                keepdims=values.ndim == 1,
+            )
+        logging.info(
+            "Recomputed state/action normalization statistics on %d selected episodes.",
+            len(cfg.dataset.episodes),
+        )
 
     return dataset

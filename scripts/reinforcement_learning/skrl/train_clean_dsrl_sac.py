@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import copy
 import hashlib
+import json
 import math
 import os
 import random
@@ -39,9 +40,21 @@ parser.add_argument("--chunk_discount", type=float, default=0.99)
 parser.add_argument("--flow_num_inference_steps", type=int, default=20)
 parser.add_argument("--phase_horizon_steps", type=int, default=383)
 parser.add_argument("--camera_warmup_steps", type=int, default=8)
+parser.add_argument(
+    "--use_visual_xy_override",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Use the frozen BC visual-XY head during both training and evaluation.",
+)
 parser.add_argument("--labware_random_xy_m", type=float, nargs=2, default=(0.10, 0.10))
 parser.add_argument("--labware_random_yaw_deg", type=float, default=45.0)
 parser.add_argument("--break_force_threshold_n", type=float, default=4.0)
+parser.add_argument(
+    "--online_metrics_dir",
+    type=str,
+    default=None,
+    help="Optional fresh directory for durable per-interaction and per-episode JSONL.",
+)
 parser.add_argument("--backup_entropy", action=argparse.BooleanOptionalAction, default=False)
 parser.add_argument("--minimum_entropy_value", type=float, default=1.0e-3)
 parser.add_argument("--video", action="store_true", default=False)
@@ -216,6 +229,8 @@ def main(
         flow_num_inference_steps=args_cli.flow_num_inference_steps,
         phase_horizon_steps=args_cli.phase_horizon_steps,
         camera_warmup_steps=args_cli.camera_warmup_steps,
+        use_visual_xy_override=args_cli.use_visual_xy_override,
+        online_metrics_dir=args_cli.online_metrics_dir,
         seed=args_cli.seed,
     )
     layout = env.layout
@@ -223,7 +238,7 @@ def main(
     agent_cfg["agent"]["target_entropy"] = -0.5 * layout.action_dim
     agent_cfg["agent"]["experiment"]["experiment_name"] = (
         f"clean_dsrl_sac_absolute_l{layout.learned_noise_steps}"
-        f"_e{args_cli.chunk_execute_steps}_v2"
+        f"_e{args_cli.chunk_execute_steps}_v3_tactile"
     )
     log_root = os.path.abspath(
         os.path.join("logs", "skrl", agent_cfg["agent"]["experiment"]["directory"])
@@ -241,7 +256,7 @@ def main(
     dump_yaml(
         os.path.join(log_dir, "params", "clean_dsrl_sac.yaml"),
         {
-            "contract": "flow_noise_dsrl_absolute_repeat_last_v2",
+            "contract": "flow_noise_dsrl_absolute_repeat_last_v3_tactile",
             "contract_version": CLEAN_DSRL_CONTRACT_VERSION,
             "reference": "/home/limx/vlarl/src/dsrl",
             "algorithm": "SAC",
@@ -252,7 +267,7 @@ def main(
             "learning_rate": agent_cfg["agent"]["learning_rate"],
             "initial_log_std": agent_cfg["network"]["initial_log_std"],
             "initial_entropy_value": agent_cfg["agent"]["initial_entropy_value"],
-            "actor_observation": "frozen_flow_global_cond",
+            "actor_observation": "flow_condition_embedding384_plus_tactile_actor5",
             "actor_observation_dim": layout.policy_dim,
             "critic_state": "normalized_proprio10_relative_position3_object_rot6d6",
             "critic_state_dim": layout.state_dim,
@@ -270,11 +285,51 @@ def main(
             "bc_checkpoint_bytes": os.path.getsize(args_cli.bc_policy),
             "bc_checkpoint_sha256": _sha256(args_cli.bc_policy),
             "flow_num_inference_steps": args_cli.flow_num_inference_steps,
+            "use_visual_xy_override": args_cli.use_visual_xy_override,
+            "break_force_threshold_n": args_cli.break_force_threshold_n,
+            "online_metrics_dir": (
+                None
+                if args_cli.online_metrics_dir is None
+                else os.path.abspath(args_cli.online_metrics_dir)
+            ),
             "environment_reward_only": True,
             "timeout_is_terminal_for_bootstrap": True,
             "skrl_version": skrl.__version__,
         },
     )
+
+    if args_cli.online_metrics_dir is not None:
+        metrics_dir = os.path.abspath(args_cli.online_metrics_dir)
+        metadata = {
+            "schema_version": 1,
+            "experiment": "DINOv3 Flow Matching BC + Clean DSRL-SAC online training",
+            "created_at": datetime.now().astimezone().isoformat(),
+            "training_log_dir": log_dir,
+            "task": args_cli.task,
+            "seed": args_cli.seed,
+            "timesteps": int(agent_cfg["trainer"]["timesteps"]),
+            "learning_starts": int(agent_cfg["agent"]["learning_starts"]),
+            "batch_size": int(agent_cfg["agent"]["batch_size"]),
+            "checkpoint_interval": int(
+                agent_cfg["agent"]["experiment"]["checkpoint_interval"]
+            ),
+            "bc_policy": os.path.abspath(args_cli.bc_policy),
+            "bc_checkpoint_sha256": _sha256(args_cli.bc_policy),
+            "learned_noise_steps": args_cli.learned_noise_steps,
+            "chunk_execute_steps": args_cli.chunk_execute_steps,
+            "action_repeat": env.action_repeat,
+            "chunk_discount": args_cli.chunk_discount,
+            "flow_num_inference_steps": args_cli.flow_num_inference_steps,
+            "phase_horizon_steps": args_cli.phase_horizon_steps,
+            "camera_warmup_steps": args_cli.camera_warmup_steps,
+            "use_visual_xy_override": args_cli.use_visual_xy_override,
+            "labware_random_xy_m": list(args_cli.labware_random_xy_m),
+            "labware_random_yaw_deg": args_cli.labware_random_yaw_deg,
+            "break_force_threshold_n": args_cli.break_force_threshold_n,
+        }
+        with open(os.path.join(metrics_dir, "run_metadata.json"), "x", encoding="utf-8") as stream:
+            json.dump(metadata, stream, indent=2, ensure_ascii=False)
+            stream.write("\n")
 
     if args_cli.video:
         video_kwargs = {

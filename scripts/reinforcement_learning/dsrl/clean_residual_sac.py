@@ -21,23 +21,45 @@ from torch.distributions import Normal
 from skrl.models.torch import DeterministicMixin, GaussianMixin, Model
 
 
+CLEAN_RESIDUAL_CONTRACT_VERSION = 2
+CLEAN_RESIDUAL_CONTRACT_BUFFER = "_clean_residual_contract_version"
+
+
+def validate_tactile_residual_policy_state(policy_state: Mapping[str, object]) -> None:
+    """Reject checkpoints that predate the tactile residual v2 contract."""
+
+    if CLEAN_RESIDUAL_CONTRACT_BUFFER not in policy_state:
+        raise ValueError(
+            "Legacy Clean Residual checkpoint is incompatible with the tactile v2 contract: "
+            "the policy has no contract-version marker."
+        )
+    version = torch.as_tensor(policy_state[CLEAN_RESIDUAL_CONTRACT_BUFFER]).reshape(-1)
+    if version.numel() != 1 or int(version.item()) != CLEAN_RESIDUAL_CONTRACT_VERSION:
+        raise ValueError(
+            "Clean Residual checkpoint contract mismatch: expected tactile "
+            f"v{CLEAN_RESIDUAL_CONTRACT_VERSION}, received {version.tolist()}."
+        )
+
+
 @dataclass(frozen=True)
 class CleanResidualLayout:
     """Tensor and action-composition contract for the clean residual path."""
 
-    policy: int = 29
+    policy: int = 34
     state: int = 19
     action: int = 4
     full_bc_context: int = 10
+    tactile: int = 5
     indices: tuple[int, ...] = (0, 1, 2, 9)
     scale: float = 0.15
 
     def __post_init__(self) -> None:
         expected = {
-            "policy": 29,
+            "policy": 34,
             "state": 19,
             "action": 4,
             "full_bc_context": 10,
+            "tactile": 5,
         }
         for name, expected_value in expected.items():
             value = getattr(self, name)
@@ -48,10 +70,10 @@ class CleanResidualLayout:
                     f"The clean residual v1 contract fixes {name}={expected_value}, "
                     f"received {value}."
                 )
-        if self.policy != self.state + self.full_bc_context:
+        if self.policy != self.state + self.full_bc_context + self.tactile:
             raise ValueError(
-                "policy must equal state + full_bc_context, received "
-                f"{self.policy}, {self.state}, and {self.full_bc_context}."
+                "policy must equal state + full_bc_context + tactile, received "
+                f"{self.policy}, {self.state}, {self.full_bc_context}, and {self.tactile}."
             )
         if not isinstance(self.indices, tuple):
             raise TypeError(
@@ -94,6 +116,10 @@ class CleanResidualLayout:
         return self.full_bc_context
 
     @property
+    def tactile_dim(self) -> int:
+        return self.tactile
+
+    @property
     def controlled_action_indices(self) -> tuple[int, ...]:
         return self.indices
 
@@ -103,7 +129,7 @@ class CleanResidualLayout:
 
     @property
     def critic_input_dim(self) -> int:
-        return self.state + self.full_bc_context + self.action
+        return self.state + self.full_bc_context + self.tactile + self.action
 
     @staticmethod
     def _validate_matrix(tensor: torch.Tensor, *, name: str, width: int) -> None:
@@ -113,15 +139,22 @@ class CleanResidualLayout:
             raise ValueError(f"{name} must have shape [B, {width}], got {tuple(tensor.shape)}.")
         if not tensor.is_floating_point():
             raise TypeError(f"{name} must use a floating dtype, received {tensor.dtype}.")
+        if not bool(torch.isfinite(tensor).all()):
+            raise ValueError(f"{name} contains non-finite values.")
 
     def split_policy_observation(
         self,
         observations: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return the 19-D state context and complete 10-D frozen-BC action."""
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return 19-D state, 10-D frozen-BC action, and 5-D tactile input."""
 
         self._validate_matrix(observations, name="observations", width=self.policy)
-        return observations[:, : self.state], observations[:, self.state :]
+        bc_end = self.state + self.full_bc_context
+        return (
+            observations[:, : self.state],
+            observations[:, self.state : bc_end],
+            observations[:, bc_end:],
+        )
 
     def validate_states(self, states: torch.Tensor) -> None:
         self._validate_matrix(states, name="states", width=self.state)
@@ -261,7 +294,7 @@ class TanhSquashedGaussianActor(GaussianMixin, Model):
 
 
 class CleanResidualActor(TanhSquashedGaussianActor):
-    """29-D observation to one 4-D post-tanh xyz/width residual."""
+    """34-D tactile observation to one 4-D post-tanh xyz/width residual."""
 
     hidden_dims: tuple[int, int] = (256, 256)
 
@@ -296,6 +329,11 @@ class CleanResidualActor(TanhSquashedGaussianActor):
             device,
             min_log_std=min_log_std,
             max_log_std=max_log_std,
+        )
+        self.register_buffer(
+            CLEAN_RESIDUAL_CONTRACT_BUFFER,
+            torch.tensor(CLEAN_RESIDUAL_CONTRACT_VERSION, dtype=torch.int64),
+            persistent=True,
         )
         if self.num_observations != self.layout.policy:
             raise ValueError(
@@ -393,7 +431,7 @@ class CleanResidualCritic(DeterministicMixin, Model):
         observations = inputs["observations"]
         residuals = inputs["taken_actions"]
         self.layout.validate_states(states)
-        _, full_bc_action = self.layout.split_policy_observation(observations)
+        _, full_bc_action, tactile_actor = self.layout.split_policy_observation(observations)
         self.layout.validate_residuals(residuals)
         batch_sizes = {states.shape[0], full_bc_action.shape[0], residuals.shape[0]}
         if len(batch_sizes) != 1:
@@ -405,6 +443,7 @@ class CleanResidualCritic(DeterministicMixin, Model):
             (
                 states,
                 full_bc_action.to(states),
+                tactile_actor.to(states),
                 residuals.to(states),
             ),
             dim=-1,
@@ -483,9 +522,12 @@ def build_clean_residual_sac_models(
 
 
 __all__ = [
+    "CLEAN_RESIDUAL_CONTRACT_BUFFER",
+    "CLEAN_RESIDUAL_CONTRACT_VERSION",
     "CleanResidualActor",
     "CleanResidualCritic",
     "CleanResidualLayout",
     "TanhSquashedGaussianActor",
     "build_clean_residual_sac_models",
+    "validate_tactile_residual_policy_state",
 ]

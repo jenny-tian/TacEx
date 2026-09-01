@@ -1,4 +1,4 @@
-"""Model contract for low-dimensional absolute Flow-noise DSRL-SAC.
+"""Model contract for tactile-conditioned absolute Flow-noise DSRL-SAC.
 
 The frozen Flow Matching policy consumes a ``[32, 10]`` initial-noise tensor.
 Following the reference DSRL implementation, the actor learns only the first
@@ -24,23 +24,23 @@ except ImportError:
     from clean_residual_sac import TanhSquashedGaussianActor
 
 
-CLEAN_DSRL_CONTRACT_VERSION = 2
+CLEAN_DSRL_CONTRACT_VERSION = 3
 CLEAN_DSRL_CONTRACT_BUFFER = "_clean_dsrl_contract_version"
 
 
 def validate_absolute_dsrl_policy_state(policy_state: Mapping[str, object]) -> None:
-    """Reject checkpoints that predate the absolute-noise v2 contract."""
+    """Reject checkpoints that predate the tactile absolute-noise v3 contract."""
 
     if CLEAN_DSRL_CONTRACT_BUFFER not in policy_state:
         raise ValueError(
-            "Legacy Clean DSRL checkpoint is incompatible with the absolute-noise v2 "
+            "Legacy Clean DSRL checkpoint is incompatible with the tactile absolute-noise v3 "
             "contract: the policy has no contract-version marker."
         )
     version = torch.as_tensor(policy_state[CLEAN_DSRL_CONTRACT_BUFFER]).reshape(-1)
     if version.numel() != 1 or int(version.item()) != CLEAN_DSRL_CONTRACT_VERSION:
         received = version.tolist()
         raise ValueError(
-            "Clean DSRL checkpoint contract mismatch: expected absolute-noise "
+            "Clean DSRL checkpoint contract mismatch: expected tactile absolute-noise "
             f"v{CLEAN_DSRL_CONTRACT_VERSION}, received {received}."
         )
 
@@ -55,9 +55,17 @@ class CleanDSRLLayout:
     flow_horizon: int = 32
     learned_noise_steps: int = 1
     padding_mode: str = "repeat_last"
+    tactile: int = 5
 
     def __post_init__(self) -> None:
-        for name in ("policy", "state", "noise_dim", "flow_horizon", "learned_noise_steps"):
+        for name in (
+            "policy",
+            "state",
+            "noise_dim",
+            "flow_horizon",
+            "learned_noise_steps",
+            "tactile",
+        ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int):
                 raise TypeError(f"{name} must be an integer.")
@@ -67,6 +75,10 @@ class CleanDSRLLayout:
             raise ValueError(f"The LabPick DSRL critic state is fixed at 19-D, received {self.state}.")
         if self.noise_dim != 10:
             raise ValueError(f"The Flow policy noise width is fixed at 10-D, received {self.noise_dim}.")
+        if self.tactile != 5:
+            raise ValueError(f"The tactile actor vector is fixed at 5-D, received {self.tactile}.")
+        if self.policy <= self.tactile:
+            raise ValueError("policy must include a non-empty Flow condition plus the 5-D tactile vector.")
         if self.learned_noise_steps > self.flow_horizon:
             raise ValueError("learned_noise_steps cannot exceed flow_horizon.")
         if self.padding_mode not in {"repeat_last", "zeros"}:
@@ -83,6 +95,14 @@ class CleanDSRLLayout:
     @property
     def action_dim(self) -> int:
         return self.learned_noise_steps * self.noise_dim
+
+    @property
+    def flow_condition_dim(self) -> int:
+        return self.policy - self.tactile
+
+    @property
+    def tactile_dim(self) -> int:
+        return self.tactile
 
     @property
     def critic_input_dim(self) -> int:

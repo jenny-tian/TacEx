@@ -23,10 +23,13 @@ for path in (DSRL_ROOT, BC_POLICY_ROOT):
 import clean_residual_wrapper as clean_wrapper  # noqa: E402
 from clean_alpha_zero_sac import CleanAlphaZeroSAC  # noqa: E402
 from clean_residual_sac import (  # noqa: E402
+    CLEAN_RESIDUAL_CONTRACT_BUFFER,
+    CLEAN_RESIDUAL_CONTRACT_VERSION,
     CleanResidualActor,
     CleanResidualCritic,
     CleanResidualLayout,
     build_clean_residual_sac_models,
+    validate_tactile_residual_policy_state,
 )
 from clean_residual_wrapper import (  # noqa: E402
     CleanResidualLabPickWrapper,
@@ -152,11 +155,12 @@ def _parameters(model: torch.nn.Module) -> list[torch.Tensor]:
 def test_clean_layout_dimensions_and_point_one_five_composition_contract():
     layout = CleanResidualLayout()
 
-    assert layout.policy_dim == 29
+    assert layout.policy_dim == 34
     assert layout.state_dim == 19
     assert layout.action_dim == 4
     assert layout.bc_action_dim == 10
-    assert layout.critic_input_dim == 33
+    assert layout.tactile_dim == 5
+    assert layout.critic_input_dim == 38
     assert layout.controlled_action_indices == (0, 1, 2, 9)
     assert layout.residual_scale == 0.15
 
@@ -182,12 +186,29 @@ def test_clean_layout_dimensions_and_point_one_five_composition_contract():
             CleanResidualLayout(scale=invalid_scale)
 
 
+def test_tactile_residual_checkpoint_marker_rejects_legacy_policy_state():
+    layout = CleanResidualLayout()
+    observation_space, _, action_space = _spaces(layout)
+    actor = CleanResidualActor(observation_space, action_space, "cpu", layout=layout)
+    state = actor.state_dict()
+
+    validate_tactile_residual_policy_state(state)
+    assert int(state[CLEAN_RESIDUAL_CONTRACT_BUFFER].item()) == CLEAN_RESIDUAL_CONTRACT_VERSION
+    legacy = dict(state)
+    legacy.pop(CLEAN_RESIDUAL_CONTRACT_BUFFER)
+    with pytest.raises(ValueError, match="Legacy Clean Residual checkpoint"):
+        validate_tactile_residual_policy_state(legacy)
+
+
 def test_clean_wrapper_pure_helpers_pack_asymmetric_observation_and_scatter_once():
     layout = CleanResidualLayout()
     proprio = torch.arange(20, dtype=torch.float32).reshape(2, 10)
     relative_position = torch.arange(6, dtype=torch.float32).reshape(2, 3)
     object_rot6d = torch.arange(12, dtype=torch.float32).reshape(2, 6)
     full_bc_action = torch.arange(20, dtype=torch.float32).reshape(2, 10) / 10
+    tactile_actor = torch.tensor(
+        [[0.0, 0.5, 0.0, 1.0, 0.0], [2.0, 1.0, 1.0, 1.0, 1.0]]
+    )
     residual = torch.tensor(
         [[0.25, -0.5, 0.75, -1.0], [-0.2, 0.4, -0.6, 0.8]]
     )
@@ -197,6 +218,7 @@ def test_clean_wrapper_pure_helpers_pack_asymmetric_observation_and_scatter_once
         relative_position,
         object_rot6d,
         full_bc_action,
+        tactile_actor,
         layout=layout,
     )
     full_bc_before = full_bc_action.clone()
@@ -207,10 +229,11 @@ def test_clean_wrapper_pure_helpers_pack_asymmetric_observation_and_scatter_once
     )
 
     assert set(observation) == {"policy", "critic"}
-    assert observation["policy"].shape == (2, 29)
+    assert observation["policy"].shape == (2, 34)
     assert observation["critic"].shape == (2, 19)
     torch.testing.assert_close(observation["policy"][:, :19], observation["critic"])
-    torch.testing.assert_close(observation["policy"][:, 19:], full_bc_action)
+    torch.testing.assert_close(observation["policy"][:, 19:29], full_bc_action)
+    torch.testing.assert_close(observation["policy"][:, 29:], tactile_actor)
     torch.testing.assert_close(full_bc_action, full_bc_before, rtol=0.0, atol=0.0)
     torch.testing.assert_close(composed[:, 3:9], full_bc_action[:, 3:9])
     torch.testing.assert_close(
@@ -293,7 +316,10 @@ def test_clean_critic_input_is_state_full_bc_context_and_raw_residual():
     states = torch.arange(2 * layout.state_dim, dtype=torch.float32).reshape(2, -1)
     actor_only_state = torch.full_like(states, -999.0)
     full_bc_action = torch.arange(2 * layout.bc_action_dim, dtype=torch.float32).reshape(2, -1)
-    observations = torch.cat((actor_only_state, full_bc_action), dim=-1)
+    tactile_actor = torch.tensor(
+        [[0.0, 0.5, 0.0, 1.0, 0.0], [2.0, 1.0, 1.0, 1.0, 1.0]]
+    )
+    observations = torch.cat((actor_only_state, full_bc_action, tactile_actor), dim=-1)
     residual = torch.tensor(
         [[0.1, -0.2, 0.3, -0.4], [-0.5, 0.6, -0.7, 0.8]],
         requires_grad=True,
@@ -307,11 +333,12 @@ def test_clean_critic_input_is_state_full_bc_context_and_raw_residual():
         }
     )
 
-    assert critic.network_input_dim == 33
-    assert network_input.shape == (2, 33)
+    assert critic.network_input_dim == 38
+    assert network_input.shape == (2, 38)
     torch.testing.assert_close(network_input[:, :19], states)
     torch.testing.assert_close(network_input[:, 19:29], full_bc_action)
-    torch.testing.assert_close(network_input[:, 29:33], residual)
+    torch.testing.assert_close(network_input[:, 29:34], tactile_actor)
+    torch.testing.assert_close(network_input[:, 34:38], residual)
     assert not torch.equal(network_input[:, :19], actor_only_state)
 
 
@@ -618,6 +645,9 @@ class _FakeLabPickEnv(gym.Env):
         self.single_action_space = self.action_space
         self.single_observation_space = self.observation_space
         self.actions: list[torch.Tensor] = []
+        self.has_touched = torch.zeros(1, dtype=torch.bool)
+        self.left_touch = torch.zeros(1)
+        self.right_touch = torch.zeros(1)
         self._truncated = bool(truncated)
 
     def get_cafe_observation(self):
@@ -629,8 +659,14 @@ class _FakeLabPickEnv(gym.Env):
             torch.tensor([[1.0, 0.0, 0.0, 1.0, 0.0, 0.0]]),
         )
 
+    def tactile_contact_depths(self):
+        return self.left_touch, self.right_touch
+
     def reset(self, *, seed=None, options=None):
         del seed, options
+        self.has_touched.zero_()
+        self.left_touch.zero_()
+        self.right_touch.zero_()
         return {"policy": torch.zeros(1, 16)}, {}
 
     def step(self, action):
@@ -682,7 +718,7 @@ def test_clean_wrapper_executes_exact_composed_action_and_masks_timeout(monkeypa
         "use_visual_xy_override": True,
         "seed": 17,
     }
-    assert observation["policy"].shape == next_observation["policy"].shape == (1, 29)
+    assert observation["policy"].shape == next_observation["policy"].shape == (1, 34)
     assert observation["critic"].shape == next_observation["critic"].shape == (1, 19)
     assert len(base_env.actions) == 1
     assert len(adapter.unnormalized_inputs) == 1

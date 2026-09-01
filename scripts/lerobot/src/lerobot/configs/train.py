@@ -54,6 +54,12 @@ class TrainPipelineConfig(HubMixin):
     num_workers: int = 4
     batch_size: int = 8
     steps: int = 100_000
+    # Optional observation-identifiability controls for absolute-action BC.
+    # Defaults preserve upstream LeRobot behavior.
+    oversample_first_n_frames: int = 0
+    oversample_factor: int = 1
+    state_mask_indices: list[int] = field(default_factory=list)
+    state_mask_probability: float = 0.0
     eval_freq: int = 20_000
     log_freq: int = 200
     tolerance_s: float = 1e-4
@@ -78,6 +84,14 @@ class TrainPipelineConfig(HubMixin):
     checkpoint_path: Path | None = field(init=False, default=None)
 
     def validate(self) -> None:
+        if self.oversample_first_n_frames < 0:
+            raise ValueError("oversample_first_n_frames cannot be negative.")
+        if self.oversample_factor < 1:
+            raise ValueError("oversample_factor must be at least one.")
+        if not 0.0 <= self.state_mask_probability <= 1.0:
+            raise ValueError("state_mask_probability must lie in [0, 1].")
+        if any(index < 0 for index in self.state_mask_indices):
+            raise ValueError("state_mask_indices cannot contain negative indices.")
         # HACK: We parse again the cli args here to get the pretrained paths if there was some.
         policy_path = parser.get_path_arg("policy")
         if policy_path:

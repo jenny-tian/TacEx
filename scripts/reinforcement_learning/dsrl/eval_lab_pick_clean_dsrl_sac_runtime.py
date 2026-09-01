@@ -26,6 +26,12 @@ parser.add_argument("--chunk_discount", type=float, default=0.99)
 parser.add_argument("--flow_num_inference_steps", type=int, default=20)
 parser.add_argument("--phase_horizon_steps", type=int, default=383)
 parser.add_argument("--camera_warmup_steps", type=int, default=8)
+parser.add_argument(
+    "--use_visual_xy_override",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Match the frozen BC visual-XY override used during training.",
+)
 parser.add_argument("--labware_random_xy_m", type=float, nargs=2, default=(0.10, 0.10))
 parser.add_argument("--labware_random_yaw_deg", type=float, default=45.0)
 parser.add_argument("--break_force_threshold_n", type=float, default=4.0)
@@ -161,7 +167,7 @@ def main(
         flow_num_inference_steps=args_cli.flow_num_inference_steps,
         phase_horizon_steps=args_cli.phase_horizon_steps,
         camera_warmup_steps=args_cli.camera_warmup_steps,
-        use_visual_xy_override=False,
+        use_visual_xy_override=args_cli.use_visual_xy_override,
         seed=args_cli.seed,
     )
     layout = env.layout
@@ -341,14 +347,14 @@ def main(
         "mean_episode_reward": sum(item["episode_reward"] for item in results) / max(len(results), 1),
         "mean_policy_noise_rms": sum(item["mean_policy_noise_rms"] for item in results) / max(len(results), 1),
         "seed": args_cli.seed,
-        "contract": "flow_noise_dsrl_absolute_repeat_last_v2",
+        "contract": "flow_noise_dsrl_absolute_repeat_last_v3_tactile",
         "contract_version": CLEAN_DSRL_CONTRACT_VERSION,
         "learned_noise_steps": args_cli.learned_noise_steps,
         "noise_padding_mode": args_cli.noise_padding_mode,
         "noise_action_semantics": "absolute",
         "noise_action_bounds": [-1.0, 1.0],
         "rl_align_cafe_action_yaw": False,
-        "use_visual_xy_override": False,
+        "use_visual_xy_override": args_cli.use_visual_xy_override,
         "policy_action_source": "flow_decoder_full_xyz_rot6d_width",
         "chunk_execute_steps": args_cli.chunk_execute_steps,
         "chunk_discount": args_cli.chunk_discount,

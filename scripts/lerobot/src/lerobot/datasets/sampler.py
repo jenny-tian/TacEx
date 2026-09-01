@@ -26,6 +26,8 @@ class EpisodeAwareSampler:
         episode_indices_to_use: list | None = None,
         drop_n_first_frames: int = 0,
         drop_n_last_frames: int = 0,
+        oversample_first_n_frames: int = 0,
+        oversample_factor: int = 1,
         shuffle: bool = False,
     ):
         """Sampler that optionally incorporates episode boundary information.
@@ -37,14 +39,26 @@ class EpisodeAwareSampler:
                                     Assumes that episodes are indexed from 0 to N-1.
             drop_n_first_frames: Number of frames to drop from the start of each episode.
             drop_n_last_frames: Number of frames to drop from the end of each episode.
+            oversample_first_n_frames: Number of valid leading frames per episode to repeat.
+            oversample_factor: Total multiplicity of each selected leading frame.
             shuffle: Whether to shuffle the indices.
         """
+        if oversample_first_n_frames < 0:
+            raise ValueError("oversample_first_n_frames cannot be negative.")
+        if oversample_factor < 1:
+            raise ValueError("oversample_factor must be at least one.")
         indices = []
         for episode_idx, (start_index, end_index) in enumerate(
             zip(dataset_from_indices, dataset_to_indices, strict=True)
         ):
             if episode_indices_to_use is None or episode_idx in episode_indices_to_use:
-                indices.extend(range(start_index + drop_n_first_frames, end_index - drop_n_last_frames))
+                valid_start = start_index + drop_n_first_frames
+                valid_end = end_index - drop_n_last_frames
+                indices.extend(range(valid_start, valid_end))
+                head_end = min(valid_start + oversample_first_n_frames, valid_end)
+                if oversample_factor > 1 and head_end > valid_start:
+                    head = list(range(valid_start, head_end))
+                    indices.extend(head * (oversample_factor - 1))
 
         self.indices = indices
         self.shuffle = shuffle
