@@ -20,11 +20,39 @@ BOARD_COLOR = (0.16, 0.18, 0.22)
 TOP_COLOR = (0.30, 0.33, 0.38)
 RAISED_COLOR = (0.95, 0.10, 0.03)
 GROOVE_COLOR = (0.02, 0.35, 0.95)
+GROOVE_RAMP_RUN_M = 0.004
+GROOVE_DEPTH_M = 0.001
+GROOVE_RAMP_THICKNESS_M = 0.001
+GROOVE_RAMP_ANGLE_RAD = math.atan2(GROOVE_DEPTH_M, GROOVE_RAMP_RUN_M)
+GROOVE_RAMP_LENGTH_M = math.hypot(GROOVE_RAMP_RUN_M, GROOVE_DEPTH_M)
+GROOVE_RAMP_CENTER_Z = 0.0135 - 0.5 * GROOVE_RAMP_THICKNESS_M * math.cos(GROOVE_RAMP_ANGLE_RAD)
+RAISED_DEFECT_RADIUS_M = 0.012
+RAISED_DEFECT_HEIGHT_M = 0.002
+RAISED_DEFECT_CENTER_Z = 0.014 - (RAISED_DEFECT_RADIUS_M - RAISED_DEFECT_HEIGHT_M)
 
 
 def _cuboid(size, color, *, kinematic=True):
     return sim_utils.CuboidCfg(
         size=size,
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            kinematic_enabled=kinematic,
+            solver_position_iteration_count=32,
+            solver_velocity_iteration_count=1,
+            max_depenetration_velocity=1.0,
+        ),
+        collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.0002, rest_offset=0.0),
+        visual_material=sim_utils.PreviewSurfaceCfg(
+            diffuse_color=color,
+            opacity=1.0,
+            roughness=0.35,
+            metallic=0.0,
+        ),
+    )
+
+
+def _sphere(radius, color, *, kinematic=True):
+    return sim_utils.SphereCfg(
+        radius=radius,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             kinematic_enabled=kinematic,
             solver_position_iteration_count=32,
@@ -58,8 +86,10 @@ class LabSurfaceForceScanEnvCfg(DirectRLEnvCfg):
     board_size_xy = (0.24, 0.16)
     board_base_top_z = 0.010
     board_top_z = 0.014
-    groove_depth_m = 0.001
-    raised_defect_height_m = 0.002
+    groove_depth_m = GROOVE_DEPTH_M
+    groove_half_width_m = GROOVE_RAMP_RUN_M
+    raised_defect_height_m = RAISED_DEFECT_HEIGHT_M
+    raised_defect_radius_m = RAISED_DEFECT_RADIUS_M
     # Scan nearly the full 240 mm board length while leaving a 10 mm probe
     # margin at each edge so the contact pad stays on the surface.
     scan_start_xy = (0.41, 0.0)
@@ -67,7 +97,7 @@ class LabSurfaceForceScanEnvCfg(DirectRLEnvCfg):
     target_force_n = 3.0
     force_tolerance_n = 0.3
     scan_speed_m_s = 0.010
-    surface_preview_distance_m = 0.010
+    surface_preview_distance_m = 0.0015
     action_position_scale_m = 0.002
     action_yaw_scale_rad = math.radians(3.0)
     nominal_probe_quat_b = (0.0, 1.0, 0.0, 0.0)
@@ -161,22 +191,40 @@ class LabSurfaceForceScanEnvCfg(DirectRLEnvCfg):
         )
         for i in range(5)
     )
-    groove_inserts = tuple(
+    # The groove floor is formed by the two continuous ramps below.  Do not
+    # add a second overlapping cuboid at the same X interval: it creates a
+    # hidden collision edge and an artificial force spike.
+    groove_inserts = ()
+    groove_ramps = tuple(
         RigidObjectCfg(
-            prim_path=f"/World/envs/env_.*/surface_groove_{i}",
+            prim_path=f"/World/envs/env_.*/surface_groove_ramp_{i}_{side}",
             init_state=RigidObjectCfg.InitialStateCfg(
-                pos=(0.52 + (i - 1.5) * 0.048, 0.0, 0.0125),
+                pos=(
+                    0.52 + (i - 1.5) * 0.048 + (-0.002 if side == 0 else 0.002),
+                    0.0,
+                    GROOVE_RAMP_CENTER_Z,
+                ),
+                rot=(
+                    math.cos(GROOVE_RAMP_ANGLE_RAD / 2.0),
+                    0.0,
+                    (1.0 if side == 0 else -1.0) * math.sin(GROOVE_RAMP_ANGLE_RAD / 2.0),
+                    0.0,
+                ),
             ),
-            spawn=_cuboid((0.008, 0.16, 0.001), GROOVE_COLOR),
+            spawn=_cuboid(
+                (GROOVE_RAMP_LENGTH_M, 0.16, GROOVE_RAMP_THICKNESS_M),
+                GROOVE_COLOR,
+            ),
         )
         for i in range(4)
+        for side in range(2)
     )
 
     raised_defects = tuple(
         RigidObjectCfg(
             prim_path=f"/World/envs/env_.*/surface_raised_{i}",
-            init_state=RigidObjectCfg.InitialStateCfg(pos=(0.52, 0.0, 0.014)),
-            spawn=_cuboid((0.014, 0.014, 0.004), RAISED_COLOR, kinematic=True),
+            init_state=RigidObjectCfg.InitialStateCfg(pos=(0.52, 0.0, RAISED_DEFECT_CENTER_Z)),
+            spawn=_sphere(RAISED_DEFECT_RADIUS_M, RAISED_COLOR, kinematic=True),
         )
         for i in range(4)
     )

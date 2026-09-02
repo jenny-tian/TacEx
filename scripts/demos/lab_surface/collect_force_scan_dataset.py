@@ -176,9 +176,9 @@ def main() -> None:
         centers = _as_numpy(unwrapped.defect_centers[0]).astype(np.float32)
         kinds = _as_numpy(unwrapped.defect_kind[0]).astype(np.int64)
         raised_centers = centers[kinds == 0]
-        records: dict[str, list[np.ndarray | float | int]] = {
+        records: dict[str, list[np.ndarray | float | int | str]] = {
             "tool_pos": [], "tool_pos_local": [], "tool_quat": [], "scan_target_xy": [], "contact_force_n": [], "force_filtered_n": [],
-            "tactile_depth": [], "action": [], "reward": [], "surface_label": [], "surface_kind": [],
+            "tactile_depth": [], "action": [], "reward": [], "surface_label": [], "surface_kind": [], "phase": [],
         }
         tactile_records: dict[str, list[np.ndarray]] = {"left_tactile_rgb": [], "right_tactile_rgb": [], "left_height_map": [], "right_height_map": []}
         visual_records: dict[str, list[np.ndarray]] = {"scene_rgb": [], "scene_depth": []}
@@ -186,6 +186,7 @@ def main() -> None:
         scan_start_step = 0
         settle_count = 0
         contact_stable_count = 0
+        scan_ready_count = 0
         force_target_z = None
         surface_command = None
 
@@ -242,8 +243,8 @@ def main() -> None:
                     float(descent_target_z) - 0.00008,
                 )
                 if force_raw > 0.05:
-                    phase = "scan"
-                    scan_start_step = step
+                    phase = "contact_settle"
+                    scan_ready_count = 0
                     surface_now = float(
                         _as_numpy(
                             unwrapped.board_local_surface_height(
@@ -263,6 +264,15 @@ def main() -> None:
                     # the upcoming height also anticipates a groove instead of only
                     # pre-lifting for bumps.
                     force_target_z = surface_ahead + cfg.probe_contact_offset_m - cfg.target_force_n / cfg.virtual_contact_stiffness_n_per_m
+            elif phase == "contact_settle":
+                z_action = np.clip(-args.force_kp * (cfg.target_force_n - force), -0.25, 0.25)
+                if abs(force - cfg.target_force_n) <= cfg.force_tolerance_n:
+                    scan_ready_count += 1
+                else:
+                    scan_ready_count = 0
+                if scan_ready_count >= 30:
+                    phase = "scan"
+                    scan_start_step = step
             else:
                 # Positive z is upward; below-target force moves down.
                 z_action = np.clip(-args.force_kp * (cfg.target_force_n - force), -0.25, 0.25)
@@ -359,6 +369,7 @@ def main() -> None:
             records["reward"].append(float(_as_numpy(reward)[0]))
             records["surface_label"].append(label)
             records["surface_kind"].append(kind)
+            records["phase"].append(phase)
             if args.save_tactile:
                 tactile = unwrapped.tactile_record()
                 for key, value in tactile.items():

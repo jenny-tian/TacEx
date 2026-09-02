@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import gymnasium as gym
@@ -69,6 +70,11 @@ class LabSurfaceForceScanEnv(DirectRLEnv):
             obj = RigidObject(cfg)
             self.groove_inserts.append(obj)
             self.scene.rigid_objects[f"surface_groove_{i}"] = obj
+        self.groove_ramps = []
+        for i, cfg in enumerate(self.cfg.groove_ramps):
+            obj = RigidObject(cfg)
+            self.groove_ramps.append(obj)
+            self.scene.rigid_objects[f"surface_groove_ramp_{i}"] = obj
         self.raised_defects = []
         for i, cfg in enumerate(self.cfg.raised_defects):
             obj = RigidObject(cfg)
@@ -117,14 +123,15 @@ class LabSurfaceForceScanEnv(DirectRLEnv):
         groove_x = torch.tensor(
             [self.cfg.board_center[0] + (i - 1.5) * 0.048 for i in range(4)], device=self.device
         )
-        groove = torch.min(torch.abs(local_xy[:, 0:1] - groove_x[None, :]), dim=-1).values < 0.004
-        height = torch.where(groove, torch.full_like(height, self.cfg.board_top_z - self.cfg.groove_depth_m), height)
-        bump_dist = torch.cdist(local_xy, self.defect_centers[:, :, :2]).amin(dim=-1)
-        return torch.where(
-            bump_dist < 0.008,
-            torch.full_like(height, self.cfg.board_top_z + self.cfg.raised_defect_height_m),
-            height,
-        )
+        groove_dist = torch.min(torch.abs(local_xy[:, 0:1] - groove_x[None, :]), dim=-1).values
+        groove_fraction = (1.0 - groove_dist / self.cfg.groove_half_width_m).clamp(0.0, 1.0)
+        height -= self.cfg.groove_depth_m * groove_fraction
+
+        bump_dist = torch.linalg.norm(local_xy[:, None, :] - self.defect_centers[:, :, :2], dim=-1).amin(dim=-1)
+        radius = self.cfg.raised_defect_radius_m
+        sphere_center_z = self.cfg.board_top_z - (radius - self.cfg.raised_defect_height_m)
+        bump_height = sphere_center_z + torch.sqrt((radius * radius - bump_dist.square()).clamp_min(0.0))
+        return torch.maximum(height, bump_height)
 
     def _pre_physics_step(self, actions: torch.Tensor):
         actions = actions.clamp(-1.0, 1.0)
@@ -359,10 +366,13 @@ class LabSurfaceForceScanEnv(DirectRLEnv):
             self.board_translation[env_ids] = 0.0
             self.board_quat[env_ids] = torch.tensor((1.0, 0.0, 0.0, 0.0), device=self.device)
 
-        def write_board_object(obj, local_state: torch.Tensor):
+        def write_board_object(obj, local_state: torch.Tensor, local_quat: torch.Tensor | None = None):
             state = obj.data.default_root_state[env_ids].clone()
             state[:, :3] = self.board_local_to_world(local_state[env_ids])
-            state[:, 3:7] = self.board_quat[env_ids]
+            if local_quat is None:
+                state[:, 3:7] = self.board_quat[env_ids]
+            else:
+                state[:, 3:7] = math_utils.quat_mul(self.board_quat[env_ids], local_quat[env_ids])
             state[:, 7:] = 0.0
             obj.write_root_state_to_sim(state, env_ids=env_ids)
 
@@ -378,6 +388,22 @@ class LabSurfaceForceScanEnv(DirectRLEnv):
             local[:, 0] = self.cfg.board_center[0] + (i - 1.5) * 0.048
             local[:, 2] = 0.0125
             write_board_object(obj, local)
+        ramp_angle_value = math.atan2(self.cfg.groove_depth_m, self.cfg.groove_half_width_m)
+        ramp_angle = torch.full((self.num_envs,), ramp_angle_value, device=self.device)
+        for ramp_idx, obj in enumerate(self.groove_ramps):
+            groove_idx, side = divmod(ramp_idx, 2)
+            local = board_local.clone()
+            local[:, 0] = self.cfg.board_center[0] + (groove_idx - 1.5) * 0.048 + (-0.002 if side == 0 else 0.002)
+            ramp_thickness = 0.001
+            local[:, 2] = (
+                self.cfg.board_top_z
+                - 0.5 * self.cfg.groove_depth_m
+                - 0.5 * ramp_thickness * math.cos(ramp_angle_value)
+            )
+            signed_angle = ramp_angle if side == 0 else -ramp_angle
+            zeros = torch.zeros_like(signed_angle)
+            local_quat = math_utils.quat_from_euler_xyz(zeros, signed_angle, zeros)
+            write_board_object(obj, local, local_quat)
 
         scan_start_local = torch.tensor((*self.cfg.scan_start_xy, 0.0), device=self.device).expand(self.num_envs, 3)
         self.scan_target[env_ids] = self.board_local_to_world(scan_start_local)[env_ids, :2]
@@ -390,8 +416,11 @@ class LabSurfaceForceScanEnv(DirectRLEnv):
         self.defect_kind[env_ids] = 0
         for i, defect in enumerate(self.raised_defects):
             state = defect.data.default_root_state[env_ids].clone()
+            center_z = self.cfg.board_top_z - (
+                self.cfg.raised_defect_radius_m - self.cfg.raised_defect_height_m
+            )
             local = torch.cat(
-                (self.defect_centers[:, i, :], torch.full((self.num_envs, 1), 0.014, device=self.device)), dim=-1
+                (self.defect_centers[:, i, :], torch.full((self.num_envs, 1), center_z, device=self.device)), dim=-1
             )
             state[:, :3] = self.board_local_to_world(local[env_ids])
             state[:, 3:7] = self.board_quat[env_ids]
