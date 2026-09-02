@@ -118,9 +118,13 @@ class LabSurfaceForceScanEnv(DirectRLEnv):
             [self.cfg.board_center[0] + (i - 1.5) * 0.048 for i in range(4)], device=self.device
         )
         groove = torch.min(torch.abs(local_xy[:, 0:1] - groove_x[None, :]), dim=-1).values < 0.004
-        height = torch.where(groove, torch.full_like(height, self.cfg.board_top_z - 0.001), height)
+        height = torch.where(groove, torch.full_like(height, self.cfg.board_top_z - self.cfg.groove_depth_m), height)
         bump_dist = torch.cdist(local_xy, self.defect_centers[:, :, :2]).amin(dim=-1)
-        return torch.where(bump_dist < 0.008, torch.full_like(height, self.cfg.board_top_z + 0.002), height)
+        return torch.where(
+            bump_dist < 0.008,
+            torch.full_like(height, self.cfg.board_top_z + self.cfg.raised_defect_height_m),
+            height,
+        )
 
     def _pre_physics_step(self, actions: torch.Tensor):
         actions = actions.clamp(-1.0, 1.0)

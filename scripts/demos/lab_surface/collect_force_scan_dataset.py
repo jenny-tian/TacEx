@@ -195,7 +195,10 @@ def main() -> None:
             pos_np = _as_numpy(pos_local[0]).astype(np.float32)
             if phase == "scan":
                 scan_elapsed_s = (step - scan_start_step) * float(cfg.sim.dt) * float(cfg.decimation)
-                scan_distance = min(scan_elapsed_s * 0.010, float(scan_end_local[0] - scan_start_local[0]))
+                scan_distance = min(
+                    scan_elapsed_s * cfg.scan_speed_m_s,
+                    float(scan_end_local[0] - scan_start_local[0]),
+                )
                 progress = scan_distance / max(float(scan_end_local[0] - scan_start_local[0]), 1.0e-6)
             else:
                 progress = 0.0

@@ -58,14 +58,15 @@ class LabSurfaceForceScanEnvCfg(DirectRLEnvCfg):
     board_size_xy = (0.24, 0.16)
     board_base_top_z = 0.010
     board_top_z = 0.014
-    groove_depth_m = 0.002
+    groove_depth_m = 0.001
+    raised_defect_height_m = 0.002
     # Scan nearly the full 240 mm board length while leaving a 10 mm probe
     # margin at each edge so the contact pad stays on the surface.
     scan_start_xy = (0.41, 0.0)
     scan_end_xy = (0.63, 0.0)
     target_force_n = 3.0
     force_tolerance_n = 0.3
-    scan_speed_m_s = 0.03
+    scan_speed_m_s = 0.010
     surface_preview_distance_m = 0.010
     action_position_scale_m = 0.002
     action_yaw_scale_rad = math.radians(3.0)
