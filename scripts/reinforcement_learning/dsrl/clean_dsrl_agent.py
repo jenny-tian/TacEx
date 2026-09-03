@@ -26,6 +26,8 @@ class CleanDSRLSAC(SAC):
         cfg: SAC_CFG | dict,
         backup_entropy: bool = False,
         minimum_entropy_value: float | None = 1.0e-3,
+        action_l2_weight: float = 0.0,
+        max_gradient_updates: int | None = None,
         **kwargs,
     ) -> None:
         resolved_cfg = SAC_CFG(**cfg) if isinstance(cfg, dict) else cfg
@@ -40,11 +42,26 @@ class CleanDSRLSAC(SAC):
                 raise ValueError("minimum_entropy_value must be positive or None.")
         self.backup_entropy = bool(backup_entropy)
         self.minimum_entropy_value = minimum_entropy_value
+        if not math.isfinite(action_l2_weight) or action_l2_weight < 0.0:
+            raise ValueError("action_l2_weight must be finite and non-negative.")
+        self.action_l2_weight = float(action_l2_weight)
+        if max_gradient_updates is not None:
+            if isinstance(max_gradient_updates, bool) or not isinstance(max_gradient_updates, int):
+                raise TypeError("max_gradient_updates must be an integer or None.")
+            if max_gradient_updates < 1:
+                raise ValueError("max_gradient_updates must be positive or None.")
+        self.max_gradient_updates = max_gradient_updates
+        self.optimizer_updates_completed = 0
         super().__init__(cfg=resolved_cfg, **kwargs)
 
     def update(self, *, timestep: int, timesteps: int) -> None:
         del timesteps
         for _ in range(self.cfg.gradient_steps):
+            if (
+                self.max_gradient_updates is not None
+                and self.optimizer_updates_completed >= self.max_gradient_updates
+            ):
+                return
             (
                 sampled_observations,
                 sampled_states,
@@ -139,10 +156,12 @@ class CleanDSRLSAC(SAC):
                 policy_q2, _ = self.critic_2.act(
                     {**inputs, "taken_actions": actions}, role="critic_2"
                 )
-                policy_loss = (
+                q_policy_loss = (
                     self._entropy_coefficient * log_prob
                     - torch.minimum(policy_q1, policy_q2)
                 ).mean()
+                action_l2_loss = actions.square().mean()
+                policy_loss = q_policy_loss + self.action_l2_weight * action_l2_loss
 
             self.policy_optimizer.zero_grad()
             self.scaler.scale(policy_loss).backward()
@@ -186,9 +205,12 @@ class CleanDSRLSAC(SAC):
                 self.policy_scheduler.step()
             if self.critic_scheduler:
                 self.critic_scheduler.step()
+            self.optimizer_updates_completed += 1
 
             if self.write_interval > 0 and timestep % self.write_interval == 0:
                 self.track_data("Loss / Policy loss", policy_loss.item())
+                self.track_data("Loss / Policy Q-entropy loss", q_policy_loss.item())
+                self.track_data("Loss / Policy action L2", action_l2_loss.item())
                 self.track_data("Loss / Critic loss", critic_loss.item())
                 self.track_data("Loss / Entropy loss", entropy_loss.item())
                 self.track_data("Coefficient / Entropy coefficient", self._entropy_coefficient.item())

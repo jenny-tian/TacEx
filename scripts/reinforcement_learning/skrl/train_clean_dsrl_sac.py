@@ -35,6 +35,9 @@ parser.add_argument("--resume_checkpoint", type=str, default=None)
 parser.add_argument("--bc_device", type=str, default="cuda:0")
 parser.add_argument("--learned_noise_steps", type=int, default=1)
 parser.add_argument("--noise_padding_mode", choices=("repeat_last", "zeros"), default="repeat_last")
+parser.add_argument("--noise_residual_scale", type=float, default=0.25)
+parser.add_argument("--action_l2_weight", type=float, default=10.0)
+parser.add_argument("--max_gradient_updates", type=int, default=500)
 parser.add_argument("--chunk_execute_steps", type=int, default=32)
 parser.add_argument("--chunk_discount", type=float, default=0.99)
 parser.add_argument("--flow_num_inference_steps", type=int, default=20)
@@ -129,6 +132,10 @@ def _validate_cli() -> None:
         raise ValueError("--chunk_discount must lie in (0, 1].")
     if args_cli.minimum_entropy_value <= 0.0:
         raise ValueError("--minimum_entropy_value must be positive.")
+    if args_cli.noise_residual_scale < 0.0 or args_cli.action_l2_weight < 0.0:
+        raise ValueError("Noise residual scale and action-L2 weight must be non-negative.")
+    if args_cli.max_gradient_updates < 1:
+        raise ValueError("--max_gradient_updates must be positive.")
     for value, name in (
         (args_cli.actor_lr, "--actor_lr"),
         (args_cli.critic_lr, "--critic_lr"),
@@ -224,6 +231,7 @@ def main(
         device=args_cli.bc_device,
         learned_noise_steps=args_cli.learned_noise_steps,
         padding_mode=args_cli.noise_padding_mode,
+        noise_residual_scale=args_cli.noise_residual_scale,
         chunk_execute_steps=args_cli.chunk_execute_steps,
         chunk_discount=args_cli.chunk_discount,
         flow_num_inference_steps=args_cli.flow_num_inference_steps,
@@ -237,8 +245,8 @@ def main(
     agent_cfg["agent"]["discount_factor"] = env.outer_discount_factor
     agent_cfg["agent"]["target_entropy"] = -0.5 * layout.action_dim
     agent_cfg["agent"]["experiment"]["experiment_name"] = (
-        f"clean_dsrl_sac_absolute_l{layout.learned_noise_steps}"
-        f"_e{args_cli.chunk_execute_steps}_v3_tactile"
+        f"clean_dsrl_sac_base_anchored_l{layout.learned_noise_steps}"
+        f"_e{args_cli.chunk_execute_steps}_v4_tactile"
     )
     log_root = os.path.abspath(
         os.path.join("logs", "skrl", agent_cfg["agent"]["experiment"]["directory"])
@@ -256,7 +264,7 @@ def main(
     dump_yaml(
         os.path.join(log_dir, "params", "clean_dsrl_sac.yaml"),
         {
-            "contract": "flow_noise_dsrl_absolute_repeat_last_v3_tactile",
+            "contract": "flow_noise_dsrl_base_anchored_repeat_last_v4_tactile",
             "contract_version": CLEAN_DSRL_CONTRACT_VERSION,
             "reference": "/home/limx/vlarl/src/dsrl",
             "algorithm": "SAC",
@@ -275,7 +283,10 @@ def main(
             "learned_noise_shape": [layout.learned_noise_steps, layout.noise_dim],
             "decoder_noise_shape": [layout.flow_horizon, layout.noise_dim],
             "noise_padding_mode": layout.padding_mode,
-            "noise_action_semantics": "absolute",
+            "noise_action_semantics": "scaled_residual_over_native_gaussian",
+            "noise_residual_scale": layout.residual_scale,
+            "action_l2_weight": args_cli.action_l2_weight,
+            "max_gradient_updates": args_cli.max_gradient_updates,
             "noise_action_bounds": [-1.0, 1.0],
             "chunk_execute_steps": args_cli.chunk_execute_steps,
             "action_repeat": env.action_repeat,
@@ -369,6 +380,8 @@ def main(
         device=device,
         backup_entropy=args_cli.backup_entropy,
         minimum_entropy_value=args_cli.minimum_entropy_value,
+        action_l2_weight=args_cli.action_l2_weight,
+        max_gradient_updates=args_cli.max_gradient_updates,
     )
     if args_cli.resume_checkpoint is not None:
         agent.load(args_cli.resume_checkpoint)
@@ -379,7 +392,8 @@ def main(
         f"obs={layout.policy_dim} state={layout.state_dim} "
         f"learned_noise={layout.learned_noise_steps}x{layout.noise_dim} "
         f"decoder_noise={layout.flow_horizon}x{layout.noise_dim} "
-        f"semantics=absolute execute={args_cli.chunk_execute_steps} "
+        f"semantics=base_anchored_residual scale={layout.residual_scale:g} "
+        f"execute={args_cli.chunk_execute_steps} "
         f"gamma_outer={env.outer_discount_factor:.8f}"
     )
     trainer = SequentialTrainer(

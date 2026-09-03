@@ -28,7 +28,11 @@ parser.add_argument("--seed", type=int, default=4200)
 parser.add_argument("--break-force-threshold-n", type=float, default=4.5)
 parser.add_argument("--labware-random-xy-m", type=float, nargs=2, default=(0.10, 0.10))
 parser.add_argument("--labware-random-yaw-deg", type=float, default=0.0)
-parser.add_argument("--residual-scale", type=float, default=0.15)
+parser.add_argument("--residual-scale", type=float, default=0.01)
+parser.add_argument(
+    "--residual-contact-gate", action=argparse.BooleanOptionalAction, default=True
+)
+parser.add_argument("--residual-action-l2-weight", type=float, default=1.0)
 parser.add_argument("--flow-num-inference-steps", type=int, default=20)
 parser.add_argument("--phase-horizon-steps", type=int, default=383)
 parser.add_argument("--camera-warmup-steps", type=int, default=8)
@@ -52,6 +56,8 @@ if args_cli.phase == "evaluation" and args_cli.training_interactions:
     parser.error("--training-interactions is only valid during online training.")
 if args_cli.phase == "evaluation" and args_cli.checkpoint is None:
     parser.error("Residual-RL evaluation requires --checkpoint.")
+if args_cli.residual_scale < 0.0 or args_cli.residual_action_l2_weight < 0.0:
+    parser.error("Residual scale and action-L2 weight must be non-negative.")
 
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
@@ -141,6 +147,7 @@ def _train(env: OnlineEpisodeRecorder, agent_cfg: dict[str, Any], output_dir: Pa
         state_space=vec_env.state_space,
         action_space=vec_env.action_space,
         device=vec_env.device,
+        action_l2_weight=args_cli.residual_action_l2_weight,
     )
     interaction_limited = args_cli.training_interactions > 0
     maximum = (
@@ -243,9 +250,8 @@ def main(
     env_cfg.scene.num_envs = 1
     env_cfg.sim.device = args_cli.device
     env_cfg.seed = args_cli.seed
-    # This established residual baseline uses reset-time simulator yaw and is
-    # therefore an intentionally strong (privileged) comparator.
-    env_cfg.rl_align_cafe_action_yaw = True
+    # Match the frozen base policy exactly when the residual scale is zero.
+    env_cfg.rl_align_cafe_action_yaw = False
     env_cfg.rl_action_penalty_scale = 0.0
     env_cfg.labware_pos_randomization_xy = tuple(args_cli.labware_random_xy_m)
     env_cfg.labware_yaw_randomization = math.radians(args_cli.labware_random_yaw_deg)
@@ -266,6 +272,7 @@ def main(
         flow_num_inference_steps=args_cli.flow_num_inference_steps,
         phase_horizon_steps=args_cli.phase_horizon_steps,
         camera_warmup_steps=args_cli.camera_warmup_steps,
+        contact_gate=args_cli.residual_contact_gate,
         seed=args_cli.seed,
     )
     env = OnlineEpisodeRecorder(
@@ -291,6 +298,9 @@ def main(
         "labware_random_xy_m": list(args_cli.labware_random_xy_m),
         "labware_random_yaw_deg": args_cli.labware_random_yaw_deg,
         "residual_scale": args_cli.residual_scale,
+        "residual_contact_gate": args_cli.residual_contact_gate,
+        "residual_action_l2_weight": args_cli.residual_action_l2_weight,
+        "bc_replan_steps": residual.replan_steps,
         "residual_indices": [0, 1, 2, 9],
         "residual_contract_version": CLEAN_RESIDUAL_CONTRACT_VERSION,
         "actor_observation_dim": residual.layout.policy_dim,
@@ -299,7 +309,7 @@ def main(
         "tactile_actor": tactile_contract_metadata(),
         "gpu_max_rigid_contact_count": env_cfg.sim.physx.gpu_max_rigid_contact_count,
         "gpu_max_rigid_patch_count": env_cfg.sim.physx.gpu_max_rigid_patch_count,
-        "oracle_yaw": True,
+        "oracle_yaw": False,
         "learning_starts": args_cli.learning_starts,
         "batch_size": args_cli.batch_size,
         "learning_rates": [args_cli.actor_lr, args_cli.critic_lr],

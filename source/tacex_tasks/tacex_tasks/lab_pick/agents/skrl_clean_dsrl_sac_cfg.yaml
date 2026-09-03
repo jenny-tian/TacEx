@@ -3,7 +3,7 @@ seed: 42
 network:
   actor_hidden_dims: [512, 512, 512]
   critic_hidden_dims: [512, 512, 512]
-  initial_log_std: 0.0
+  initial_log_std: -2.0
 
 memory_size: 20000
 

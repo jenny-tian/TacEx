@@ -300,16 +300,62 @@ def record_length(record_dir: Path, image_keys: list[str]) -> int:
     return length
 
 
-def compute_records_normalizer(record_dirs: list[Path], normalizer_mode: str, quat_order: str) -> LinearNormalizer:
+def record_policy_state(
+    record_dir: Path,
+    *,
+    quat_order: str,
+    include_force: bool = False,
+    force_key: str = "ft",
+) -> np.ndarray:
+    """Build the deployable policy state stored by a CAFE record.
+
+    The base state is ``xyz + rot6d + gripper width`` (10-D).  Force-aware
+    policies append the aligned six-axis wrench ``Fx,Fy,Fz,Tx,Ty,Tz`` so the
+    training state exactly matches ``LabPickEnv.get_cafe_observation()``.
+    """
+
+    aligned = record_dir / "aligned"
+    state = record_state_from_parts(
+        np.load(aligned / "xyz.npy", mmap_mode="r"),
+        np.load(aligned / "quat.npy", mmap_mode="r"),
+        np.load(aligned / "width.npy", mmap_mode="r"),
+        quat_order=quat_order,
+    )
+    if not include_force:
+        return state
+
+    force_path = aligned / f"{force_key}.npy"
+    if not force_path.is_file():
+        raise FileNotFoundError(f"Force-conditioned state requires {force_path}")
+    force = np.asarray(np.load(force_path, mmap_mode="r"), dtype=np.float32)
+    if force.ndim != 2 or force.shape[1] != 6:
+        raise ValueError(f"{force_path} has shape {force.shape}; expected (T, 6).")
+    if len(force) != len(state):
+        raise ValueError(
+            f"State/force lengths differ in {record_dir}: state={len(state)}, force={len(force)}."
+        )
+    if not np.all(np.isfinite(force)):
+        raise ValueError(f"Non-finite force values found in {force_path}")
+    return np.concatenate((state, force), axis=-1).astype(np.float32, copy=False)
+
+
+def compute_records_normalizer(
+    record_dirs: list[Path],
+    normalizer_mode: str,
+    quat_order: str,
+    *,
+    include_force: bool = False,
+    force_key: str = "ft",
+) -> LinearNormalizer:
     state_parts = []
     action_parts = []
     for record_dir in record_dirs:
         aligned = record_dir / "aligned"
-        state = record_state_from_parts(
-            np.load(aligned / "xyz.npy", mmap_mode="r"),
-            np.load(aligned / "quat.npy", mmap_mode="r"),
-            np.load(aligned / "width.npy", mmap_mode="r"),
+        state = record_policy_state(
+            record_dir,
             quat_order=quat_order,
+            include_force=include_force,
+            force_key=force_key,
         )
         action = np.asarray(np.load(aligned / "action.npy", mmap_mode="r"), dtype=np.float32)
         state_parts.append(state)
@@ -333,6 +379,8 @@ class RecordsSequenceDataset(Dataset):
         image_obs_steps: int,
         chunk_size: int,
         quat_order: str = "wxyz",
+        include_force: bool = False,
+        force_key: str = "ft",
     ) -> None:
         super().__init__()
         self.record_dirs = list(record_dirs)
@@ -342,6 +390,8 @@ class RecordsSequenceDataset(Dataset):
         self.image_obs_steps = int(image_obs_steps)
         self.chunk_size = int(chunk_size)
         self.quat_order = quat_order
+        self.include_force = bool(include_force)
+        self.force_key = str(force_key)
         self._cache: dict[int, dict[str, Any]] = {}
 
         self.episodes = [
@@ -373,11 +423,11 @@ class RecordsSequenceDataset(Dataset):
             record_dir = self.record_dirs[local_idx]
             aligned = record_dir / "aligned"
             self._cache[local_idx] = {
-                STATE_KEY: record_state_from_parts(
-                    np.load(aligned / "xyz.npy", mmap_mode="r"),
-                    np.load(aligned / "quat.npy", mmap_mode="r"),
-                    np.load(aligned / "width.npy", mmap_mode="r"),
+                STATE_KEY: record_policy_state(
+                    record_dir,
                     quat_order=self.quat_order,
+                    include_force=self.include_force,
+                    force_key=self.force_key,
                 ),
                 ACTION_KEY: np.load(aligned / "action.npy", mmap_mode="r"),
                 "images": {key: np.load(aligned / f"{key}.npy", mmap_mode="r") for key in self.image_keys},

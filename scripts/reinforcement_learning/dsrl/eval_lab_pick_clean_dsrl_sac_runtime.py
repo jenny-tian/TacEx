@@ -21,6 +21,7 @@ parser.add_argument("--mode", choices=("auto", "native_bc", "zero_noise", "deter
 parser.add_argument("--bc_device", type=str, default="cuda:0")
 parser.add_argument("--learned_noise_steps", type=int, default=1)
 parser.add_argument("--noise_padding_mode", choices=("repeat_last", "zeros"), default="repeat_last")
+parser.add_argument("--noise_residual_scale", type=float, default=0.25)
 parser.add_argument("--chunk_execute_steps", type=int, default=32)
 parser.add_argument("--chunk_discount", type=float, default=0.99)
 parser.add_argument("--flow_num_inference_steps", type=int, default=20)
@@ -129,6 +130,8 @@ def main(
         raise ValueError("--num_trials must be positive.")
     if args_cli.video_fps < 1:
         raise ValueError("--video_fps must be positive.")
+    if args_cli.noise_residual_scale < 0.0:
+        raise ValueError("--noise_residual_scale must be non-negative.")
     env_cfg.scene.num_envs = 1
     env_cfg.sim.device = args_cli.device
     env_cfg.seed = args_cli.seed
@@ -162,6 +165,7 @@ def main(
         device=args_cli.bc_device,
         learned_noise_steps=args_cli.learned_noise_steps,
         padding_mode=args_cli.noise_padding_mode,
+        noise_residual_scale=args_cli.noise_residual_scale,
         chunk_execute_steps=args_cli.chunk_execute_steps,
         chunk_discount=args_cli.chunk_discount,
         flow_num_inference_steps=args_cli.flow_num_inference_steps,
@@ -186,7 +190,7 @@ def main(
             device,
             layout=layout,
             hidden_dims=network_cfg.get("actor_hidden_dims", (512, 512, 512)),
-            initial_log_std=float(network_cfg.get("initial_log_std", 0.0)),
+            initial_log_std=float(network_cfg.get("initial_log_std", -2.0)),
         ).to(device)
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
         if "policy" not in checkpoint:
@@ -347,11 +351,12 @@ def main(
         "mean_episode_reward": sum(item["episode_reward"] for item in results) / max(len(results), 1),
         "mean_policy_noise_rms": sum(item["mean_policy_noise_rms"] for item in results) / max(len(results), 1),
         "seed": args_cli.seed,
-        "contract": "flow_noise_dsrl_absolute_repeat_last_v3_tactile",
+        "contract": "flow_noise_dsrl_base_anchored_repeat_last_v4_tactile",
         "contract_version": CLEAN_DSRL_CONTRACT_VERSION,
         "learned_noise_steps": args_cli.learned_noise_steps,
         "noise_padding_mode": args_cli.noise_padding_mode,
-        "noise_action_semantics": "absolute",
+        "noise_action_semantics": "scaled_residual_over_native_gaussian",
+        "noise_residual_scale": args_cli.noise_residual_scale,
         "noise_action_bounds": [-1.0, 1.0],
         "rl_align_cafe_action_yaw": False,
         "use_visual_xy_override": args_cli.use_visual_xy_override,

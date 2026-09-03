@@ -82,6 +82,8 @@ class ACTRecordsDataset(Dataset):
         chunk_size: int,
         quat_order: str,
         feature_cache_dir: Path | None = None,
+        include_force: bool = False,
+        force_key: str = "ft",
     ) -> None:
         self.base = common.RecordsSequenceDataset(
             record_dirs=record_dirs,
@@ -91,6 +93,8 @@ class ACTRecordsDataset(Dataset):
             image_obs_steps=image_obs_steps,
             chunk_size=chunk_size,
             quat_order=quat_order,
+            include_force=include_force,
+            force_key=force_key,
         )
         self.feature_cache_dir = feature_cache_dir
         self._feature_cache: dict[int, dict[str, np.ndarray]] = {}

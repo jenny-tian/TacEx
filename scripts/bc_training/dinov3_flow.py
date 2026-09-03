@@ -373,6 +373,8 @@ class DINOv3FlowRunner:
         self.image_keys = tuple(self.config.image_keys)
         self.include_phase = True
         self.include_demo_mode = False
+        train_config = self.checkpoint.get("train_config", {})
+        self.include_force = bool(train_config.get("include_force", False))
         self.current_phase = 0.0
         self.visual_xy_lock_phase = visual_xy_lock_phase
         self.use_visual_xy_override = bool(use_visual_xy_override)
@@ -402,6 +404,15 @@ class DINOv3FlowRunner:
     ) -> None:
         if isinstance(observation, dict):
             state = np.asarray(observation["robot0_pos"], dtype=np.float32)
+            if self.include_force:
+                if "robot0_force" not in observation:
+                    raise KeyError(
+                        "Force-conditioned checkpoint requires observation field 'robot0_force'."
+                    )
+                force = np.asarray(observation["robot0_force"], dtype=np.float32).reshape(-1)
+                if force.shape != (6,):
+                    raise ValueError(f"robot0_force must have shape (6,), got {force.shape}")
+                state = np.concatenate((state.reshape(-1), force))
             cameras = [common.normalize_image_array(observation[key], key) for key in self.image_keys]
             phase_value = observation.get("phase", phase)
         else:
@@ -477,4 +488,3 @@ class DINOv3FlowRunner:
             normalized = normalized.copy()
             normalized[:, :2] = selected
         return self.normalizer.unnormalize_numpy(common.ACTION_KEY, normalized)
-

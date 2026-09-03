@@ -13,7 +13,7 @@ from isaaclab.app import AppLauncher
 
 
 parser = argparse.ArgumentParser(
-    description="Evaluate zero-residual BC or a fixed-noise Clean Residual SAC checkpoint."
+    description="Evaluate zero-residual BC or a base-preserving Clean Residual SAC checkpoint."
 )
 parser.add_argument("--bc_policy", type=str, required=True)
 parser.add_argument(
@@ -35,7 +35,8 @@ parser.add_argument(
     help="Fixed Flow seed for all trials; default uses each trial's environment seed.",
 )
 parser.add_argument("--stochastic", action="store_true")
-parser.add_argument("--residual_scale", type=float, default=0.15)
+parser.add_argument("--residual_scale", type=float, default=0.01)
+parser.add_argument("--residual_contact_gate", action=argparse.BooleanOptionalAction, default=True)
 parser.add_argument("--bc_device", type=str, default="cuda:0")
 parser.add_argument("--flow_num_inference_steps", type=int, default=20)
 parser.add_argument("--phase_horizon_steps", type=int, default=383)
@@ -64,7 +65,7 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 import tacex_tasks  # noqa: F401
 import tacex_tasks.lab_pick  # noqa: F401
 
-from clean_residual_sac import CleanResidualActor
+from clean_residual_sac import CleanResidualActor, validate_tactile_residual_policy_state
 from clean_residual_wrapper import CleanResidualLabPickWrapper
 
 
@@ -114,8 +115,8 @@ def main(
         raise ValueError("--seed must be non-negative.")
     if args_cli.flow_noise_seed is not None and args_cli.flow_noise_seed < 0:
         raise ValueError("--flow_noise_seed must be non-negative.")
-    if not math.isfinite(args_cli.residual_scale) or args_cli.residual_scale <= 0.0:
-        raise ValueError("--residual_scale must be finite and positive.")
+    if not math.isfinite(args_cli.residual_scale) or args_cli.residual_scale < 0.0:
+        raise ValueError("--residual_scale must be finite and non-negative.")
     bc_path = Path(args_cli.bc_policy).expanduser().resolve()
     if not bc_path.is_file():
         raise FileNotFoundError(f"Flow BC checkpoint not found: {bc_path}")
@@ -123,7 +124,7 @@ def main(
     env_cfg.scene.num_envs = 1
     env_cfg.sim.device = args_cli.device
     env_cfg.seed = args_cli.seed
-    env_cfg.rl_align_cafe_action_yaw = True
+    env_cfg.rl_align_cafe_action_yaw = False
     env_cfg.rl_action_penalty_scale = 0.0
     env_cfg.labware_pos_randomization_xy = tuple(args_cli.labware_random_xy_m)
     env_cfg.labware_yaw_randomization = math.radians(args_cli.labware_random_yaw_deg)
@@ -138,6 +139,7 @@ def main(
         flow_num_inference_steps=args_cli.flow_num_inference_steps,
         phase_horizon_steps=args_cli.phase_horizon_steps,
         camera_warmup_steps=args_cli.camera_warmup_steps,
+        contact_gate=args_cli.residual_contact_gate,
         seed=args_cli.seed if args_cli.flow_noise_seed is None else args_cli.flow_noise_seed,
     )
     base = env.unwrapped
@@ -150,6 +152,7 @@ def main(
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
         if "policy" not in checkpoint:
             raise KeyError(f"Checkpoint has no policy state: {checkpoint_path}")
+        validate_tactile_residual_policy_state(checkpoint["policy"])
         initial_log_std = float(agent_cfg.get("network", {}).get("initial_log_std", -3.0))
         actor = CleanResidualActor(
             env.observation_space,
@@ -170,9 +173,9 @@ def main(
     )
     results: list[dict[str, Any]] = []
     print(
-        "[INFO] Fixed-noise Clean Residual evaluation "
+        "[INFO] Base-preserving Clean Residual evaluation "
         f"mode={mode} checkpoint={checkpoint_path} trials={args_cli.num_trials} "
-        f"seed={args_cli.seed} chunk=10 training_step={args_cli.training_step}",
+        f"seed={args_cli.seed} chunk={env.replan_steps} training_step={args_cli.training_step}",
         flush=True,
     )
 

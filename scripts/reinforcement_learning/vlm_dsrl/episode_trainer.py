@@ -85,7 +85,12 @@ class EpisodeLimitedSequentialTrainer(SequentialTrainer):
                 timestep=timestep, timesteps=self.max_interactions
             )
             self.interactions_completed = timestep + 1
-            if timestep >= int(self.agents.cfg.learning_starts):
+            optimizer_updates = getattr(
+                self.agents, "optimizer_updates_completed", None
+            )
+            if optimizer_updates is not None:
+                self.gradient_updates_completed = int(optimizer_updates)
+            elif timestep >= int(self.agents.cfg.learning_starts):
                 gradient_steps = getattr(self.agents.cfg, "gradient_steps", None)
                 if gradient_steps is not None:
                     self.gradient_updates_completed += int(gradient_steps)

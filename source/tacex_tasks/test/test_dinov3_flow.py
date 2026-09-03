@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import sys
+from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -113,3 +115,65 @@ def test_dsrl_adapter_keeps_separate_phase_out_of_dinov3_proprioception() -> Non
     normalized = adapter.normalize_proprioception(proprioception, phase=0.5)
     assert normalized.shape == (2, 10)
     assert torch.equal(normalized, proprioception)
+
+
+def test_force_conditioned_records_append_six_axis_wrench(tmp_path: Path) -> None:
+    record = tmp_path / "record_000000"
+    aligned = record / "aligned"
+    aligned.mkdir(parents=True)
+    length = 3
+    xyz = np.arange(length * 3, dtype=np.float32).reshape(length, 3)
+    quat = np.tile(np.asarray([0.0, 0.0, 0.0, 1.0], dtype=np.float32), (length, 1))
+    width = np.linspace(0.01, 0.03, length, dtype=np.float32).reshape(length, 1)
+    force = np.arange(length * 6, dtype=np.float32).reshape(length, 6)
+    np.save(aligned / "xyz.npy", xyz)
+    np.save(aligned / "quat.npy", quat)
+    np.save(aligned / "width.npy", width)
+    np.save(aligned / "ft.npy", force)
+    np.save(aligned / "action.npy", np.arange(length * 10, dtype=np.float32).reshape(length, 10))
+    np.save(aligned / "rgb.npy", np.zeros((length, 8, 8, 3), dtype=np.uint8))
+
+    normalizer = flow.common.compute_records_normalizer(
+        [record], "limits", "xyzw", include_force=True
+    )
+    dataset = flow.common.RecordsSequenceDataset(
+        [record],
+        normalizer,
+        ["rgb"],
+        state_obs_steps=2,
+        image_obs_steps=2,
+        chunk_size=2,
+        quat_order="xyzw",
+        include_force=True,
+    )
+    sample = dataset[1]
+    restored = normalizer.unnormalize_numpy("state", sample["obs"]["state"].numpy())
+
+    assert dataset.state_dim == 16
+    np.testing.assert_allclose(restored[:, :3], xyz[:2])
+    np.testing.assert_allclose(restored[:, 10:], force[:2])
+
+
+def test_force_conditioned_runner_appends_runtime_wrench() -> None:
+    runner = flow.DINOv3FlowRunner.__new__(flow.DINOv3FlowRunner)
+    runner.config = SimpleNamespace(state_dim=16, state_obs_steps=2, image_obs_steps=2)
+    runner.include_force = True
+    runner.image_keys = ("robot0_image",)
+    runner.state_history = deque(maxlen=2)
+    runner.image_history = deque(maxlen=2)
+    runner.current_phase = 0.0
+
+    position = np.arange(10, dtype=np.float32)
+    wrench = np.arange(6, dtype=np.float32) + 10.0
+    runner.update(
+        {
+            "robot0_pos": position,
+            "robot0_force": wrench,
+            "robot0_image": np.zeros((8, 8, 3), dtype=np.uint8),
+            "phase": 0.25,
+        }
+    )
+
+    assert runner.current_phase == 0.25
+    assert len(runner.state_history) == 2
+    np.testing.assert_allclose(runner.state_history[-1], np.concatenate((position, wrench)))

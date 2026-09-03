@@ -1,88 +1,33 @@
-# Clean LabPick residual SAC
+# Base-preserving LabPick residual SAC
 
-This is the small, independent baseline intended for code review. It keeps the
-name SAC for continuity with the project, but deliberately uses an alpha-zero
-objective: the policy is stochastic and reparameterized, while entropy is
-absent from both losses and there is no temperature optimizer.
+This baseline adds a small learned correction to selected coordinates of the
+frozen Flow Matching policy while retaining an exact frozen-base fallback.
 
-## One fixed contract
+## v3 contract
 
-- Frozen policy: Flow Matching BC.
-- BC prediction horizon: 32 actions; execute only the first 10, then replan.
-- One RL step: one BC action held for two 120 Hz physics steps.
-- Rotation: reset-time simulator ground-truth yaw. BC Rot6D is not executed and
-  the Actor cannot change rotation.
-- Actor observation (29D): normalized proprioception 10 + relative object
-  position 3 + live object Rot6D 6 + current normalized BC action 10.
-- Actor action (4D): post-tanh raw residual for x, y, z, and gripper width.
-- Execution: add `0.15 * residual` to normalized BC indices `[0, 1, 2, 9]`,
-  leave Rot6D unchanged, then unnormalize once.
-- Critic input (33D): privileged state 19 + complete BC action 10 + raw
-  residual 4.
-- Reward: the existing dense LabPick reward (reach/lift progress, success,
-  failure, timeout, and force terms), with first-any-contact and
-  first-bilateral-contact bonuses each emitted at most once per episode.
-  There is no wrapper- or agent-side shaping. Timeouts are terminal for
-  bootstrapping.
-- Flow execution: exactly 10 actions are executed from each 32-action chunk.
-  Every replan within an episode reuses one fixed Flow noise template; the
-  template seed advances by one at each episode boundary.
+- The frozen BC supplies a native Gaussian-noise `32 x 10` action chunk and all
+  32 actions are consumed before replanning.
+- The BC's Rot6D is executed unchanged; simulator/oracle yaw is disabled.
+- Actor observation: normalized proprioception 10 + relative object position 3
+  + object Rot6D 6 + current normalized BC action 10 + causal tactile input 5.
+- Actor action: post-tanh residual for normalized `(x, y, z, width)`.
+- Execution: `BC + residual_scale * residual` at indices `[0, 1, 2, 9]`.
+  `residual_scale` may be zero and then every physical action is exactly BC.
+- The validated deployment scale is `0.01`. Corrections are disabled before
+  first tactile contact, preserving the visual approach phase.
+- The alpha-zero twin-Q actor loss includes an action-L2 base-anchor term
+  (default weight `1.0`) to prevent the observed residual saturation.
+- Time limits are terminal for bootstrapping; there is no target actor or
+  entropy term.
 
-The frozen BC retains its deployed visual-XY override and locks visual XY
-after phase `0.30`; both choices are pinned and recorded in the run metadata.
-
-There is one tanh-squashed Gaussian policy from the first transition onward.
-There is no random-action phase or separate warm-up noise distribution.
-
-## Update equations
-
-For one replay transition, the online policy samples
-
-```text
-r' ~ tanh(N(mu(o'), sigma(o')))
-```
-
-and the one-step twin-Q target is
-
-```text
-y = R + gamma * (1 - terminated) * min(Q1_target(s', BC', r'),
-                                             Q2_target(s', BC', r'))
-```
-
-The losses are
-
-```text
-L_critic = 0.5 * (MSE(Q1, y) + MSE(Q2, y))
-L_actor  = -mean(min(Q1(s, BC, r_pi), Q2(s, BC, r_pi)))
-```
-
-Only the two target Critics are Polyak averaged. There is no target Actor,
-entropy backup, entropy Actor term, learned alpha, H-step return, extra
-agent-side potential target, residual trust-region loss, staged Actor delay,
-strict-zero episode mixture, or external exploration noise.
-
-Exploration therefore comes from the Actor's learned Gaussian only. The v1
-initialization uses `log_std=-3` (raw standard deviation about `0.05`). The
-29D observation deliberately omits the Flow history and chunk offset, so this
-baseline is compact but not a fully Markov representation of the frozen BC.
+The persistent policy contract version is 3. Older checkpoints are rejected.
 
 ## Train
 
-First materialize the Flow checkpoint (including its Git LFS object), then run:
-
 ```bash
-OMNI_KIT_ACCEPT_EULA=yes \
 TACEX_ISAAC_PYTHON=/path/to/isaaclab/python \
 python scripts/reinforcement_learning/dsrl/train_lab_pick_clean_residual_sac.py \
-  --bc_policy outputs/lab_pick_flow_bc100_scratch_rawclose_safe70_overforce24_pos6/best.pt \
-  --residual_scale 0.15 \
-  --flow_noise_seed 42 \
-  --timesteps 50000 \
-  --seed 42
+  --bc_policy outputs/lab_pick_dinov3_flow_bc200_yaw0/best.pt \
+  --residual_scale 0.01 --residual_contact_gate \
+  --action_l2_weight 1.0 --timesteps 50000 --seed 42
 ```
-
-The dedicated task is
-`TacEx-LabPick-Slide-Clean-Residual-SAC-v0`. Its config is
-`source/tacex_tasks/tacex_tasks/lab_pick/agents/skrl_clean_residual_sac_cfg.yaml`.
-Runtime logs include `params/clean_residual_sac.yaml`, which records the exact
-action, target, and entropy contracts.

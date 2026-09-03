@@ -49,7 +49,7 @@ def _spaces(layout: CleanDSRLLayout):
     return observation_space, state_space, action_space
 
 
-def test_layout_repeats_the_last_absolute_noise_step_without_scaling():
+def test_layout_adds_a_scaled_repeated_correction_to_native_noise():
     layout = CleanDSRLLayout(
         policy=24,
         flow_horizon=5,
@@ -60,11 +60,22 @@ def test_layout_repeats_the_last_absolute_noise_step_without_scaling():
           0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]]
     )
     expanded = layout.expand_noise(actions)
+    native = torch.randn(1, 5, 10)
+    composed = layout.compose_noise(native, actions)
 
     assert expanded.shape == (1, 5, 10)
     torch.testing.assert_close(expanded[:, :2], actions.reshape(1, 2, 10))
     for index in range(2, 5):
         torch.testing.assert_close(expanded[:, index], expanded[:, 1])
+    torch.testing.assert_close(composed, native + 0.25 * expanded)
+    torch.testing.assert_close(
+        CleanDSRLLayout(policy=24, flow_horizon=5, residual_scale=0.0).compose_noise(
+            torch.clone(native), torch.zeros(1, 10)
+        ),
+        native,
+        rtol=0.0,
+        atol=0.0,
+    )
 
 
 def test_dsrl_actor_starts_at_zero_mean_and_models_do_not_share_parameters():
@@ -95,7 +106,7 @@ def test_dsrl_actor_starts_at_zero_mean_and_models_do_not_share_parameters():
     torch.testing.assert_close(mean, torch.zeros_like(mean), rtol=0.0, atol=0.0)
     torch.testing.assert_close(
         distribution_outputs["log_std"],
-        torch.zeros_like(distribution_outputs["log_std"]),
+        torch.full_like(distribution_outputs["log_std"], -2.0),
         rtol=0.0,
         atol=0.0,
     )
@@ -136,7 +147,7 @@ def test_dsrl_actor_starts_at_zero_mean_and_models_do_not_share_parameters():
     )
 
 
-def test_absolute_v2_checkpoint_marker_rejects_legacy_policy_state():
+def test_base_anchored_v4_checkpoint_marker_rejects_legacy_policy_state():
     layout = CleanDSRLLayout(policy=24)
     observation_space, state_space, action_space = _spaces(layout)
     policy = build_clean_dsrl_sac_models(
@@ -164,15 +175,15 @@ def test_absolute_v2_checkpoint_marker_rejects_legacy_policy_state():
         validate_absolute_dsrl_policy_state(wrong_version_state)
 
 
-def test_absolute_dsrl_entrypoints_expose_no_residual_or_scale_switches():
+def test_base_anchored_dsrl_entrypoints_expose_residual_scale():
     trainer_source = (SKRL_ROOT / "train_clean_dsrl_sac.py").read_text()
     evaluator_source = (DSRL_ROOT / "eval_lab_pick_clean_dsrl_sac_runtime.py").read_text()
 
     for source in (trainer_source, evaluator_source):
         assert '"--noise_strategy"' not in source
-        assert '"--noise_scale"' not in source
-    assert "flow_noise_dsrl_absolute_repeat_last_v3_tactile" in trainer_source
-    assert "clean_dsrl_sac_absolute_l" in trainer_source
+    assert '"--noise_residual_scale"' in trainer_source
+    assert "flow_noise_dsrl_base_anchored_repeat_last_v4_tactile" in trainer_source
+    assert "clean_dsrl_sac_base_anchored_l" in trainer_source
 
 
 def test_dsrl_actor_accepts_wrapper_inference_tensor_during_evaluation():
@@ -244,6 +255,14 @@ class _FakeFlowAdapter:
             None if flat_noise is None else flat_noise.detach().clone()
         )
         return torch.arange(320, dtype=torch.float32).reshape(32, 10)
+
+    def sample_native_noise(self, *, batch_size=1):
+        return torch.randn(
+            batch_size,
+            self.n_action_steps,
+            self.action_dim,
+            generator=self.runner.generator,
+        )
 
 
 class _FakeLabPickEnv(gym.Env):
@@ -334,7 +353,7 @@ def _wrapper(
     return wrapper, adapter
 
 
-def test_wrapper_expands_noise_and_returns_discounted_chunk_reward(monkeypatch):
+def test_wrapper_adds_scaled_noise_correction_and_returns_discounted_chunk_reward(monkeypatch):
     wrapper, adapter = _wrapper(
         monkeypatch,
         chunk_execute_steps=3,
@@ -350,8 +369,9 @@ def test_wrapper_expands_noise_and_returns_discounted_chunk_reward(monkeypatch):
     assert len(wrapper.env.actions) == 6
     assert len(adapter.decode_inputs) == 1
     full_noise = adapter.decode_inputs[0].reshape(1, 32, 10)
+    native = torch.randn(1, 32, 10, generator=torch.Generator().manual_seed(0))
     for index in range(32):
-        torch.testing.assert_close(full_noise[:, index], action)
+        torch.testing.assert_close(full_noise[:, index], native[:, index] + 0.25 * action)
     torch.testing.assert_close(reward, torch.tensor([3.5]))
     assert not bool(terminated.item())
     assert not bool(truncated.item())
@@ -365,29 +385,28 @@ def test_wrapper_masks_timeout_as_terminal_and_native_bc_uses_native_noise(monke
     wrapper.reset(flow_noise_seed=17)
     _, reward, terminated, truncated, info = wrapper.step_bc()
 
-    assert adapter.decode_inputs == [None]
+    assert adapter.decode_inputs[0] is not None
     torch.testing.assert_close(reward, torch.ones(1))
     assert bool(terminated.item())
     assert bool(truncated.item())
     assert info["clean_dsrl/action_steps_executed"] == 1
-    assert "clean_dsrl/base_noise_seed" not in info
-    assert "CleanDSRL/base_noise_seed" not in info["log"]
+    assert "clean_dsrl/native_noise_rms" in info
+    assert "CleanDSRL/native_noise_rms" in info["log"]
 
 
-def test_zero_absolute_noise_decodes_an_all_zero_flow_tensor(monkeypatch):
+def test_zero_correction_decodes_the_exact_native_flow_noise(monkeypatch):
     wrapper, adapter = _wrapper(
         monkeypatch,
         chunk_execute_steps=1,
     )
     wrapper.reset(flow_noise_seed=23)
+    wrapper.step_bc()
+    native_noise = adapter.decode_inputs[-1].clone()
+    wrapper.reset(flow_noise_seed=23)
     wrapper.step(torch.zeros(1, 10))
-    first_noise = adapter.decode_inputs[-1].reshape(1, 32, 10).clone()
-    wrapper.step(torch.zeros(1, 10))
-    second_noise = adapter.decode_inputs[-1].reshape(1, 32, 10)
+    zero_correction_noise = adapter.decode_inputs[-1]
 
-    torch.testing.assert_close(first_noise, torch.zeros_like(first_noise), rtol=0.0, atol=0.0)
-    torch.testing.assert_close(first_noise, second_noise, rtol=0.0, atol=0.0)
-    assert not hasattr(wrapper, "_base_noise_template")
+    torch.testing.assert_close(zero_correction_noise, native_noise, rtol=0.0, atol=0.0)
 
 
 def test_online_logger_writes_every_interaction_and_prioritizes_breakage(
@@ -512,6 +531,7 @@ def test_dsrl_agent_updates_actor_critics_and_entropy():
         state_space=state_space,
         action_space=action_space,
         device="cpu",
+        max_gradient_updates=1,
         cfg={
             "gradient_steps": 1,
             "batch_size": 4,
@@ -550,3 +570,14 @@ def test_dsrl_agent_updates_actor_critics_and_entropy():
     assert not torch.equal(alpha_before, agent.log_entropy_coefficient)
     assert torch.isfinite(agent.log_entropy_coefficient).all()
     assert "Loss / Entropy loss" in agent.tracking_data
+    assert agent.optimizer_updates_completed == 1
+
+    actor_after_first_update = [
+        parameter.detach().clone() for parameter in models["policy"].parameters()
+    ]
+    agent.update(timestep=1, timesteps=2)
+    assert agent.optimizer_updates_completed == 1
+    assert all(
+        torch.equal(before, after)
+        for before, after in zip(actor_after_first_update, models["policy"].parameters())
+    )

@@ -152,7 +152,7 @@ def _parameters(model: torch.nn.Module) -> list[torch.Tensor]:
     return [parameter.detach().clone() for parameter in model.parameters()]
 
 
-def test_clean_layout_dimensions_and_point_one_five_composition_contract():
+def test_clean_layout_dimensions_and_default_scale_composition_contract():
     layout = CleanResidualLayout()
 
     assert layout.policy_dim == 34
@@ -162,7 +162,7 @@ def test_clean_layout_dimensions_and_point_one_five_composition_contract():
     assert layout.tactile_dim == 5
     assert layout.critic_input_dim == 38
     assert layout.controlled_action_indices == (0, 1, 2, 9)
-    assert layout.residual_scale == 0.15
+    assert layout.residual_scale == 0.01
 
     full_bc_action = torch.tensor(
         [[1.0, -0.4, 0.2, 0.11, 0.22, 0.33, 0.44, 0.55, 0.66, -0.25]]
@@ -174,15 +174,16 @@ def test_clean_layout_dimensions_and_point_one_five_composition_contract():
 
     torch.testing.assert_close(
         controlled,
-        torch.tensor([[1.0375, -0.475, 0.3125, -0.4]]),
+        torch.tensor([[1.0025, -0.405, 0.2075, -0.26]]),
     )
     torch.testing.assert_close(
         expected_full_action[:, 3:9],
         full_bc_action[:, 3:9],
     )
     assert CleanResidualLayout(scale=0.05).residual_scale == 0.05
-    for invalid_scale in (0.0, -0.1, float("nan")):
-        with pytest.raises(ValueError, match="finite and positive"):
+    assert CleanResidualLayout(scale=0.0).residual_scale == 0.0
+    for invalid_scale in (-0.1, float("nan")):
+        with pytest.raises(ValueError, match="finite and non-negative"):
             CleanResidualLayout(scale=invalid_scale)
 
 
@@ -238,7 +239,7 @@ def test_clean_wrapper_pure_helpers_pack_asymmetric_observation_and_scatter_once
     torch.testing.assert_close(composed[:, 3:9], full_bc_action[:, 3:9])
     torch.testing.assert_close(
         composed[:, layout.indices],
-        full_bc_action[:, layout.indices] + 0.15 * residual,
+        full_bc_action[:, layout.indices] + 0.01 * residual,
     )
 
 
@@ -606,6 +607,7 @@ class _FakeFlowAdapter:
         self.reset_calls = 0
         self.unnormalized_inputs: list[torch.Tensor] = []
         self.decode_noise_seeds: list[int | None] = []
+        self.runner = types.SimpleNamespace(generator=torch.Generator().manual_seed(0))
 
     @property
     def is_ready(self) -> bool:
@@ -639,7 +641,7 @@ class _FakeLabPickEnv(gym.Env):
         super().__init__()
         self.num_envs = 1
         self.device = torch.device("cpu")
-        self.cfg = types.SimpleNamespace(rl_align_cafe_action_yaw=True)
+        self.cfg = types.SimpleNamespace(rl_align_cafe_action_yaw=False)
         self.action_space = gym.spaces.Box(-1.0, 1.0, (10,), dtype=np.float32)
         self.observation_space = gym.spaces.Box(-np.inf, np.inf, (16,), dtype=np.float32)
         self.single_action_space = self.action_space
@@ -701,6 +703,7 @@ def test_clean_wrapper_executes_exact_composed_action_and_masks_timeout(monkeypa
         residual_scale=0.15,
         flow_num_inference_steps=7,
         camera_warmup_steps=0,
+        contact_gate=False,
         seed=17,
     )
     observation, _ = wrapper.reset()
@@ -709,7 +712,9 @@ def test_clean_wrapper_executes_exact_composed_action_and_masks_timeout(monkeypa
 
     next_observation, reward, terminated, truncated, info = wrapper.step(residual)
 
-    expected_normalized = compose_normalized_action(original_bc_action, residual)
+    expected_normalized = compose_normalized_action(
+        original_bc_action, residual, layout=wrapper.layout
+    )
     assert adapter_call == {
         "checkpoint": "fake_flow.pt",
         "device": "cpu",
@@ -747,10 +752,10 @@ def test_clean_wrapper_executes_exact_composed_action_and_masks_timeout(monkeypa
     assert info["clean_residual/action_repeat"] == 1
     assert info["clean_residual/replanned"] is True
     assert adapter.decode_calls == 2
-    assert adapter.decode_noise_seeds == [17, 18]
+    assert adapter.decode_noise_seeds == [None, None]
 
 
-def test_clean_wrapper_reuses_fixed_flow_noise_for_every_ten_action_replan(monkeypatch):
+def test_clean_wrapper_uses_native_noise_stream_and_full_horizon_replan(monkeypatch):
     adapter = _FakeFlowAdapter()
     monkeypatch.setattr(
         clean_wrapper.FlowMatchingNoiseAdapter,
@@ -770,7 +775,38 @@ def test_clean_wrapper_reuses_fixed_flow_noise_for_every_ten_action_replan(monke
     for _ in range(clean_wrapper.REPLAN_STEPS):
         wrapper.step(torch.zeros(1, 4))
 
-    assert clean_wrapper.REPLAN_STEPS == 10
-    assert wrapper.flow_noise_seed == 23
+    assert clean_wrapper.REPLAN_STEPS == 32
     assert adapter.decode_calls == 2
-    assert adapter.decode_noise_seeds == [23, 23]
+    assert adapter.decode_noise_seeds == [None, None]
+
+
+def test_zero_scale_is_exactly_the_frozen_bc_action(monkeypatch):
+    adapter = _FakeFlowAdapter()
+    monkeypatch.setattr(
+        clean_wrapper.FlowMatchingNoiseAdapter,
+        "from_pretrained",
+        staticmethod(lambda checkpoint, **kwargs: adapter),
+    )
+    wrapper = CleanResidualLabPickWrapper(
+        _FakeLabPickEnv(truncated=False),
+        "fake_flow.pt",
+        device="cpu",
+        residual_scale=0.0,
+        camera_warmup_steps=0,
+        contact_gate=False,
+        seed=29,
+    )
+    monkeypatch.setattr(wrapper, "_raw_flow_observation", lambda: {})
+    wrapper.reset()
+    normalized_base_action = wrapper.current_bc_action
+    physical_base_action = wrapper.current_physical_bc_action
+    wrapper.step(torch.ones(1, 4))
+
+    torch.testing.assert_close(normalized_base_action, adapter.normalized_chunk[:1])
+    torch.testing.assert_close(
+        physical_base_action, adapter.normalized_chunk[:1] + 50.0, rtol=0.0, atol=0.0
+    )
+    assert adapter.unnormalized_inputs == []
+    torch.testing.assert_close(
+        wrapper.env.actions[-1], physical_base_action, rtol=0.0, atol=0.0
+    )

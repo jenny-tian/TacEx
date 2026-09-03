@@ -9,6 +9,7 @@ with the project, not the maximum-entropy SAC objective from the paper.
 from __future__ import annotations
 
 import itertools
+import math
 
 import torch
 import torch.nn as nn
@@ -19,9 +20,15 @@ from skrl.agents.torch.sac import SAC, SAC_CFG
 
 
 class CleanAlphaZeroSAC(SAC):
-    """One-step twin-Q SAC with a stochastic Actor and no entropy objective."""
+    """One-step twin-Q SAC with a base-anchor penalty and no entropy objective."""
 
-    def __init__(self, *, cfg: SAC_CFG | dict, **kwargs) -> None:
+    def __init__(
+        self,
+        *,
+        cfg: SAC_CFG | dict,
+        action_l2_weight: float = 0.0,
+        **kwargs,
+    ) -> None:
         resolved_cfg = SAC_CFG(**cfg) if isinstance(cfg, dict) else cfg
         if resolved_cfg.learn_entropy:
             raise ValueError("CleanAlphaZeroSAC requires learn_entropy=False.")
@@ -32,6 +39,9 @@ class CleanAlphaZeroSAC(SAC):
                 "CleanAlphaZeroSAC requires random_timesteps=0 so the same "
                 "stochastic policy collects every transition."
             )
+        if not math.isfinite(action_l2_weight) or action_l2_weight < 0.0:
+            raise ValueError("action_l2_weight must be finite and non-negative.")
+        self.action_l2_weight = float(action_l2_weight)
         super().__init__(cfg=resolved_cfg, **kwargs)
 
     def update(self, *, timestep: int, timesteps: int) -> None:
@@ -134,7 +144,9 @@ class CleanAlphaZeroSAC(SAC):
                 policy_q2, _ = self.critic_2.act(
                     {**inputs, "taken_actions": policy_actions}, role="critic_2"
                 )
-                policy_loss = -torch.minimum(policy_q1, policy_q2).mean()
+                q_policy_loss = -torch.minimum(policy_q1, policy_q2).mean()
+                action_l2_loss = policy_actions.square().mean()
+                policy_loss = q_policy_loss + self.action_l2_weight * action_l2_loss
 
             self.policy_optimizer.zero_grad()
             self.scaler.scale(policy_loss).backward()
@@ -162,6 +174,8 @@ class CleanAlphaZeroSAC(SAC):
 
             if self.write_interval > 0 and timestep % self.write_interval == 0:
                 self.track_data("Loss / Policy loss", policy_loss.item())
+                self.track_data("Loss / Policy Q loss", q_policy_loss.item())
+                self.track_data("Loss / Policy action L2", action_l2_loss.item())
                 self.track_data("Loss / Critic loss", critic_loss.item())
                 self.track_data("Q-network / Q1 (max)", policy_q1.max().item())
                 self.track_data("Q-network / Q1 (min)", policy_q1.min().item())

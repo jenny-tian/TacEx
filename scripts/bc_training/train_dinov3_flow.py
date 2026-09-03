@@ -149,6 +149,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--require-yaw-zero", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--yaw-tolerance-degrees", type=float, default=0.1)
     parser.add_argument("--quat-order", choices=("xyzw",), default="xyzw")
+    parser.add_argument(
+        "--include-force",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Append aligned Fx,Fy,Fz,Tx,Ty,Tz to the 10-D robot state.",
+    )
+    parser.add_argument("--force-key", default="ft", help="Aligned record array used for the 6-D wrench.")
     parser.add_argument("--dino-path", type=Path, default=None)
     parser.add_argument("--precompute-features", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--cache-batch-size", type=int, default=128)
@@ -199,7 +206,13 @@ def main() -> None:
     train_indices, val_indices = common.split_episode_indices(len(records), args.val_ratio, args.seed)
     train_records = [records[int(index)] for index in train_indices]
     val_records = [records[int(index)] for index in val_indices]
-    normalizer = common.compute_records_normalizer(train_records, args.normalizer_mode, args.quat_order)
+    normalizer = common.compute_records_normalizer(
+        train_records,
+        args.normalizer_mode,
+        args.quat_order,
+        include_force=args.include_force,
+        force_key=args.force_key,
+    )
     dino, dino_path = common.load_dino_for_config(args.dino_path)
     cache_dir: Path | None = None
     if args.precompute_features:
@@ -225,6 +238,8 @@ def main() -> None:
         args.chunk_size,
         args.quat_order,
         cache_dir,
+        include_force=args.include_force,
+        force_key=args.force_key,
     )
     val_set = ACTRecordsDataset(
         val_records,
@@ -235,6 +250,8 @@ def main() -> None:
         args.chunk_size,
         args.quat_order,
         cache_dir,
+        include_force=args.include_force,
+        force_key=args.force_key,
     )
     lengths = [common.record_length(record, image_keys) for record in records]
     policy_config = flow.DINOv3FlowConfig(
@@ -301,6 +318,13 @@ def main() -> None:
             "image_shapes": {key: list(train_set.image_shape) for key in deployment_image_keys},
             "include_phase": True,
             "include_demo_mode": False,
+            "include_force": bool(args.include_force),
+            "force_key": args.force_key if args.include_force else None,
+            "state_components": (
+                ["xyz", "rot6d", "gripper_width", "force_xyz", "torque_xyz"]
+                if args.include_force
+                else ["xyz", "rot6d", "gripper_width"]
+            ),
             "num_episodes_total": len(records),
             "num_episodes_train": len(train_records),
             "num_episodes_val": len(val_records),

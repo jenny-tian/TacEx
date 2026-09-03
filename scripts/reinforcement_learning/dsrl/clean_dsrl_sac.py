@@ -1,16 +1,16 @@
-"""Model contract for tactile-conditioned absolute Flow-noise DSRL-SAC.
+"""Model contract for tactile-conditioned, base-anchored Flow-noise DSRL-SAC.
 
 The frozen Flow Matching policy consumes a ``[32, 10]`` initial-noise tensor.
-Following the reference DSRL implementation, the actor learns only the first
-``learned_noise_steps`` rows. The last learned row is repeated to construct the
-full decoder noise. The expanded tensor is the complete initial noise supplied
-to the Flow decoder: it is never added to a sampled base-noise tensor. SAC and
-its critics operate on the learned, low-dimensional absolute noise action.
+The actor learns only a short, bounded correction. The last learned row is
+repeated to construct the full correction and is added to a native independent
+Gaussian Flow sample. Thus a zero actor action is exactly the frozen base
+policy instead of the degenerate all-zero/repeated-noise policy.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Mapping, Sequence
 
 import torch
@@ -24,23 +24,23 @@ except ImportError:
     from clean_residual_sac import TanhSquashedGaussianActor
 
 
-CLEAN_DSRL_CONTRACT_VERSION = 3
+CLEAN_DSRL_CONTRACT_VERSION = 4
 CLEAN_DSRL_CONTRACT_BUFFER = "_clean_dsrl_contract_version"
 
 
 def validate_absolute_dsrl_policy_state(policy_state: Mapping[str, object]) -> None:
-    """Reject checkpoints that predate the tactile absolute-noise v3 contract."""
+    """Reject checkpoints that predate the base-anchored tactile v4 contract."""
 
     if CLEAN_DSRL_CONTRACT_BUFFER not in policy_state:
         raise ValueError(
-            "Legacy Clean DSRL checkpoint is incompatible with the tactile absolute-noise v3 "
+            "Legacy Clean DSRL checkpoint is incompatible with the base-anchored tactile v4 "
             "contract: the policy has no contract-version marker."
         )
     version = torch.as_tensor(policy_state[CLEAN_DSRL_CONTRACT_BUFFER]).reshape(-1)
     if version.numel() != 1 or int(version.item()) != CLEAN_DSRL_CONTRACT_VERSION:
         received = version.tolist()
         raise ValueError(
-            "Clean DSRL checkpoint contract mismatch: expected tactile absolute-noise "
+            "Clean DSRL checkpoint contract mismatch: expected base-anchored tactile "
             f"v{CLEAN_DSRL_CONTRACT_VERSION}, received {received}."
         )
 
@@ -56,6 +56,7 @@ class CleanDSRLLayout:
     learned_noise_steps: int = 1
     padding_mode: str = "repeat_last"
     tactile: int = 5
+    residual_scale: float = 0.25
 
     def __post_init__(self) -> None:
         for name in (
@@ -83,6 +84,8 @@ class CleanDSRLLayout:
             raise ValueError("learned_noise_steps cannot exceed flow_horizon.")
         if self.padding_mode not in {"repeat_last", "zeros"}:
             raise ValueError("padding_mode must be 'repeat_last' or 'zeros'.")
+        if not math.isfinite(self.residual_scale) or self.residual_scale < 0.0:
+            raise ValueError("residual_scale must be finite and non-negative.")
 
     @property
     def policy_dim(self) -> int:
@@ -131,7 +134,7 @@ class CleanDSRLLayout:
             raise ValueError("DSRL policy actions must satisfy the post-tanh [-1, 1] contract.")
 
     def expand_noise(self, actions: torch.Tensor) -> torch.Tensor:
-        """Expand bounded absolute SAC noise to the full Flow noise tensor."""
+        """Expand a bounded SAC correction to the full Flow-noise tensor."""
 
         self.validate_actions(actions, enforce_bounds=True)
         learned = actions.reshape(-1, self.learned_noise_steps, self.noise_dim)
@@ -143,6 +146,25 @@ class CleanDSRLLayout:
         else:
             padding = learned.new_zeros((learned.shape[0], pad_steps, self.noise_dim))
         return torch.cat((learned, padding), dim=1)
+
+    def compose_noise(
+        self,
+        native_noise: torch.Tensor,
+        actions: torch.Tensor,
+    ) -> torch.Tensor:
+        """Add the scaled DSRL correction to an independent native Flow sample."""
+
+        if not isinstance(native_noise, torch.Tensor):
+            raise TypeError("native_noise must be a torch.Tensor.")
+        expected = (actions.shape[0], self.flow_horizon, self.noise_dim)
+        if tuple(native_noise.shape) != expected:
+            raise ValueError(
+                f"native_noise must have shape {expected}, got {tuple(native_noise.shape)}."
+            )
+        if not native_noise.is_floating_point() or not bool(torch.isfinite(native_noise).all()):
+            raise ValueError("native_noise must be finite and floating point.")
+        correction = self.expand_noise(actions).to(native_noise)
+        return native_noise + self.residual_scale * correction
 
 
 def _mlp(input_dim: int, hidden_dims: Sequence[int], output_dim: int) -> nn.Sequential:
@@ -169,7 +191,7 @@ class CleanDSRLActor(TanhSquashedGaussianActor):
         *,
         layout: CleanDSRLLayout,
         hidden_dims: Sequence[int] = (512, 512, 512),
-        initial_log_std: float = 0.0,
+        initial_log_std: float = -2.0,
         min_log_std: float = -5.0,
         max_log_std: float = 2.0,
     ) -> None:
@@ -292,7 +314,7 @@ def build_clean_dsrl_sac_models(
     layout: CleanDSRLLayout,
     actor_hidden_dims: Sequence[int] = (512, 512, 512),
     critic_hidden_dims: Sequence[int] = (512, 512, 512),
-    initial_log_std: float = 0.0,
+    initial_log_std: float = -2.0,
 ) -> dict[str, Model]:
     """Build independent policy, online critics, and target critics."""
 

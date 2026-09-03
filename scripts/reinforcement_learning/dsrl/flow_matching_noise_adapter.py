@@ -153,6 +153,27 @@ class FlowMatchingNoiseAdapter:
         action_chunk = self.runner.predict_action_chunk(initial_noise=noise)
         return torch.as_tensor(action_chunk, dtype=torch.float32, device=self.runner.device)
 
+    def sample_native_noise(self, *, batch_size: int = 1) -> torch.Tensor:
+        """Sample the exact Gaussian prior used by the frozen Flow policy.
+
+        Sampling it explicitly lets downstream residual algorithms add a
+        bounded correction while preserving the native policy exactly when
+        that correction is zero. The same runner-owned generator is used as
+        :meth:`decode`, so seeded native and zero-residual executions consume
+        the identical random stream.
+        """
+
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int):
+            raise TypeError("batch_size must be an integer.")
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive.")
+        return torch.randn(
+            (batch_size, self.horizon, self.action_dim),
+            dtype=torch.float32,
+            device=self.runner.device,
+            generator=self.runner.generator,
+        )
+
     @torch.inference_mode()
     def decode_with_normalized(
         self,

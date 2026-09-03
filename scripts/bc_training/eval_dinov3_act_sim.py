@@ -131,8 +131,14 @@ def camera_rgb_224(camera_rgb: torch.Tensor) -> np.ndarray:
     return rgb[0].permute(1, 2, 0).clamp(0, 255).byte().cpu().numpy()
 
 
-def policy_observation(env: LabPickEnv) -> tuple[np.ndarray, dict[str, np.ndarray]]:
-    state = env.get_cafe_observation()["robot0_pos"][0].detach().cpu().numpy().astype(np.float32)
+def policy_observation(
+    env: LabPickEnv, *, include_force: bool
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    cafe = env.get_cafe_observation()
+    state = cafe["robot0_pos"][0].detach().cpu().numpy().astype(np.float32)
+    if include_force:
+        force = cafe["robot0_force"][0].detach().cpu().numpy().astype(np.float32)
+        state = np.concatenate((state, force))
     wrist = camera_rgb_224(env.wrist_camera.data.output["rgb"])
     third = camera_rgb_224(env.third_person_camera.data.output["rgb"])
     images = {
@@ -204,6 +210,13 @@ def main() -> None:
     )
     del checkpoint_header
     runner = runner_type(checkpoint, device=args_cli.device or "cuda")
+    include_force = bool(runner.checkpoint.get("train_config", {}).get("include_force", False))
+    expected_state_dim = 16 if include_force else 10
+    if runner.config.state_dim != expected_state_dim:
+        raise ValueError(
+            f"Checkpoint force metadata expects state_dim={expected_state_dim}, "
+            f"got {runner.config.state_dim}."
+        )
     execute_steps = min(args_cli.chunk_execute_steps, runner.config.chunk_size)
     results: list[dict[str, Any]] = []
     print(
@@ -232,7 +245,7 @@ def main() -> None:
             runner.reset()
             if getattr(runner, "generator", None) is not None:
                 runner.generator.manual_seed(trial_seed)
-            state, images = policy_observation(env)
+            state, images = policy_observation(env, include_force=include_force)
             runner.update(state, images, phase=0.0)
 
             reset_pos = env.labware_reset_pos_w[0].detach().cpu().tolist()
@@ -291,7 +304,7 @@ def main() -> None:
                             break
                     policy_steps += 1
                     phase = min(policy_steps / float(runner.config.phase_horizon_steps), 1.0)
-                    state, images = policy_observation(env)
+                    state, images = policy_observation(env, include_force=include_force)
                     runner.update(state, images, phase=phase)
                     if terminal_reason or physics_steps >= args_cli.episode_steps:
                         break
@@ -350,6 +363,8 @@ def main() -> None:
         "model_type": runner.checkpoint.get("model_type"),
         "checkpoint_epoch": runner.checkpoint.get("epoch"),
         "checkpoint_validation_loss": runner.checkpoint.get("validation_loss"),
+        "include_force": include_force,
+        "policy_state_dim": runner.config.state_dim,
         "num_trials": len(results),
         "successes": successes,
         "success_rate": successes / max(len(results), 1),

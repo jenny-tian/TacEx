@@ -378,9 +378,9 @@ class LabPickSlideCleanResidualSACEnvCfg(LabPickSlideDSRLBaseEnvCfg):
     """Physical CAFE environment for the isolated clean residual-SAC path.
 
     The wrapper replaces the public 10-D action space with a 4-D residual.
-    Rotation is deliberately removed from the learned action: reset-time
-    simulator yaw supplies the end-effector orientation for the whole episode.
+    Rotation is deliberately removed from the learned action and remains the
+    frozen BC Rot6D, so zero residual exactly recovers the base policy.
     """
 
-    rl_align_cafe_action_yaw = True
+    rl_align_cafe_action_yaw = False
     rl_action_penalty_scale = 0.0

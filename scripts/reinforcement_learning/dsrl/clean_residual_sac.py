@@ -21,16 +21,16 @@ from torch.distributions import Normal
 from skrl.models.torch import DeterministicMixin, GaussianMixin, Model
 
 
-CLEAN_RESIDUAL_CONTRACT_VERSION = 2
+CLEAN_RESIDUAL_CONTRACT_VERSION = 3
 CLEAN_RESIDUAL_CONTRACT_BUFFER = "_clean_residual_contract_version"
 
 
 def validate_tactile_residual_policy_state(policy_state: Mapping[str, object]) -> None:
-    """Reject checkpoints that predate the tactile residual v2 contract."""
+    """Reject checkpoints that predate the base-preserving tactile v3 contract."""
 
     if CLEAN_RESIDUAL_CONTRACT_BUFFER not in policy_state:
         raise ValueError(
-            "Legacy Clean Residual checkpoint is incompatible with the tactile v2 contract: "
+            "Legacy Clean Residual checkpoint is incompatible with the base-preserving tactile v3 contract: "
             "the policy has no contract-version marker."
         )
     version = torch.as_tensor(policy_state[CLEAN_RESIDUAL_CONTRACT_BUFFER]).reshape(-1)
@@ -51,7 +51,7 @@ class CleanResidualLayout:
     full_bc_context: int = 10
     tactile: int = 5
     indices: tuple[int, ...] = (0, 1, 2, 9)
-    scale: float = 0.15
+    scale: float = 0.01
 
     def __post_init__(self) -> None:
         expected = {
@@ -91,8 +91,8 @@ class CleanResidualLayout:
             raise TypeError(
                 f"scale must be a real scalar, received {type(self.scale).__name__}."
             )
-        if not math.isfinite(float(self.scale)) or float(self.scale) <= 0.0:
-            raise ValueError(f"scale must be finite and positive, received {self.scale}.")
+        if not math.isfinite(float(self.scale)) or float(self.scale) < 0.0:
+            raise ValueError(f"scale must be finite and non-negative, received {self.scale}.")
         object.__setattr__(self, "scale", float(self.scale))
 
     @property

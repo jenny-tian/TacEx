@@ -103,6 +103,9 @@ parser.add_argument("--learned-noise-steps", type=int, default=1)
 parser.add_argument(
     "--noise-padding-mode", choices=("repeat_last", "zeros"), default="repeat_last"
 )
+parser.add_argument("--dsrl-noise-residual-scale", type=float, default=0.25)
+parser.add_argument("--dsrl-action-l2-weight", type=float, default=10.0)
+parser.add_argument("--dsrl-max-gradient-updates", type=int, default=500)
 parser.add_argument("--chunk-execute-steps", type=int, default=32)
 parser.add_argument("--chunk-discount", type=float, default=0.99)
 parser.add_argument("--flow-num-inference-steps", type=int, default=20)
@@ -172,6 +175,10 @@ if args_cli.training_interactions < 0:
     parser.error("--training-interactions cannot be negative.")
 if min(args_cli.gpu_max_rigid_contact_count, args_cli.gpu_max_rigid_patch_count) < 0:
     parser.error("PhysX GPU buffer capacities cannot be negative.")
+if args_cli.dsrl_noise_residual_scale < 0.0 or args_cli.dsrl_action_l2_weight < 0.0:
+    parser.error("DSRL residual scale and action-L2 weight must be non-negative.")
+if args_cli.dsrl_max_gradient_updates < 1:
+    parser.error("--dsrl-max-gradient-updates must be positive.")
 if min(
     args_cli.flow_ppo_rollouts,
     args_cli.flow_ppo_learning_epochs,
@@ -504,6 +511,8 @@ def _run_online_dsrl(
         device=vec_env.device,
         backup_entropy=False,
         minimum_entropy_value=1.0e-3,
+        action_l2_weight=args_cli.dsrl_action_l2_weight,
+        max_gradient_updates=args_cli.dsrl_max_gradient_updates,
     )
     interaction_limited = args_cli.training_interactions > 0
     max_interactions = (
@@ -710,6 +719,7 @@ def main(
         device=args_cli.device or "cuda:0",
         learned_noise_steps=args_cli.learned_noise_steps,
         padding_mode=args_cli.noise_padding_mode,
+        noise_residual_scale=args_cli.dsrl_noise_residual_scale,
         chunk_execute_steps=args_cli.chunk_execute_steps,
         chunk_discount=args_cli.chunk_discount,
         flow_num_inference_steps=args_cli.flow_num_inference_steps,
@@ -766,6 +776,9 @@ def main(
         "labware_random_xy_m": list(args_cli.labware_random_xy_m),
         "labware_random_yaw_deg": args_cli.labware_random_yaw_deg,
         "learned_noise_steps": args_cli.learned_noise_steps,
+        "noise_residual_scale": args_cli.dsrl_noise_residual_scale,
+        "dsrl_action_l2_weight": args_cli.dsrl_action_l2_weight,
+        "dsrl_max_gradient_updates": args_cli.dsrl_max_gradient_updates,
         "chunk_execute_steps": args_cli.chunk_execute_steps,
         "action_repeat": env.action_repeat,
         "chunk_discount": args_cli.chunk_discount,

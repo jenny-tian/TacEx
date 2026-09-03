@@ -1,4 +1,4 @@
-"""LabPick environment wrapper for the reference-style Flow-noise DSRL path."""
+"""LabPick wrapper for base-anchored Flow-noise DSRL."""
 
 from __future__ import annotations
 
@@ -85,9 +85,9 @@ def pack_dsrl_critic_state(
 class CleanDSRLLabPickWrapper(gym.Wrapper):
     """Decode a short SAC noise action through a frozen Flow policy.
 
-    Each outer step expands the learned noise with the reference implementation's
-    ``repeat_last`` rule and uses it directly as the Flow initial noise, then
-    decodes one Flow chunk and executes a fixed prefix.
+    Each outer step samples the frozen Flow policy's native Gaussian noise,
+    expands the learned correction with ``repeat_last``, and adds a bounded
+    scaled correction before decoding. A zero correction is exactly native BC.
     The actor receives frozen Flow encoder features; the critic additionally
     receives the simulator-only 19-D object/proprioception state.
     """
@@ -104,6 +104,7 @@ class CleanDSRLLabPickWrapper(gym.Wrapper):
         device: str = "cuda",
         learned_noise_steps: int = 1,
         padding_mode: str = "repeat_last",
+        noise_residual_scale: float = 0.25,
         chunk_execute_steps: int = DEFAULT_EXECUTE_STEPS,
         chunk_discount: float = 0.99,
         flow_num_inference_steps: int = 20,
@@ -183,6 +184,7 @@ class CleanDSRLLabPickWrapper(gym.Wrapper):
             flow_horizon=adapter_horizon,
             learned_noise_steps=int(learned_noise_steps),
             padding_mode=padding_mode,
+            residual_scale=float(noise_residual_scale),
         )
         self._flow_policy_steps = 0
         self._flow_needs_warmup = True
@@ -529,10 +531,10 @@ class CleanDSRLLabPickWrapper(gym.Wrapper):
     def _step_noise(self, policy_action: torch.Tensor | None):
         self._ensure_flow_observation_ready()
         self._decision_tactile_actor = self._last_tactile_actor.detach().clone()
+        native_noise = self.adapter.sample_native_noise(batch_size=self.num_envs)
         if policy_action is None:
-            action_chunk = self.adapter.decode(None)
+            decoder_noise = native_noise
             policy_noise_rms = torch.zeros((), device=self.device)
-            decoder_noise_rms = torch.ones((), device=self.device)
         else:
             policy_action = torch.as_tensor(
                 policy_action,
@@ -547,10 +549,11 @@ class CleanDSRLLabPickWrapper(gym.Wrapper):
                     f"DSRL action batch must equal num_envs={self.num_envs}, "
                     f"received {policy_action.shape[0]}."
                 )
-            full_noise = self.layout.expand_noise(policy_action)
-            action_chunk = self.adapter.decode(full_noise.reshape(self.num_envs, -1))
+            decoder_noise = self.layout.compose_noise(native_noise, policy_action)
             policy_noise_rms = policy_action.square().mean().sqrt().detach()
-            decoder_noise_rms = full_noise.square().mean().sqrt().detach()
+        action_chunk = self.adapter.decode(decoder_noise.reshape(self.num_envs, -1))
+        native_noise_rms = native_noise.square().mean().sqrt().detach()
+        decoder_noise_rms = decoder_noise.square().mean().sqrt().detach()
 
         _validate_matrix(action_chunk, name="decoded_action_chunk", width=10)
         if action_chunk.shape[0] != self.flow_horizon:
@@ -647,11 +650,13 @@ class CleanDSRLLabPickWrapper(gym.Wrapper):
         info["clean_dsrl/action_steps_executed"] = executed_actions
         info["clean_dsrl/physics_steps_executed"] = physics_steps
         info["clean_dsrl/policy_noise_rms"] = policy_noise_rms
+        info["clean_dsrl/native_noise_rms"] = native_noise_rms
         info["clean_dsrl/decoder_noise_rms"] = decoder_noise_rms
         info["tactile_actor"] = self._decision_tactile_actor.detach().clone()
         log = dict(info.get("log", {}))
         log["CleanDSRL/action_steps_executed"] = float(executed_actions)
         log["CleanDSRL/policy_noise_rms"] = policy_noise_rms
+        log["CleanDSRL/native_noise_rms"] = native_noise_rms
         log["CleanDSRL/decoder_noise_rms"] = decoder_noise_rms
         info["log"] = log
         self._log_online_transition(
@@ -688,7 +693,7 @@ class CleanDSRLLabPickWrapper(gym.Wrapper):
         return self._step_noise(policy_action)
 
     def step_bc(self):
-        """Execute a native independent-Gaussian Flow chunk for BC comparison."""
+        """Execute the exact zero-correction frozen-BC branch."""
 
         return self._step_noise(None)
 

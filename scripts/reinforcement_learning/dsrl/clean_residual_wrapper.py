@@ -1,13 +1,14 @@
 """Minimal LabPick environment contract for clean residual SAC.
 
-The frozen Flow Matching policy predicts a 32-action CAFE chunk.  SAC sees and
-corrects exactly one action at a time, and the BC is replanned after the first
-10 actions.  Its 4-D post-tanh action changes only normalized CAFE
+The frozen Flow Matching policy predicts a 32-action CAFE chunk. SAC sees and
+corrects exactly one action at a time, and the BC is replanned after all 32
+actions. Its 4-D post-tanh action changes only normalized CAFE
 ``(x, y, z, width)``; the six BC Rot6D coordinates are preserved verbatim.
 
-Every replan within an episode decodes from the same Flow noise template. The
-template seed advances once per episode so training retains episode-level BC
-diversity without introducing discontinuous noise changes every 10 actions.
+The wrapper consumes the frozen policy's native Gaussian random stream. With
+``residual_scale=0`` it therefore executes exactly the same chunks, cadence,
+rotation and random stream as the frozen base policy. By default, learned
+corrections are contact-gated so visual free-space approach remains unchanged.
 
 This wrapper deliberately contains no reward shaping, residual penalty,
 warm-up noise, trust region, potential, or n-step-return logic. Those belong
@@ -35,7 +36,7 @@ except ImportError:
 
 
 FLOW_HORIZON = 32
-REPLAN_STEPS = 10
+REPLAN_STEPS = FLOW_HORIZON
 ACTION_REPEAT = 2
 MAX_OBSERVATION_UPDATES = 32
 
@@ -155,10 +156,11 @@ class CleanResidualLabPickWrapper(gym.Wrapper):
         policy_checkpoint: str | Path,
         *,
         device: str = "cuda",
-        residual_scale: float = 0.15,
+        residual_scale: float = 0.01,
         flow_num_inference_steps: int = 20,
         phase_horizon_steps: int = 383,
         camera_warmup_steps: int = 8,
+        contact_gate: bool = True,
         seed: int | None = None,
     ) -> None:
         super().__init__(env)
@@ -166,10 +168,10 @@ class CleanResidualLabPickWrapper(gym.Wrapper):
         if int(getattr(base, "num_envs", 0)) != 1:
             raise ValueError("Clean residual SAC requires exactly one environment.")
         cfg = getattr(base, "cfg", None)
-        if cfg is None or not bool(getattr(cfg, "rl_align_cafe_action_yaw", False)):
+        if cfg is None or bool(getattr(cfg, "rl_align_cafe_action_yaw", True)):
             raise ValueError(
-                "Clean residual SAC requires rl_align_cafe_action_yaw=True: "
-                "the environment supplies oracle yaw while SAC leaves BC Rot6D unchanged."
+                "Clean residual SAC requires rl_align_cafe_action_yaw=False so zero "
+                "residual preserves the frozen BC rotation exactly."
             )
         if not callable(getattr(base, "get_cafe_observation", None)):
             raise TypeError("The wrapped environment must implement get_cafe_observation().")
@@ -201,9 +203,8 @@ class CleanResidualLabPickWrapper(gym.Wrapper):
         self._layout = CleanResidualLayout(scale=residual_scale)
         self.phase_horizon_steps = int(phase_horizon_steps)
         self.camera_warmup_steps = int(camera_warmup_steps)
+        self.contact_gate = bool(contact_gate)
         self._base_flow_noise_seed = resolved_seed
-        self._episode_index = 0
-        self._episode_flow_noise_seed = resolved_seed
         self.adapter = FlowMatchingNoiseAdapter.from_pretrained(
             policy_checkpoint,
             device=device,
@@ -227,6 +228,7 @@ class CleanResidualLabPickWrapper(gym.Wrapper):
 
         self._flow_policy_steps = 0
         self._flow_needs_warmup = True
+        self._physical_bc_chunk: torch.Tensor | None = None
         self._normalized_bc_chunk: torch.Tensor | None = None
         self._chunk_offset = 0
         self._last_tactile_actor = torch.zeros(
@@ -286,12 +288,6 @@ class CleanResidualLabPickWrapper(gym.Wrapper):
         return self._chunk_offset
 
     @property
-    def flow_noise_seed(self) -> int:
-        """Seed of the Flow noise template reused for the current episode."""
-
-        return self._episode_flow_noise_seed
-
-    @property
     def current_bc_action(self) -> torch.Tensor:
         """Return a defensive copy of the normalized 10-D BC action to execute next."""
 
@@ -300,6 +296,16 @@ class CleanResidualLabPickWrapper(gym.Wrapper):
         if not 0 <= self._chunk_offset < self.replan_steps:
             raise RuntimeError(f"Invalid BC chunk offset {self._chunk_offset}.")
         return self._normalized_bc_chunk[self._chunk_offset].reshape(1, -1).detach().clone()
+
+    @property
+    def current_physical_bc_action(self) -> torch.Tensor:
+        """Return the decoded physical BC action without a normalize round trip."""
+
+        if self._physical_bc_chunk is None:
+            raise RuntimeError("No Flow BC chunk is prepared; call reset() first.")
+        if not 0 <= self._chunk_offset < self.replan_steps:
+            raise RuntimeError(f"Invalid BC chunk offset {self._chunk_offset}.")
+        return self._physical_bc_chunk[self._chunk_offset].reshape(1, -1).detach().clone()
 
     def _current_phase(self) -> float:
         return min(self._flow_policy_steps / float(self.phase_horizon_steps), 1.0)
@@ -352,9 +358,7 @@ class CleanResidualLabPickWrapper(gym.Wrapper):
 
     def _prepare_bc_chunk(self) -> None:
         self._ensure_flow_observation_ready()
-        physical, normalized = self.adapter.decode_with_normalized(
-            noise_seed=self._episode_flow_noise_seed,
-        )
+        physical, normalized = self.adapter.decode_with_normalized()
         _validate_matrix(physical, name="physical_bc_chunk", width=10)
         _validate_matrix(normalized, name="normalized_bc_chunk", width=10)
         if physical.shape[0] != self.flow_horizon or normalized.shape[0] != self.flow_horizon:
@@ -363,6 +367,10 @@ class CleanResidualLabPickWrapper(gym.Wrapper):
                 f"{tuple(physical.shape)} and {tuple(normalized.shape)}."
             )
         self._normalized_bc_chunk = normalized.to(
+            device=self.device,
+            dtype=torch.float32,
+        ).detach().clone()
+        self._physical_bc_chunk = physical.to(
             device=self.device,
             dtype=torch.float32,
         ).detach().clone()
@@ -417,11 +425,14 @@ class CleanResidualLabPickWrapper(gym.Wrapper):
             if requested_seed < 0:
                 raise ValueError("reset seed must be non-negative when provided.")
             self._base_flow_noise_seed = requested_seed
-        self._episode_index = 0
-        self._episode_flow_noise_seed = self._base_flow_noise_seed
         self.adapter.reset()
+        generator = getattr(self.adapter.runner, "generator", None)
+        if generator is None:
+            raise RuntimeError("Base-preserving residual RL requires a seeded Flow generator.")
+        generator.manual_seed(self._base_flow_noise_seed)
         self._flow_policy_steps = 0
         self._flow_needs_warmup = True
+        self._physical_bc_chunk = None
         self._normalized_bc_chunk = None
         self._chunk_offset = 0
         _, info = self.env.reset(**kwargs)
@@ -430,7 +441,6 @@ class CleanResidualLabPickWrapper(gym.Wrapper):
 
     @torch.inference_mode()
     def step(self, residual):
-        action_flow_noise_seed = self._episode_flow_noise_seed
         decision_tactile_actor = self._last_tactile_actor.detach().clone()
         residual = torch.as_tensor(residual, dtype=torch.float32, device=self.device)
         if residual.ndim == 1:
@@ -443,14 +453,25 @@ class CleanResidualLabPickWrapper(gym.Wrapper):
             )
 
         action_index = self._chunk_offset
-        normalized_action = self._compose_normalized_action(
-            self.current_bc_action,
-            residual,
+        contact_gate = (
+            decision_tactile_actor[:, -1:].to(residual)
+            if self.contact_gate
+            else torch.ones((self.num_envs, 1), device=self.device, dtype=residual.dtype)
         )
-        physical_action = self.adapter.unnormalize_action(normalized_action).to(
-            device=self.device,
-            dtype=torch.float32,
-        )
+        applied_residual = residual * contact_gate
+        if self.layout.scale == 0.0 or not bool(torch.count_nonzero(applied_residual).item()):
+            # Preserve the frozen policy bit-for-bit. Even an otherwise harmless
+            # normalize -> unnormalize round trip can perturb contact dynamics.
+            physical_action = self.current_physical_bc_action
+        else:
+            normalized_action = self._compose_normalized_action(
+                self.current_bc_action,
+                applied_residual,
+            )
+            physical_action = self.adapter.unnormalize_action(normalized_action).to(
+                device=self.device,
+                dtype=torch.float32,
+            )
         _validate_matrix(physical_action, name="physical_action", width=10)
         if physical_action.shape[0] != self.num_envs:
             raise ValueError(
@@ -479,12 +500,9 @@ class CleanResidualLabPickWrapper(gym.Wrapper):
             # reset observation, while the terminal mask below prevents SAC
             # from bootstrapping across the episode boundary.
             self.adapter.reset()
-            self._episode_index += 1
-            self._episode_flow_noise_seed = (
-                self._base_flow_noise_seed + self._episode_index
-            )
             self._flow_policy_steps = 0
             self._flow_needs_warmup = True
+            self._physical_bc_chunk = None
             self._normalized_bc_chunk = None
             self._chunk_offset = 0
             self._prepare_bc_chunk()
@@ -501,14 +519,19 @@ class CleanResidualLabPickWrapper(gym.Wrapper):
         info["clean_residual/action_index"] = action_index
         info["clean_residual/action_repeat"] = physics_steps
         info["clean_residual/replanned"] = replanned
-        info["clean_residual/fixed_flow_noise_seed"] = action_flow_noise_seed
+        info["clean_residual/contact_gate"] = contact_gate.mean().detach()
         info["clean_residual/residual_rms"] = residual_rms
-        info["clean_residual/effective_residual_rms"] = residual_rms * self.layout.scale
+        effective_residual_rms = applied_residual.square().mean().sqrt().detach()
+        info["clean_residual/effective_residual_rms"] = (
+            effective_residual_rms * self.layout.scale
+        )
         info["tactile_actor"] = decision_tactile_actor
         log = dict(info.get("log", {}))
         log["CleanResidual/raw_residual_rms"] = residual_rms
-        log["CleanResidual/effective_residual_rms"] = residual_rms * self.layout.scale
-        log["CleanResidual/fixed_flow_noise_seed"] = float(action_flow_noise_seed)
+        log["CleanResidual/effective_residual_rms"] = (
+            effective_residual_rms * self.layout.scale
+        )
+        log["CleanResidual/contact_gate"] = contact_gate.mean().detach()
         info["log"] = log
         terminated_for_learning = terminated | truncated
         return (

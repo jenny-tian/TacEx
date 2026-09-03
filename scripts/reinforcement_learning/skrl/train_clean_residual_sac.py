@@ -41,7 +41,9 @@ parser.add_argument(
     help="Completed training steps represented by --resume_checkpoint (metadata and run naming only).",
 )
 parser.add_argument("--bc_device", type=str, default="cuda:0")
-parser.add_argument("--residual_scale", type=float, default=0.15)
+parser.add_argument("--residual_scale", type=float, default=0.01)
+parser.add_argument("--residual_contact_gate", action=argparse.BooleanOptionalAction, default=True)
+parser.add_argument("--action_l2_weight", type=float, default=1.0)
 parser.add_argument("--flow_num_inference_steps", type=int, default=20)
 parser.add_argument(
     "--flow_noise_seed",
@@ -110,8 +112,10 @@ def _validate_cli() -> None:
         raise ValueError("--resume_step must be positive when --resume_checkpoint is provided.")
     if args_cli.resume_checkpoint is None and args_cli.resume_step != 0:
         raise ValueError("--resume_step requires --resume_checkpoint.")
-    if not math.isfinite(args_cli.residual_scale) or args_cli.residual_scale <= 0:
-        raise ValueError("--residual_scale must be finite and positive.")
+    if not math.isfinite(args_cli.residual_scale) or args_cli.residual_scale < 0:
+        raise ValueError("--residual_scale must be finite and non-negative.")
+    if not math.isfinite(args_cli.action_l2_weight) or args_cli.action_l2_weight < 0:
+        raise ValueError("--action_l2_weight must be finite and non-negative.")
     if args_cli.flow_num_inference_steps < 1:
         raise ValueError("--flow_num_inference_steps must be positive.")
     if args_cli.flow_noise_seed is not None and args_cli.flow_noise_seed < 0:
@@ -158,7 +162,7 @@ def main(
     env_cfg.scene.num_envs = 1
     env_cfg.sim.device = args_cli.device
     env_cfg.seed = args_cli.seed
-    env_cfg.rl_align_cafe_action_yaw = True
+    env_cfg.rl_align_cafe_action_yaw = False
     env_cfg.rl_action_penalty_scale = 0.0
     env_cfg.labware_pos_randomization_xy = tuple(args_cli.labware_random_xy_m)
     env_cfg.labware_yaw_randomization = math.radians(args_cli.labware_random_yaw_deg)
@@ -182,7 +186,7 @@ def main(
     )
     scale_tag = str(args_cli.residual_scale).replace(".", "p")
     agent_cfg["agent"]["experiment"]["experiment_name"] = (
-        f"clean_residual_sac_s{scale_tag}_fixednoise_chunk10_v3"
+        f"clean_residual_sac_s{scale_tag}_basepreserving_chunk32_v3"
     )
     if args_cli.resume_checkpoint is not None:
         agent_cfg["agent"]["experiment"]["experiment_name"] += (
@@ -208,7 +212,7 @@ def main(
     dump_yaml(
         os.path.join(log_dir, "params", "clean_residual_sac.yaml"),
         {
-            "contract": "clean_residual_sac_oracle_yaw_xyz_width_fixednoise_chunk10_v3",
+            "contract": "clean_residual_sac_basepreserving_xyz_width_chunk32_v3",
             "algorithm_name": "SAC",
             "objective": "alpha_zero_one_step_twin_q",
             "entropy_loss": False,
@@ -223,27 +227,29 @@ def main(
             "max_log_std": 2.0,
             "log_std_trainable": True,
             "target": "reward_plus_gamma_not_terminated_min_target_q",
-            "actor_loss": "negative_mean_min_online_q",
-            "policy_observation": "proprio10_relative_position3_object_rot6d6_bc_action10",
-            "policy_observation_dim": 29,
+            "actor_loss": "negative_mean_min_online_q_plus_action_l2",
+            "action_l2_weight": args_cli.action_l2_weight,
+            "policy_observation": "proprio10_relative_position3_object_rot6d6_bc_action10_tactile5",
+            "policy_observation_dim": 34,
             "critic_state_dim": 19,
             "critic_input": "critic_state19_full_bc_action10_raw_residual4",
-            "critic_input_dim": 33,
+            "critic_input_dim": 38,
             "residual_action_dim": 4,
             "residual_indices": [0, 1, 2, 9],
             "residual_scale": args_cli.residual_scale,
-            "rotation_source": "simulator_reset_ground_truth_yaw",
+            "rotation_source": "frozen_bc_rot6d",
+            "contact_gate": args_cli.residual_contact_gate,
             "bc_checkpoint": os.path.abspath(args_cli.bc_policy),
             "bc_checkpoint_bytes": os.path.getsize(args_cli.bc_policy),
             "bc_checkpoint_sha256": _sha256(args_cli.bc_policy),
             "flow_num_inference_steps": args_cli.flow_num_inference_steps,
             "flow_noise_seed_base": flow_noise_seed,
-            "flow_noise_semantics": "fixed_within_episode_base_seed_plus_episode_index",
+            "flow_noise_semantics": "native_gaussian_stream",
             "flow_phase_horizon_steps": args_cli.phase_horizon_steps,
             "flow_camera_warmup_steps": args_cli.camera_warmup_steps,
             "flow_visual_xy_override": True,
             "flow_visual_xy_lock_phase": 0.30,
-            "bc_replan_actions": 10,
+            "bc_replan_actions": 32,
             "action_repeat": 2,
             "environment_reward_only": True,
             "environment_reward": "lab_pick_dense_shaped_reward",
@@ -283,6 +289,7 @@ def main(
         flow_num_inference_steps=args_cli.flow_num_inference_steps,
         phase_horizon_steps=args_cli.phase_horizon_steps,
         camera_warmup_steps=args_cli.camera_warmup_steps,
+        contact_gate=args_cli.residual_contact_gate,
         seed=flow_noise_seed,
     )
     layout = env.layout
@@ -328,11 +335,13 @@ def main(
         state_space=env.state_space,
         action_space=env.action_space,
         device=device,
+        action_l2_weight=args_cli.action_l2_weight,
     )
     print(f"[INFO] Log directory: {log_dir}")
     print(
-        "[INFO] Clean residual SAC: obs=29 state=19 action=4 critic_input=33 "
-        f"scale={layout.scale:g} entropy=off target_actor=none"
+        "[INFO] Clean residual SAC: obs=34 state=19 action=4 critic_input=38 "
+        f"scale={layout.scale:g} contact_gate={args_cli.residual_contact_gate} "
+        f"action_l2={args_cli.action_l2_weight:g} entropy=off target_actor=none"
     )
     trainer = SequentialTrainer(
         cfg={
