@@ -27,6 +27,18 @@ Components can be easily switched out, added and modified.
 
 Currently, only the **GelSight Mini** is supported, but you can also easily add your own sensor (guide coming soon). We also plan to add more VBTS types later.
 
+## Force-Constrained Grape Picking
+
+This fork also includes `TacEx-GrapePick-Force-v0`: a randomized vineyard
+scene with an upright vine, horizontal gripper approach, physical pad-to-fruit
+force sensing, a 5 N nominal damage ceiling, and a 3 N nominal detachment
+threshold. Successful demonstrations are rejected if any monitored arm or
+gripper link contacts the vine or trellis. See
+[the grape-picking demo guide](scripts/demos/grape_pick/README.md) for preview,
+RGB data collection, validation, and policy-training commands, and
+[the measured comparison](scripts/demos/grape_pick/RESULTS.md) for the tactile
+BC, Residual RL, AWR, DPPO, DSRL, and VLM+DSRL results.
+
 ## **Main features**:
 - [GPU accelerated Tactile RGB simulation](https://github.com/TimSchneider42/taxim) via [Taxim](https://github.com/Robo-Touch/Taxim)'s simulation approach
 - Marker Motion Simulation via [FOTS](https://github.com/Rancho-zhao/FOTS)

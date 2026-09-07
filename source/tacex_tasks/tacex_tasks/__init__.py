@@ -32,3 +32,8 @@ try:
     import_packages(__name__, _BLACKLIST_PKGS)
 except ImportError as exc:
     warnings.warn(f"Skipping automatic tacex_tasks package import because an optional task dependency failed: {exc}")
+
+# Keep the GrapePick task available even when discovery of an unrelated optional
+# RL integration above stops early because of a version mismatch.
+from . import grape_pick as _grape_pick  # noqa: E402,F401
+from . import seal_twist as _seal_twist  # noqa: E402,F401
