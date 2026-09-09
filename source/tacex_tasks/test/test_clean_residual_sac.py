@@ -281,6 +281,37 @@ def test_clean_actor_has_one_tanh_transform_correct_log_prob_and_deterministic_m
     assert bool((actions > -1.0).all() and (actions < 1.0).all())
 
 
+def test_clean_actor_initial_mean_and_deterministic_residual_are_exactly_zero():
+    torch.manual_seed(13)
+    layout = CleanResidualLayout()
+    observation_space, _, action_space = _spaces(layout)
+    actor = CleanResidualActor(
+        observation_space,
+        action_space,
+        "cpu",
+        layout=layout,
+        initial_log_std=-3.0,
+    )
+    inputs = {"observations": torch.randn(17, layout.policy_dim)}
+
+    mean, outputs = actor.compute(inputs, role="policy")
+    deterministic = actor.deterministic_action(inputs, role="policy")
+
+    torch.testing.assert_close(mean, torch.zeros_like(mean), rtol=0.0, atol=0.0)
+    torch.testing.assert_close(
+        deterministic,
+        torch.zeros_like(deterministic),
+        rtol=0.0,
+        atol=0.0,
+    )
+    torch.testing.assert_close(
+        outputs["log_std"],
+        torch.full_like(outputs["log_std"], -3.0),
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
 def test_clean_actor_reparameterization_backpropagates_to_mean_and_log_std_heads():
     torch.manual_seed(7)
     layout = CleanResidualLayout()
@@ -810,3 +841,33 @@ def test_zero_scale_is_exactly_the_frozen_bc_action(monkeypatch):
     torch.testing.assert_close(
         wrapper.env.actions[-1], physical_base_action, rtol=0.0, atol=0.0
     )
+
+
+def test_contact_gate_executes_exact_frozen_bc_action_before_contact(monkeypatch):
+    adapter = _FakeFlowAdapter()
+    monkeypatch.setattr(
+        clean_wrapper.FlowMatchingNoiseAdapter,
+        "from_pretrained",
+        staticmethod(lambda checkpoint, **kwargs: adapter),
+    )
+    wrapper = CleanResidualLabPickWrapper(
+        _FakeLabPickEnv(truncated=False),
+        "fake_flow.pt",
+        device="cpu",
+        residual_scale=0.01,
+        camera_warmup_steps=0,
+        contact_gate=True,
+        seed=31,
+    )
+    monkeypatch.setattr(wrapper, "_raw_flow_observation", lambda: {})
+    wrapper.reset()
+    physical_base_action = wrapper.current_physical_bc_action
+
+    _, _, _, _, info = wrapper.step(torch.ones(1, 4))
+
+    assert adapter.unnormalized_inputs == []
+    torch.testing.assert_close(
+        wrapper.env.actions[-1], physical_base_action, rtol=0.0, atol=0.0
+    )
+    assert float(info["clean_residual/contact_gate"].item()) == 0.0
+    assert float(info["clean_residual/effective_residual_rms"].item()) == 0.0

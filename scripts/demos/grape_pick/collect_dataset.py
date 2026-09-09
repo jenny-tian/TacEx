@@ -11,6 +11,14 @@ from collections import Counter
 from pathlib import Path
 
 
+PICK_VARIANT = os.environ.get("TACEX_PICK_VARIANT", "grape").strip().lower()
+if PICK_VARIANT not in {"grape", "raspberry"}:
+    raise ValueError(
+        "TACEX_PICK_VARIANT must be either 'grape' or 'raspberry', "
+        f"got {PICK_VARIANT!r}"
+    )
+
+
 def _reexec_with_cuda_libraries() -> None:
     py_dir = f"python{sys.version_info.major}.{sys.version_info.minor}"
     site_packages = Path(sys.prefix) / "lib" / py_dir / "site-packages"
@@ -44,7 +52,9 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--num_episodes", type=int, default=100)
 parser.add_argument("--num_envs", type=int, default=16)
 parser.add_argument("--seed", type=int, default=0)
-parser.add_argument("--output", type=Path, default=Path("datasets/grape_pick"))
+parser.add_argument(
+    "--output", type=Path, default=Path(f"datasets/{PICK_VARIANT}_pick")
+)
 parser.add_argument("--record_stride", type=int, default=2, help="Save one sample every N physics steps")
 parser.add_argument("--max_episode_steps", type=int, default=1100)
 parser.add_argument("--max_batches", type=int, default=100)
@@ -67,9 +77,29 @@ simulation_app = launcher.app
 import torch
 import torch.nn.functional as F
 
-from tacex_tasks.grape_pick.dataset import GrapeTrajectoryBuffer, validate_episode
-from tacex_tasks.grape_pick.grape_pick_env import GrapePickEnv
-from tacex_tasks.grape_pick.grape_pick_env_cfg import GrapePickEnvCfg
+if PICK_VARIANT == "raspberry":
+    from tacex_tasks.raspberry_pick.dataset import (
+        RaspberryTrajectoryBuffer as GrapeTrajectoryBuffer,
+    )
+    from tacex_tasks.raspberry_pick.dataset import validate_episode
+    from tacex_tasks.raspberry_pick.raspberry_pick_env import (
+        RaspberryPickEnv as GrapePickEnv,
+    )
+    from tacex_tasks.raspberry_pick.raspberry_pick_env_cfg import (
+        RaspberryPickEnvCfg as GrapePickEnvCfg,
+    )
+
+    TASK_ID = "TacEx-RaspberryPick-Force-v0"
+    TASK_NAME = "RaspberryPick"
+    CONTACT_TARGET = "target_raspberry"
+else:
+    from tacex_tasks.grape_pick.dataset import GrapeTrajectoryBuffer, validate_episode
+    from tacex_tasks.grape_pick.grape_pick_env import GrapePickEnv
+    from tacex_tasks.grape_pick.grape_pick_env_cfg import GrapePickEnvCfg
+
+    TASK_ID = "TacEx-GrapePick-Force-v0"
+    TASK_NAME = "GrapePick"
+    CONTACT_TARGET = "target_grape"
 
 
 def _rgb_224(image: torch.Tensor) -> torch.Tensor:
@@ -86,7 +116,7 @@ def _failure_reason(flags: dict[str, torch.Tensor], index: int) -> str:
 
 
 def main() -> None:
-    print("[INFO] Initializing GrapePick dataset collector", flush=True)
+    print(f"[INFO] Initializing {TASK_NAME} dataset collector", flush=True)
     args.output.mkdir(parents=True, exist_ok=True)
     cfg = GrapePickEnvCfg()
     cfg.scene.num_envs = args.num_envs
@@ -95,6 +125,13 @@ def main() -> None:
     cfg.enable_gelsight = args.save_gelsight
     cfg.randomize_force_thresholds = args.randomize_force_thresholds
     cfg.episode_length_s = max(args.max_episode_steps * cfg.sim.dt, 1.0)
+    if PICK_VARIANT == "raspberry" and cfg.enable_cameras:
+        # DINOv3 receives 224 px inputs.  Keep each camera's native aspect
+        # ratio while avoiding the large render cost of the paper-video mode.
+        cfg.wrist_camera.width = 640
+        cfg.wrist_camera.height = 480
+        cfg.third_person_camera.width = 960
+        cfg.third_person_camera.height = 540
     if args.device:
         cfg.sim.device = args.device
     print("[INFO] Configuration ready; creating simulation scene", flush=True)
@@ -199,7 +236,7 @@ def main() -> None:
         env.close()
 
     summary = {
-        "task": "TacEx-GrapePick-Force-v0",
+        "task": TASK_ID,
         "requested": args.num_episodes,
         "written": written,
         "attempted": attempted,
@@ -210,7 +247,7 @@ def main() -> None:
         "seed": args.seed,
         "save_rgb": args.save_rgb,
         "save_gelsight": args.save_gelsight,
-        "contact_force_source": "PhysX ContactSensor filtered to target_grape",
+        "contact_force_source": f"PhysX ContactSensor filtered to {CONTACT_TARGET}",
     }
     (args.output / "collection_summary.json").write_text(
         json.dumps(summary, indent=2) + "\n", encoding="utf-8"

@@ -75,6 +75,88 @@ def test_force_conditioned_replay_round_trips_context():
     assert sampled.action_context.shape == (8, 4)
     assert sampled.next_action_context.shape == (8, 4)
 
+    restored = learning.ReplayBuffer(
+        capacity=16,
+        observation_dim=2,
+        action_dim=1,
+        device=torch.device("cpu"),
+        action_context_dim=4,
+    )
+    restored.load_state_dict(replay.state_dict())
+    assert restored.size == replay.size
+    assert restored.position == replay.position
+    torch.testing.assert_close(restored.observation[:4], replay.observation[:4])
+    torch.testing.assert_close(restored.action[:4], replay.action[:4])
+    assert restored.action_context is not None and replay.action_context is not None
+    torch.testing.assert_close(restored.action_context[:4], replay.action_context[:4])
+
+
+def test_replay_supports_delayed_terminal_credit():
+    learning = load_learning_module()
+    replay = learning.ReplayBuffer(
+        capacity=4,
+        observation_dim=2,
+        action_dim=1,
+        device=torch.device("cpu"),
+    )
+    index = replay.add(
+        learning.SACBatch(
+            observation=torch.zeros(1, 2),
+            action=torch.zeros(1, 1),
+            reward=torch.tensor([0.25]),
+            next_observation=torch.zeros(1, 2),
+            done=torch.ones(1),
+        )
+    )
+
+    replay.add_reward(index, 1.0)
+
+    assert index == 0
+    torch.testing.assert_close(replay.reward[0], torch.tensor(1.25))
+
+
+def test_sac_checkpoint_restores_training_and_optimizer_state():
+    learning = load_learning_module()
+    torch.manual_seed(55)
+    agent = learning.SACResidualAgent(
+        observation_dim=4,
+        action_dim=2,
+        device=torch.device("cpu"),
+        critic_action_context_dim=2,
+    )
+    batch = learning.SACBatch(
+        observation=torch.randn(8, 4),
+        action=torch.tanh(torch.randn(8, 2)),
+        reward=torch.randn(8),
+        next_observation=torch.randn(8, 4),
+        done=torch.zeros(8),
+        action_context=torch.randn(8, 2),
+        next_action_context=torch.randn(8, 2),
+    )
+    agent.update(batch)
+    checkpoint = agent.checkpoint()
+
+    restored = learning.SACResidualAgent(
+        observation_dim=4,
+        action_dim=2,
+        device=torch.device("cpu"),
+        critic_action_context_dim=2,
+    )
+    restored.load_checkpoint(checkpoint)
+    assert restored.updates == agent.updates
+    torch.testing.assert_close(restored.log_alpha, agent.log_alpha)
+    observation = torch.randn(3, 4)
+    action = torch.randn(3, 2)
+    context = torch.randn(3, 2)
+    critic_action = torch.cat((action, context), dim=-1)
+    torch.testing.assert_close(
+        restored.q1(observation, critic_action),
+        agent.q1(observation, critic_action),
+    )
+    assert restored.actor_optimizer.state_dict()["state"]
+    assert restored.q_optimizer.state_dict()["state"]
+    assert restored.alpha_optimizer.state_dict()["state"]
+
 
 def test_force_context_adapter_preserves_initial_dsrl_actor_and_q():
     learning = load_learning_module()

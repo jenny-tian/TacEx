@@ -204,7 +204,7 @@ class ReplayBuffer:
         self.size = 0
         self.position = 0
 
-    def add(self, batch: SACBatch) -> None:
+    def add(self, batch: SACBatch) -> int:
         tensors = (
             batch.observation.detach().cpu(),
             batch.action.detach().cpu(),
@@ -254,6 +254,17 @@ class ReplayBuffer:
             self.next_action_context[indices] = next_action_context
         self.position = int((self.position + count) % self.capacity)
         self.size = min(self.capacity, self.size + count)
+        return int(indices[-1].item())
+
+    def add_reward(self, index: int, delta: float) -> None:
+        """Add delayed credit to one still-resident replay transition."""
+
+        index = int(index)
+        if not 0 <= index < self.capacity:
+            raise IndexError(f"replay index {index} is outside capacity {self.capacity}")
+        if self.size < self.capacity and index >= self.size:
+            raise IndexError(f"replay index {index} has not been initialized")
+        self.reward[index] += float(delta)
 
     def sample(self, batch_size: int) -> SACBatch:
         indices = torch.randint(self.size, (batch_size,))
@@ -276,6 +287,68 @@ class ReplayBuffer:
             action_context,
             next_action_context,
         )
+
+    def state_dict(self) -> dict:
+        """Serialize only initialized replay slots for resumable online training."""
+
+        state = {
+            "capacity": self.capacity,
+            "action_context_dim": self.action_context_dim,
+            "size": self.size,
+            "position": self.position,
+            "observation": self.observation[: self.size].clone(),
+            "action": self.action[: self.size].clone(),
+            "reward": self.reward[: self.size].clone(),
+            "next_observation": self.next_observation[: self.size].clone(),
+            "done": self.done[: self.size].clone(),
+        }
+        if self.action_context is not None:
+            assert self.next_action_context is not None
+            state["action_context"] = self.action_context[: self.size].clone()
+            state["next_action_context"] = self.next_action_context[: self.size].clone()
+        return state
+
+    def load_state_dict(self, state: dict) -> None:
+        """Restore replay storage while validating its observation/action contract."""
+
+        size = int(state["size"])
+        position = int(state["position"])
+        if size < 0 or size > self.capacity:
+            raise ValueError(f"replay size {size} exceeds capacity {self.capacity}")
+        if not 0 <= position < self.capacity:
+            raise ValueError(f"invalid replay position {position}")
+        if int(state.get("action_context_dim", 0)) != self.action_context_dim:
+            raise ValueError("replay action-context dimension mismatch")
+        tensors = {
+            "observation": self.observation,
+            "action": self.action,
+            "reward": self.reward,
+            "next_observation": self.next_observation,
+            "done": self.done,
+        }
+        for name, destination in tensors.items():
+            source = torch.as_tensor(state[name]).cpu()
+            if source.shape != destination[:size].shape:
+                raise ValueError(
+                    f"replay {name} shape mismatch: expected "
+                    f"{tuple(destination[:size].shape)}, got {tuple(source.shape)}"
+                )
+            destination[:size].copy_(source)
+        if self.action_context_dim > 0:
+            assert self.action_context is not None and self.next_action_context is not None
+            for name, destination in (
+                ("action_context", self.action_context),
+                ("next_action_context", self.next_action_context),
+            ):
+                source = torch.as_tensor(state[name]).cpu()
+                if source.shape != destination[:size].shape:
+                    raise ValueError(
+                        f"replay {name} shape mismatch: expected "
+                        f"{tuple(destination[:size].shape)}, got {tuple(source.shape)}"
+                    )
+                destination[:size].copy_(source)
+        self.size = size
+        self.position = position
 
 
 class SACResidualAgent:
@@ -491,7 +564,44 @@ class SACResidualAgent:
             "critic_action_context_dim": self.critic_action_context_dim,
             "critic_context_mode": self.critic_context_mode,
             "executed_action_mask": self.executed_action_mask.detach().cpu(),
+            "actor_optimizer": self.actor_optimizer.state_dict(),
+            "q_optimizer": self.q_optimizer.state_dict(),
+            "alpha_optimizer": self.alpha_optimizer.state_dict(),
         }
+
+    def load_checkpoint(self, checkpoint: dict) -> None:
+        """Restore networks and, when available, optimizer state for continuation."""
+
+        if checkpoint.get("algorithm") != "sac":
+            raise ValueError("SAC checkpoint algorithm mismatch")
+        if int(checkpoint.get("critic_action_context_dim", 0)) != self.critic_action_context_dim:
+            raise ValueError("SAC critic action-context dimension mismatch")
+        if str(checkpoint.get("critic_context_mode", "concat")) != self.critic_context_mode:
+            raise ValueError("SAC critic context mode mismatch")
+        saved_mask = torch.as_tensor(checkpoint["executed_action_mask"]).to(self.device)
+        if not torch.equal(saved_mask, self.executed_action_mask):
+            raise ValueError("SAC executed-action mask mismatch")
+        self.actor.load_state_dict(checkpoint["actor"], strict=True)
+        self.q1.load_state_dict(checkpoint["q1"], strict=True)
+        self.q2.load_state_dict(checkpoint["q2"], strict=True)
+        self.target_q1.load_state_dict(checkpoint["target_q1"], strict=True)
+        self.target_q2.load_state_dict(checkpoint["target_q2"], strict=True)
+        with torch.no_grad():
+            self.log_alpha.copy_(torch.as_tensor(checkpoint["log_alpha"]).to(self.device))
+        self.updates = int(checkpoint["updates"])
+        optimizer_pairs = (
+            ("actor_optimizer", self.actor_optimizer),
+            ("q_optimizer", self.q_optimizer),
+            ("alpha_optimizer", self.alpha_optimizer),
+        )
+        for name, optimizer in optimizer_pairs:
+            if name not in checkpoint:
+                continue
+            optimizer.load_state_dict(checkpoint[name])
+            for optimizer_state in optimizer.state.values():
+                for key, value in optimizer_state.items():
+                    if torch.is_tensor(value):
+                        optimizer_state[key] = value.to(self.device)
 
 
 class SafePullBanditAgent:

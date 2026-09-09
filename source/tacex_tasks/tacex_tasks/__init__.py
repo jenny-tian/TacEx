@@ -36,4 +36,5 @@ except ImportError as exc:
 # Keep the GrapePick task available even when discovery of an unrelated optional
 # RL integration above stops early because of a version mismatch.
 from . import grape_pick as _grape_pick  # noqa: E402,F401
+from . import raspberry_pick as _raspberry_pick  # noqa: E402,F401
 from . import seal_twist as _seal_twist  # noqa: E402,F401

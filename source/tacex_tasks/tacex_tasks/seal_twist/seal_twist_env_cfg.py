@@ -93,6 +93,21 @@ class SealTwistEnvCfg(LabPickEnvCfg):
     minimum_finger_force_n: float = 0.05
     maximum_finger_force_n: float = 20.0
     randomize_force_thresholds: bool = False
+    # ``iid`` preserves the original benchmark.  ``persistent`` models one
+    # bottle/seal material batch for an entire run, while ``block`` models a
+    # batch change every ``force_threshold_block_episodes`` resets.  Only the
+    # latter two schedules make completed episodes informative about a future
+    # hidden force window.
+    force_threshold_schedule: str = "iid"
+    force_threshold_block_episodes: int = 25
+    # Optional coupled (minimum, maximum) profiles.  Coupling prevents invalid
+    # or unrealistically broad windows when distinct material classes are used.
+    # An empty tuple falls back to the independent ranges below.
+    force_threshold_profiles_n: tuple[tuple[float, float], ...] = ()
+    # Negative samples a profile.  A non-negative value selects a deterministic
+    # hidden material profile for paired experiments without revealing that
+    # selection to the policy or VLM observation.
+    force_threshold_profile_index: int = -1
     minimum_force_randomization_range_n: tuple[float, float] = (0.05, 0.05)
     maximum_force_randomization_range_n: tuple[float, float] = (20.0, 20.0)
     force_violation_dwell_steps: int = 5

@@ -241,6 +241,12 @@ def main() -> None:
             active = torch.ones(args.num_envs, dtype=torch.bool, device=environment_device)
             previous_action: torch.Tensor | None = None
             batch_records: dict[int, dict[str, object]] = {}
+            bilateral_contact_steps = torch.zeros(
+                args.num_envs, dtype=torch.long, device=environment_device
+            )
+            bilateral_contact_force_sum_n = torch.zeros(
+                args.num_envs, dtype=torch.float64, device=environment_device
+            )
             policy_generator = torch.Generator(device=policy_device).manual_seed(
                 batch_seed + args.policy_seed_offset
             )
@@ -342,6 +348,17 @@ def main() -> None:
                         step += 1
 
                         flags = env.get_task_flags()
+                        bilateral_active = active & flags["bilateral_contact"]
+                        bilateral_mean_force_n = 0.5 * (
+                            flags["left_finger_force_n"]
+                            + flags["right_finger_force_n"]
+                        )
+                        bilateral_contact_steps += bilateral_active.to(torch.long)
+                        bilateral_contact_force_sum_n += torch.where(
+                            bilateral_active,
+                            bilateral_mean_force_n.to(torch.float64),
+                            torch.zeros_like(bilateral_contact_force_sum_n),
+                        )
                         terminal = (
                             flags["success"]
                             | flags["over_force"]
@@ -396,6 +413,16 @@ def main() -> None:
                                 "bilateral_contact": bool(
                                     flags["bilateral_contact"][index].item()
                                 ),
+                                "bilateral_contact_steps": int(
+                                    bilateral_contact_steps[index].item()
+                                ),
+                                "mean_bilateral_finger_force_n": float(
+                                    bilateral_contact_force_sum_n[index].item()
+                                    / max(
+                                        int(bilateral_contact_steps[index].item()),
+                                        1,
+                                    )
+                                ),
                             }
                         active &= ~just_finished
                         if step >= args.max_episode_steps or not bool(active.any().item()):
@@ -423,6 +450,14 @@ def main() -> None:
 
     successes = sum(record["outcome"] == "success" for record in outcomes)
     failures = len(outcomes) - successes
+    total_bilateral_contact_steps = sum(
+        int(record["bilateral_contact_steps"]) for record in outcomes
+    )
+    contact_phase_force_sum_n = sum(
+        float(record["mean_bilateral_finger_force_n"])
+        * int(record["bilateral_contact_steps"])
+        for record in outcomes
+    )
     lower, upper = wilson_interval(successes, len(outcomes))
     report = {
         "task": "TacEx-SealTwist-Torque-v0",
@@ -450,6 +485,14 @@ def main() -> None:
             name: failure_counts[name] / max(failures, 1)
             for name in ("under_force", "over_force", "alignment_failure")
         },
+        "bilateral_contact_steps": total_bilateral_contact_steps,
+        "contact_phase_mean_force_n": (
+            contact_phase_force_sum_n / max(total_bilateral_contact_steps, 1)
+        ),
+        "contact_phase_force_definition": (
+            "contact-step-weighted mean of (left_force_n + right_force_n) / 2 "
+            "over physics steps with bilateral contact"
+        ),
         "minimum_force_randomization_range_n": list(args.minimum_force_range),
         "maximum_force_randomization_range_n": list(args.maximum_force_range),
         "position_randomization_half_range_m": list(args.position_range),

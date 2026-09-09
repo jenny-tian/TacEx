@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "force_range_n",
+    "failure_cause",
+    "force_assessment",
+    "rationale",
+    "confidence"
+  ],
+  "properties": {
+    "force_range_n": {
+      "type": "array",
+      "items": {"type": "number"},
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "failure_cause": {
+      "type": "string",
+      "enum": [
+        "success",
+        "under_force",
+        "over_force",
+        "force_tracking",
+        "bilateral_imbalance",
+        "trajectory",
+        "alignment",
+        "no_contact",
+        "unknown"
+      ]
+    },
+    "force_assessment": {
+      "type": "string",
+      "enum": [
+        "too_low",
+        "safe",
+        "too_high",
+        "imbalanced",
+        "not_force_related",
+        "unknown"
+      ]
+    },
+    "rationale": {"type": "string", "minLength": 1, "maxLength": 600},
+    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0}
+  }
+}

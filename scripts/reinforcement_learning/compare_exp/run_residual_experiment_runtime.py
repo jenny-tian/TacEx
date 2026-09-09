@@ -300,6 +300,9 @@ def main(
         "residual_scale": args_cli.residual_scale,
         "residual_contact_gate": args_cli.residual_contact_gate,
         "residual_action_l2_weight": args_cli.residual_action_l2_weight,
+        "initial_log_std": float(
+            agent_cfg.get("network", {}).get("initial_log_std", -3.0)
+        ),
         "bc_replan_steps": residual.replan_steps,
         "residual_indices": [0, 1, 2, 9],
         "residual_contract_version": CLEAN_RESIDUAL_CONTRACT_VERSION,

@@ -60,6 +60,15 @@ class SealTwistEnv(LabPickEnv):
         self.maximum_force_threshold_n = torch.full(
             (self.num_envs,), self.cfg.maximum_finger_force_n, device=self.device
         )
+        self.force_threshold_profile_index = torch.full(
+            (self.num_envs,), -1, dtype=torch.long, device=self.device
+        )
+        self.force_threshold_reset_count = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self._force_threshold_initialized = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
         self.episode_expert_target_torque_nm = torch.full(
             (self.num_envs,), self.cfg.expert_target_torque_nm, device=self.device
         )
@@ -394,13 +403,18 @@ class SealTwistEnv(LabPickEnv):
             self.cfg.torque_window_nm[1],
         )
         hold = self.expert_phase == 5
-        under_force_now = hold & (
-            (minimum_finger_force < self.minimum_force_threshold_n)
-            | (self.seal_torque_nm < self.cfg.torque_window_nm[0])
+        below_minimum_force_now = hold & (
+            minimum_finger_force < self.minimum_force_threshold_n
         )
-        over_force_now = (self.expert_phase >= 3) & (
-            (maximum_finger_force > self.maximum_force_threshold_n)
-            | (self.seal_torque_nm > upper + self.cfg.over_torque_margin_nm)
+        above_maximum_force_now = (self.expert_phase >= 3) & (
+            maximum_finger_force > self.maximum_force_threshold_n
+        )
+        under_force_now = below_minimum_force_now | (
+            hold & (self.seal_torque_nm < self.cfg.torque_window_nm[0])
+        )
+        over_force_now = above_maximum_force_now | (
+            (self.expert_phase >= 3)
+            & (self.seal_torque_nm > upper + self.cfg.over_torque_margin_nm)
         )
         alignment_failure_now = hold & ~aligned
         self.under_force_dwell[:] = torch.where(
@@ -453,6 +467,12 @@ class SealTwistEnv(LabPickEnv):
             "minimum_force_threshold_n": self.minimum_force_threshold_n.clone(),
             "maximum_force_threshold_n": self.maximum_force_threshold_n.clone(),
             "within_force_window": within_force_window,
+            # These two diagnostic labels expose the direction of a terminal
+            # constraint violation, never the hidden numeric thresholds.  The
+            # distinction matters because the legacy under/over flags also
+            # include torque failures.
+            "below_minimum_force_threshold": below_minimum_force_now,
+            "above_maximum_force_threshold": above_maximum_force_now,
             "alignment_error_m": alignment_error_m,
             "aligned": aligned,
             "turn_angle_rad": self.turn_angle_rad.clone(),
@@ -554,15 +574,13 @@ class SealTwistEnv(LabPickEnv):
         self.peak_right_force_n[env_ids] = 0.0
         self._previous_angle_rad[env_ids] = 0.0
         if self.cfg.randomize_force_thresholds:
-            self.minimum_force_threshold_n[env_ids] = self._uniform_for_envs(
-                env_ids, self.cfg.minimum_force_randomization_range_n
-            )
-            self.maximum_force_threshold_n[env_ids] = self._uniform_for_envs(
-                env_ids, self.cfg.maximum_force_randomization_range_n
-            )
+            self._reset_force_thresholds(env_ids)
         else:
             self.minimum_force_threshold_n[env_ids] = self.cfg.minimum_finger_force_n
             self.maximum_force_threshold_n[env_ids] = self.cfg.maximum_finger_force_n
+            self.force_threshold_profile_index[env_ids] = -1
+            self._force_threshold_initialized[env_ids] = True
+            self.force_threshold_reset_count[env_ids] += 1
         if self.cfg.randomize_expert_targets:
             self.episode_expert_target_torque_nm[env_ids] = self._uniform_for_envs(
                 env_ids, self.cfg.expert_target_torque_randomization_range_nm
@@ -581,6 +599,99 @@ class SealTwistEnv(LabPickEnv):
         self._cached_flags = None
         self._cached_flags_step = -1
         self._update_seal_state()
+
+    def _reset_force_thresholds(self, env_ids: torch.Tensor) -> None:
+        """Apply the configured hidden-threshold temporal process.
+
+        The old implementation sampled every reset unconditionally.  That is
+        still available as ``iid``.  Persistent and block schedules retain a
+        material window long enough for episode outcomes to carry information
+        that an online force adapter can use.
+        """
+
+        schedule = str(self.cfg.force_threshold_schedule).lower()
+        if schedule not in {"iid", "persistent", "block"}:
+            raise ValueError(
+                "force_threshold_schedule must be one of: iid, persistent, block"
+            )
+        block_episodes = int(self.cfg.force_threshold_block_episodes)
+        if block_episodes < 1:
+            raise ValueError("force_threshold_block_episodes must be positive")
+        if schedule == "block" and int(self.cfg.force_threshold_profile_index) >= 0:
+            raise ValueError(
+                "block force-threshold schedule cannot use a fixed profile index"
+            )
+
+        initialized = self._force_threshold_initialized[env_ids]
+        if schedule == "iid":
+            resample = torch.ones_like(initialized)
+        elif schedule == "persistent":
+            resample = ~initialized
+        else:
+            counts = self.force_threshold_reset_count[env_ids]
+            resample = (~initialized) | (counts.remainder(block_episodes) == 0)
+
+        sample_ids = env_ids[resample]
+        if len(sample_ids) > 0:
+            self._sample_force_thresholds(sample_ids, avoid_current=schedule == "block")
+            self._force_threshold_initialized[sample_ids] = True
+        self.force_threshold_reset_count[env_ids] += 1
+
+    def _sample_force_thresholds(
+        self, env_ids: torch.Tensor, *, avoid_current: bool
+    ) -> None:
+        profiles = tuple(self.cfg.force_threshold_profiles_n)
+        if profiles:
+            profile_values = torch.as_tensor(
+                profiles, dtype=torch.float32, device=self.device
+            )
+            if profile_values.ndim != 2 or profile_values.shape[1] != 2:
+                raise ValueError(
+                    "force_threshold_profiles_n must contain (minimum, maximum) pairs"
+                )
+            if bool(torch.any(profile_values[:, 0] >= profile_values[:, 1]).item()):
+                raise ValueError("every force-threshold profile must satisfy minimum < maximum")
+            profile_count = int(profile_values.shape[0])
+            configured_index = int(self.cfg.force_threshold_profile_index)
+            if configured_index >= profile_count:
+                raise ValueError(
+                    "force_threshold_profile_index is outside force_threshold_profiles_n"
+                )
+            if configured_index >= 0:
+                sampled = torch.full(
+                    (len(env_ids),), configured_index, dtype=torch.long, device=self.device
+                )
+            else:
+                sampled = torch.randint(profile_count, (len(env_ids),), device=self.device)
+            if avoid_current and configured_index < 0 and profile_count > 1:
+                current = self.force_threshold_profile_index[env_ids]
+                has_current = current >= 0
+                # Choose uniformly among all profiles except the current one.
+                alternative = torch.randint(
+                    profile_count - 1, (len(env_ids),), device=self.device
+                )
+                alternative += (alternative >= current.clamp_min(0)).long()
+                sampled = torch.where(has_current, alternative, sampled)
+            self.force_threshold_profile_index[env_ids] = sampled
+            selected = profile_values[sampled]
+            self.minimum_force_threshold_n[env_ids] = selected[:, 0]
+            self.maximum_force_threshold_n[env_ids] = selected[:, 1]
+            return
+
+        minimum = self._uniform_for_envs(
+            env_ids, self.cfg.minimum_force_randomization_range_n
+        )
+        maximum = self._uniform_for_envs(
+            env_ids, self.cfg.maximum_force_randomization_range_n
+        )
+        if bool(torch.any(minimum >= maximum).item()):
+            raise ValueError(
+                "sampled minimum force threshold must be below maximum; use coupled "
+                "force_threshold_profiles_n when the independent ranges overlap"
+            )
+        self.minimum_force_threshold_n[env_ids] = minimum
+        self.maximum_force_threshold_n[env_ids] = maximum
+        self.force_threshold_profile_index[env_ids] = -1
 
     def _uniform_for_envs(
         self, env_ids: torch.Tensor, value_range: tuple[float, float]
