@@ -16,7 +16,11 @@ from tacex import GelSightSensor
 from tacex_tasks.lab_pick.grasp_geometry import centered_tool_target, vector_in_local_frame
 
 from .grape_pick_env_cfg import GrapePickEnvCfg
-from .physics import compute_stem_tether_force, update_threshold_dwell
+from .physics import (
+    compute_stem_restoring_torque,
+    compute_stem_tether_force,
+    update_threshold_dwell,
+)
 
 
 class GrapePickEnv(DirectRLEnv):
@@ -84,6 +88,10 @@ class GrapePickEnv(DirectRLEnv):
         )
         self.stem_tension_n = torch.zeros(self.num_envs, device=self.device)
         self.stem_extension_m = torch.zeros(self.num_envs, device=self.device)
+        self.stem_rotation_error_rad = torch.zeros(self.num_envs, device=self.device)
+        self.stem_restoring_torque_nm = torch.zeros(self.num_envs, device=self.device)
+        self.peak_stem_rotation_error_rad = torch.zeros(self.num_envs, device=self.device)
+        self.peak_stem_restoring_torque_nm = torch.zeros(self.num_envs, device=self.device)
         self.detach_dwell = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.damage_dwell = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.slip_dwell = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
@@ -328,6 +336,7 @@ class GrapePickEnv(DirectRLEnv):
         self._cached_flags_step = -1
 
     def _update_stem_tether(self):
+        self._enforce_stem_rotation_lock()
         force_w, raw_tension, extension = compute_stem_tether_force(
             self.grape.data.root_pos_w,
             self.grape.data.root_lin_vel_w,
@@ -353,10 +362,60 @@ class GrapePickEnv(DirectRLEnv):
         self.stem_extension_m[:] = torch.where(self.stem_attached, extension, torch.zeros_like(extension))
         self.peak_stem_tension_n[:] = torch.maximum(self.peak_stem_tension_n, filtered)
 
-        force_w = torch.where(self.stem_attached.unsqueeze(-1), force_w, torch.zeros_like(force_w))
-        force_b = math_utils.quat_apply(math_utils.quat_inv(self.grape.data.root_quat_w), force_w)
-        zero_torque = torch.zeros_like(force_b)
-        self.grape.set_external_force_and_torque(force_b.unsqueeze(1), zero_torque.unsqueeze(1))
+        current_quat_w = self.grape.data.root_quat_w.clone()
+        torque_w, rotation_error = compute_stem_restoring_torque(
+            current_quat_w,
+            self.grape_reset_quat_w,
+            self.grape.data.root_ang_vel_w,
+            stiffness_nm_per_rad=self.cfg.stem_angular_stiffness_nm_per_rad,
+            damping_nm_s_per_rad=self.cfg.stem_angular_damping_nm_s_per_rad,
+            max_torque_nm=self.cfg.stem_max_restoring_torque_nm,
+        )
+        attached = self.stem_attached.unsqueeze(-1)
+        force_w = torch.where(attached, force_w, torch.zeros_like(force_w))
+        torque_w = torch.where(attached, torque_w, torch.zeros_like(torque_w))
+        self.stem_rotation_error_rad[:] = torch.where(
+            self.stem_attached, rotation_error, torch.zeros_like(rotation_error)
+        )
+        restoring_torque = torch.linalg.vector_norm(torque_w, dim=-1)
+        self.stem_restoring_torque_nm[:] = restoring_torque
+        self.peak_stem_rotation_error_rad[:] = torch.maximum(
+            self.peak_stem_rotation_error_rad, self.stem_rotation_error_rad
+        )
+        self.peak_stem_restoring_torque_nm[:] = torch.maximum(
+            self.peak_stem_restoring_torque_nm, restoring_torque
+        )
+        force_b = math_utils.quat_apply(math_utils.quat_inv(current_quat_w), force_w)
+        torque_b = math_utils.quat_apply(
+            math_utils.quat_inv(current_quat_w), torque_w
+        )
+        self.grape.set_external_force_and_torque(force_b.unsqueeze(1), torque_b.unsqueeze(1))
+
+    def _enforce_stem_rotation_lock(self):
+        """Project attached fruit back onto the pedicel's rotational constraint."""
+
+        if not self.cfg.stem_lock_rotation_while_attached:
+            return
+        attached_ids = torch.nonzero(self.stem_attached, as_tuple=False).squeeze(-1)
+        if len(attached_ids) == 0:
+            return
+        _, rotation_error = compute_stem_restoring_torque(
+            self.grape.data.root_quat_w,
+            self.grape_reset_quat_w,
+            self.grape.data.root_ang_vel_w,
+            stiffness_nm_per_rad=0.0,
+            damping_nm_s_per_rad=0.0,
+            max_torque_nm=0.0,
+        )
+        self.stem_rotation_error_rad[attached_ids] = rotation_error[attached_ids]
+        self.peak_stem_rotation_error_rad[attached_ids] = torch.maximum(
+            self.peak_stem_rotation_error_rad[attached_ids],
+            rotation_error[attached_ids],
+        )
+        locked_state = self.grape.data.root_state_w[attached_ids].clone()
+        locked_state[:, 3:7] = self.grape_reset_quat_w[attached_ids]
+        locked_state[:, 10:13] = 0.0
+        self.grape.write_root_state_to_sim(locked_state, env_ids=attached_ids)
 
     @staticmethod
     def _force_from_sensor(sensor: ContactSensor, num_envs: int, device: str) -> torch.Tensor:
@@ -374,6 +433,9 @@ class GrapePickEnv(DirectRLEnv):
         left_pos_w = self._robot.data.body_link_pos_w[:, self._left_pad_body_idx]
         right_pos_w = self._robot.data.body_link_pos_w[:, self._right_pad_body_idx]
         closing_axis_w = F.normalize(right_pos_w - left_pos_w, dim=-1, eps=1.0e-8)
+        closing_axis_b = math_utils.quat_apply(
+            math_utils.quat_inv(self._robot.data.root_link_quat_w), closing_axis_w
+        )
         left_normal_n = torch.abs(torch.sum(left_force_w * closing_axis_w, dim=-1))
         right_normal_n = torch.abs(torch.sum(right_force_w * closing_axis_w, dim=-1))
         grip_force_n = torch.maximum(left_normal_n, right_normal_n)
@@ -384,6 +446,7 @@ class GrapePickEnv(DirectRLEnv):
             "right_normal_force_n": right_normal_n,
             "grip_force_n": grip_force_n,
             "net_force_n": torch.linalg.norm(left_force_w + right_force_w, dim=-1),
+            "closing_axis_b": closing_axis_b,
             "bilateral_contact": (left_normal_n >= self.cfg.bilateral_contact_threshold_n)
             & (right_normal_n >= self.cfg.bilateral_contact_threshold_n),
         }
@@ -437,6 +500,7 @@ class GrapePickEnv(DirectRLEnv):
         return torch.cat((force_b, torque_b), dim=-1).detach().clone().float()
 
     def _compute_task_flags(self) -> dict[str, torch.Tensor]:
+        self._enforce_stem_rotation_lock()
         metrics = self.get_contact_force_metrics()
         grip_force_n = metrics["grip_force_n"]
         obstacle_contact_force_n = self.get_obstacle_contact_force()
@@ -483,6 +547,8 @@ class GrapePickEnv(DirectRLEnv):
             "detached": (~self.stem_attached).clone(),
             "stem_tension_n": self.stem_tension_n.clone(),
             "stem_extension_m": self.stem_extension_m.clone(),
+            "stem_rotation_error_rad": self.stem_rotation_error_rad.clone(),
+            "stem_restoring_torque_nm": self.stem_restoring_torque_nm.clone(),
             "detach_threshold_n": self.detach_threshold_n.clone(),
             "damage_threshold_n": self.damage_threshold_n.clone(),
             "crushed": self.crushed.clone(),
@@ -619,6 +685,10 @@ class GrapePickEnv(DirectRLEnv):
             self.damage_threshold_n[env_ids] = self.cfg.damage_grip_force_threshold_n
         self.stem_tension_n[env_ids] = 0.0
         self.stem_extension_m[env_ids] = 0.0
+        self.stem_rotation_error_rad[env_ids] = 0.0
+        self.stem_restoring_torque_nm[env_ids] = 0.0
+        self.peak_stem_rotation_error_rad[env_ids] = 0.0
+        self.peak_stem_restoring_torque_nm[env_ids] = 0.0
         self.detach_dwell[env_ids] = 0
         self.damage_dwell[env_ids] = 0
         self.slip_dwell[env_ids] = 0

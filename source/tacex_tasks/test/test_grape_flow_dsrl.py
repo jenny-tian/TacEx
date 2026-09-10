@@ -114,6 +114,29 @@ def test_force_controller_changes_only_gripper_width():
     assert bool(diagnostics.safety_override.all())
 
 
+def test_force_controller_accepts_a_lower_privileged_safety_limit_without_changing_target():
+    controller = control.GrapeForceController(
+        control.ForceRange(2.2, 2.8),
+        control.ForceControllerConfig(hard_force_limit_n=3.1),
+    )
+    action = torch.zeros(1, 10)
+    action[:, 9] = 0.020
+
+    executed, diagnostics = controller.control(
+        action,
+        contact_force_n=torch.tensor([2.71]),
+        bilateral_contact=torch.tensor([True]),
+        dt_s=1.0 / 120.0,
+        safety_force_limit_n=2.70,
+    )
+
+    assert controller.target_range == control.ForceRange(2.2, 2.8)
+    assert diagnostics.safety_override.item()
+    torch.testing.assert_close(diagnostics.safety_threshold_n, torch.tensor([2.70]))
+    assert executed[0, 9] > action[0, 9]
+    torch.testing.assert_close(executed[:, :9], action[:, :9], rtol=0.0, atol=0.0)
+
+
 def test_force_controller_preserves_flow_width_before_physical_contact():
     controller = control.GrapeForceController(control.ForceRange(2.9, 3.2))
     first = torch.zeros(2, 10)

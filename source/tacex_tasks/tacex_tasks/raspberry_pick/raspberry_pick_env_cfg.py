@@ -140,6 +140,11 @@ class RaspberryPickEnvCfg(GrapePickEnvCfg):
     stem_stiffness_n_per_m: float = 95.0
     stem_damping_n_s_per_m: float = 0.24
     stem_max_tension_n: float = 4.0
+    # The simplified pedicel has no articulated rotational joint.  Lock its
+    # rotational degrees of freedom while attached so contact torque is
+    # transmitted to the vine instead of spinning the fruit freely.  Linear
+    # tether motion and force-based detachment remain unchanged.
+    stem_lock_rotation_while_attached: bool = True
 
     # Raspberries are softer and detach under lower load than the grape proxy.
     detach_force_threshold_n: float = 1.40
@@ -197,6 +202,7 @@ class RaspberryPickEnvCfg(GrapePickEnvCfg):
                 solver_position_iteration_count=64,
                 solver_velocity_iteration_count=4,
                 max_depenetration_velocity=0.4,
+                max_angular_velocity=2.0,
                 disable_gravity=False,
             ),
             mass_props=sim_utils.MassPropertiesCfg(mass=grape_mass_kg),

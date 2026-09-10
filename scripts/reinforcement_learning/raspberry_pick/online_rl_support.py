@@ -8,7 +8,7 @@ unit tests without starting the simulator.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Mapping, Sequence
 
 import torch
 
@@ -46,6 +46,130 @@ RASPBERRY_PROFILES: dict[str, RaspberryProfile] = {
     "delicate": RaspberryProfile("delicate", 0.68, 2.60, 82.0, 0.21),
     "firm": RaspberryProfile("firm", 0.92, 3.10, 112.0, 0.28),
 }
+
+
+def should_call_vlm(
+    *, force_range_source: str, call_policy: str, outcome: str
+) -> bool:
+    """Return whether an episode should trigger an actual VLM request."""
+
+    if call_policy not in {"every_episode", "failure_only"}:
+        raise ValueError(f"unsupported VLM call policy: {call_policy}")
+    if force_range_source != "vlm":
+        return False
+    return call_policy == "every_episode" or outcome != "success"
+
+
+def validate_agent_checkpoint_contract(
+    checkpoint: Mapping[str, object],
+    *,
+    target_method: str,
+    target_contract: str,
+    dsrl_contract: str,
+    base_checkpoint_sha256: str,
+    expected_observation_dim: int,
+    expected_residual_mode: str,
+    evaluation_mode: bool,
+    allow_dsrl_for_controller_only_oracle: bool,
+    allow_dsrl_for_oracle_training_branch: bool = False,
+) -> str:
+    """Validate native loading or an explicit shared-actor oracle ablation.
+
+    A controller-only oracle evaluation may reuse a trained ``dsrl_only`` actor
+    only when evaluation is deterministic and update-free.  The exception is
+    deliberately narrow: it cannot initialize another training run, cannot
+    load a frozen-zero residual checkpoint, and must preserve the actor input
+    contract and base policy.  The return value is recorded in the run summary.
+    """
+
+    if checkpoint.get("base_checkpoint_sha256") != str(base_checkpoint_sha256):
+        raise ValueError("residual checkpoint was trained with a different base policy")
+    if int(checkpoint.get("actor_observation_dim", -1)) != int(expected_observation_dim):
+        raise ValueError("residual checkpoint actor observation dimension does not match")
+    if checkpoint.get("residual_mode") != str(expected_residual_mode):
+        raise ValueError("residual checkpoint mode does not match")
+
+    source_method = checkpoint.get("method")
+    source_contract = checkpoint.get("contract")
+    if source_method == target_method and source_contract == target_contract:
+        return "native_method_checkpoint"
+
+    shared_actor = (
+        bool(allow_dsrl_for_controller_only_oracle)
+        and bool(evaluation_mode)
+        and target_method == "oracle_force_dsrl"
+        and source_method == "dsrl_only"
+        and source_contract == dsrl_contract
+        and not bool(checkpoint.get("dsrl_frozen"))
+    )
+    if shared_actor:
+        return "shared_dsrl_actor_controller_only_oracle_evaluation"
+
+    shared_training_history = (
+        bool(allow_dsrl_for_oracle_training_branch)
+        and not bool(evaluation_mode)
+        and target_method == "oracle_force_dsrl"
+        and source_method == "dsrl_only"
+        and source_contract == dsrl_contract
+        and not bool(checkpoint.get("dsrl_frozen"))
+    )
+    if shared_training_history:
+        return "shared_dsrl_training_history_oracle_branch"
+
+    raise ValueError("residual checkpoint contract/method does not match this run")
+
+
+def validate_training_branch_checkpoint(
+    checkpoint: Mapping[str, object],
+    *,
+    resume_episode: int,
+    training_seed: int,
+) -> int:
+    """Validate the episode/replay state needed for an online-training branch.
+
+    The returned integer is the cumulative transition count at the branch
+    point.  Network and optimizer compatibility remains the responsibility of
+    :func:`validate_agent_checkpoint_contract` and the agent loader.
+    """
+
+    resume_episode = int(resume_episode)
+    if resume_episode < 1:
+        raise ValueError("training branch resume episode must be positive")
+    if int(checkpoint.get("completed_episodes", -1)) != resume_episode:
+        raise ValueError("checkpoint completed-episode count does not match resume episode")
+    if int(checkpoint.get("training_seed", -1)) != int(training_seed):
+        raise ValueError("checkpoint training seed does not match branch seed")
+
+    decisions = checkpoint.get("force_range_decisions")
+    if not isinstance(decisions, (list, tuple)) or len(decisions) != resume_episode:
+        raise ValueError("checkpoint force-decision history does not match resume episode")
+    for index, decision in enumerate(decisions):
+        if not isinstance(decision, Mapping):
+            raise ValueError("checkpoint force-decision history is malformed")
+        if int(decision.get("completed_episode_index", -1)) != index:
+            raise ValueError("checkpoint force-decision history is non-contiguous")
+        if int(decision.get("applies_to_episode_index", -1)) != index + 1:
+            raise ValueError("checkpoint force-decision application index is invalid")
+
+    current_range = checkpoint.get("current_force_range_n")
+    if not isinstance(current_range, (list, tuple)):
+        raise ValueError("checkpoint current force range is missing")
+    _validate_range("checkpoint current_force_range_n", current_range)
+
+    replay_state = checkpoint.get("replay_state")
+    if not isinstance(replay_state, Mapping):
+        raise ValueError("training branch checkpoint is missing replay state")
+    replay_size = int(replay_state.get("size", -1))
+    replay_capacity = int(replay_state.get("capacity", -1))
+    replay_position = int(replay_state.get("position", -1))
+    if replay_capacity < 1 or not 0 <= replay_size <= replay_capacity:
+        raise ValueError("checkpoint replay size/capacity is invalid")
+    if not 0 <= replay_position < replay_capacity:
+        raise ValueError("checkpoint replay position is invalid")
+    replay_transitions = int(checkpoint.get("replay_transitions", -1))
+    if replay_transitions < replay_size:
+        raise ValueError("checkpoint replay transition count is inconsistent")
+    return replay_transitions
 
 
 def theoretical_oracle_force_range(
@@ -176,7 +300,7 @@ def guard_force_proposal(
         # the peak load never to enter the band.  A low tension/no-detach result
         # with force already in band therefore cannot authorize an increase.
         under_force = (
-            outcome == "no_detach"
+            outcome in {"no_detach", "no_detach_with_contact"}
             and stronger < current_low - 0.03
             and float(peak_grip_force_n) < current_low + 0.02
         )
@@ -321,6 +445,91 @@ class SemanticXYResidualLayout:
         scale = correction.new_tensor(self.translation_scale_m)
         result[:, :, :2] += correction.clamp(-1.0, 1.0)[:, None, :] * scale
         return result
+
+
+@dataclass(frozen=True)
+class BottleStyleLateralResidualLayout:
+    """One bounded residual along the gripper closing axis.
+
+    This mirrors the successful SealTwist DSRL design: the learned coordinate
+    has direct millimetre-scale physical authority instead of being routed
+    through a weak Flow-latent channel.
+    """
+
+    maximum_offset_m: float = 0.006
+
+    def __post_init__(self) -> None:
+        if self.maximum_offset_m <= 0.0:
+            raise ValueError("maximum_offset_m must be positive")
+
+    @property
+    def correction_dim(self) -> int:
+        return 1
+
+    def apply(
+        self,
+        action_chunk: torch.Tensor,
+        correction: torch.Tensor,
+        closing_axis_b: torch.Tensor,
+    ) -> torch.Tensor:
+        if action_chunk.ndim != 3 or action_chunk.shape[-1] != 10:
+            raise ValueError("action_chunk must have shape [B,H,10]")
+        if correction.ndim != 2 or correction.shape != (len(action_chunk), 1):
+            raise ValueError("correction must have shape [B,1]")
+        axis = torch.as_tensor(
+            closing_axis_b, dtype=action_chunk.dtype, device=action_chunk.device
+        )
+        if axis.shape != (len(action_chunk), 3):
+            raise ValueError("closing_axis_b must have shape [B,3]")
+        norm = torch.linalg.vector_norm(axis, dim=-1, keepdim=True)
+        if bool((norm <= 1.0e-8).any()):
+            raise ValueError("closing_axis_b must be non-zero")
+        axis = axis / norm
+        offset = correction.clamp(-1.0, 1.0)[:, 0] * float(self.maximum_offset_m)
+        result = action_chunk.clone()
+        result[:, :, :3] += offset[:, None, None] * axis[:, None, :]
+        return result
+
+
+def force_balance_prior_target(
+    *,
+    left_force_n: float,
+    right_force_n: float,
+    force_scale_n: float,
+    gain: float,
+    limit: float,
+) -> float:
+    """Return the bounded closing-axis prior used by bottle-style DSRL."""
+
+    if force_scale_n <= 0.0:
+        raise ValueError("force_scale_n must be positive")
+    if min(gain, limit) < 0.0:
+        raise ValueError("gain and limit must be non-negative")
+    normalized_imbalance = (float(left_force_n) - float(right_force_n)) / float(
+        force_scale_n
+    )
+    return max(-float(limit), min(float(limit), -float(gain) * normalized_imbalance))
+
+
+def exploration_scale_for_episode(
+    *,
+    episode_index: int,
+    anneal_episodes: int,
+    exploration_start: float,
+    exploration_end: float,
+) -> float:
+    """Linearly anneal exploration, then hold the final scale."""
+
+    if episode_index < 0:
+        raise ValueError("episode_index must be non-negative")
+    if anneal_episodes < 1:
+        raise ValueError("anneal_episodes must be positive")
+    if min(exploration_start, exploration_end) < 0.0:
+        raise ValueError("exploration scales must be non-negative")
+    progress = min(episode_index / max(anneal_episodes - 1, 1), 1.0)
+    if progress >= 1.0:
+        return float(exploration_end)
+    return float(exploration_start + progress * (exploration_end - exploration_start))
 
 
 def residual_is_active(

@@ -247,6 +247,111 @@ def test_semantic_xy_residual_cannot_change_pull_or_gripper_channels():
     torch.testing.assert_close(result[0, :, 2:], torch.zeros(3, 8))
 
 
+def test_bottle_lateral_residual_is_bounded_along_normalized_closing_axis():
+    support = load_support_module()
+    layout = support.BottleStyleLateralResidualLayout(maximum_offset_m=0.006)
+    chunk = torch.zeros(2, 3, 10)
+    correction = torch.tensor(((2.0,), (-0.5,)))
+    closing_axis = torch.tensor(((0.0, 2.0, 0.0), (3.0, 0.0, 4.0)))
+
+    result = layout.apply(chunk, correction, closing_axis)
+
+    torch.testing.assert_close(result[0, 0, :3], torch.tensor((0.0, 0.006, 0.0)))
+    torch.testing.assert_close(
+        result[1, 0, :3], torch.tensor((-0.0018, 0.0, -0.0024))
+    )
+    torch.testing.assert_close(result[:, 0], result[:, 2])
+    torch.testing.assert_close(result[:, :, 3:], torch.zeros(2, 3, 7))
+
+
+def test_bottle_lateral_residual_rejects_invalid_shapes_and_zero_axis():
+    support = load_support_module()
+    layout = support.BottleStyleLateralResidualLayout()
+
+    invalid_inputs = (
+        (torch.zeros(1, 3, 9), torch.zeros(1, 1), torch.ones(1, 3)),
+        (torch.zeros(1, 3, 10), torch.zeros(1, 2), torch.ones(1, 3)),
+        (torch.zeros(1, 3, 10), torch.zeros(1, 1), torch.ones(1, 2)),
+        (torch.zeros(1, 3, 10), torch.zeros(1, 1), torch.zeros(1, 3)),
+    )
+    for arguments in invalid_inputs:
+        try:
+            layout.apply(*arguments)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"expected invalid lateral residual input: {arguments}")
+
+
+def test_force_balance_prior_opposes_terminal_force_imbalance():
+    support = load_support_module()
+
+    positive_left = support.force_balance_prior_target(
+        left_force_n=3.0,
+        right_force_n=1.0,
+        force_scale_n=3.2,
+        gain=0.5,
+        limit=0.2,
+    )
+    positive_right = support.force_balance_prior_target(
+        left_force_n=1.0,
+        right_force_n=3.0,
+        force_scale_n=3.2,
+        gain=0.5,
+        limit=0.2,
+    )
+
+    assert positive_left == -0.2
+    assert positive_right == 0.2
+
+
+def test_guard_accepts_contact_specific_no_detach_taxonomy():
+    support = load_support_module()
+    decision = support.guard_force_proposal(
+        current_range_n=(2.2, 2.8),
+        proposed_range_n=(2.4, 3.0),
+        physical_bounds_n=(1.2, 3.1),
+        outcome="no_detach_with_contact",
+        bilateral_contact_fraction=0.8,
+        mean_left_force_n=1.8,
+        mean_right_force_n=1.9,
+        peak_grip_force_n=1.95,
+        damage_threshold_n=3.1,
+        damage_risk_fraction=0.0,
+        recent_candidate_directions=("up",),
+        confirmations_required=2,
+        maximum_center_step_n=0.05,
+    )
+
+    assert decision.decision == "accept_confirmed_directional_evidence"
+    torch.testing.assert_close(
+        torch.tensor(decision.force_range_n), torch.tensor((2.25, 2.85))
+    )
+
+
+def test_bottle_exploration_anneals_then_stays_at_final_scale():
+    support = load_support_module()
+
+    assert support.exploration_scale_for_episode(
+        episode_index=0,
+        anneal_episodes=30,
+        exploration_start=1.0,
+        exploration_end=0.15,
+    ) == 1.0
+    assert support.exploration_scale_for_episode(
+        episode_index=29,
+        anneal_episodes=30,
+        exploration_start=1.0,
+        exploration_end=0.15,
+    ) == 0.15
+    assert support.exploration_scale_for_episode(
+        episode_index=99,
+        anneal_episodes=30,
+        exploration_start=1.0,
+        exploration_end=0.15,
+    ) == 0.15
+
+
 def test_persistent_profiles_are_coherent_and_fixed_profile_is_original_protocol():
     support = load_support_module()
     fixed = support.RASPBERRY_PROFILES["fixed"]
@@ -272,6 +377,19 @@ def test_oracle_force_range_uses_true_damage_threshold_with_fixed_safety_margin(
     assert oracle.source_damage_threshold_n == 2.6
     assert oracle.maximum_n < support.RASPBERRY_PROFILES["delicate"].damage_threshold_n
 
+    threshold_sweep_profile = support.RaspberryProfile(
+        name="fixed_damage_2p85",
+        detach_threshold_n=0.8,
+        damage_threshold_n=2.85,
+        stem_stiffness_n_per_m=95.0,
+        stem_damping_n_s_per_m=0.24,
+    )
+    threshold_oracle = support.theoretical_oracle_force_range(threshold_sweep_profile)
+    torch.testing.assert_close(
+        torch.tensor(threshold_oracle.as_tuple()), torch.tensor((2.05, 2.65))
+    )
+    assert threshold_oracle.source_damage_threshold_n == 2.85
+
 
 def test_oracle_force_range_rejects_invalid_contracts():
     support = load_support_module()
@@ -288,6 +406,148 @@ def test_oracle_force_range_rejects_invalid_contracts():
             pass
         else:
             raise AssertionError(f"expected invalid oracle contract to fail: {kwargs}")
+
+
+def test_controller_only_oracle_can_reuse_exact_dsrl_actor_only_for_evaluation():
+    support = load_support_module()
+    checkpoint = {
+        "method": "dsrl_only",
+        "contract": "dsrl_v2",
+        "base_checkpoint_sha256": "base-hash",
+        "actor_observation_dim": 17,
+        "residual_mode": "flow_latent",
+        "dsrl_frozen": False,
+    }
+
+    mode = support.validate_agent_checkpoint_contract(
+        checkpoint,
+        target_method="oracle_force_dsrl",
+        target_contract="oracle_v2",
+        dsrl_contract="dsrl_v2",
+        base_checkpoint_sha256="base-hash",
+        expected_observation_dim=17,
+        expected_residual_mode="flow_latent",
+        evaluation_mode=True,
+        allow_dsrl_for_controller_only_oracle=True,
+    )
+
+    assert mode == "shared_dsrl_actor_controller_only_oracle_evaluation"
+
+
+def test_controller_only_oracle_rejects_shared_actor_training_or_mismatch():
+    support = load_support_module()
+    checkpoint = {
+        "method": "dsrl_only",
+        "contract": "dsrl_v2",
+        "base_checkpoint_sha256": "base-hash",
+        "actor_observation_dim": 17,
+        "residual_mode": "flow_latent",
+        "dsrl_frozen": False,
+    }
+    common = {
+        "target_method": "oracle_force_dsrl",
+        "target_contract": "oracle_v2",
+        "dsrl_contract": "dsrl_v2",
+        "base_checkpoint_sha256": "base-hash",
+        "expected_observation_dim": 17,
+        "expected_residual_mode": "flow_latent",
+        "allow_dsrl_for_controller_only_oracle": True,
+    }
+
+    for overrides in (
+        {"evaluation_mode": False},
+        {"evaluation_mode": True, "expected_observation_dim": 18},
+        {"evaluation_mode": True, "base_checkpoint_sha256": "other"},
+    ):
+        try:
+            support.validate_agent_checkpoint_contract(
+                checkpoint,
+                **{**common, **overrides},
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"expected incompatible shared actor to fail: {overrides}")
+
+
+def test_oracle_training_branch_accepts_complete_dsrl_training_state():
+    support = load_support_module()
+    checkpoint = {
+        "method": "dsrl_only",
+        "contract": "dsrl_v2",
+        "base_checkpoint_sha256": "base-hash",
+        "actor_observation_dim": 17,
+        "residual_mode": "flow_latent",
+        "dsrl_frozen": False,
+        "completed_episodes": 2,
+        "training_seed": 1010000,
+        "force_range_decisions": [
+            {"completed_episode_index": 0, "applies_to_episode_index": 1},
+            {"completed_episode_index": 1, "applies_to_episode_index": 2},
+        ],
+        "current_force_range_n": [2.2, 2.8],
+        "replay_transitions": 125,
+        "replay_state": {
+            "capacity": 500,
+            "size": 125,
+            "position": 125,
+        },
+    }
+
+    mode = support.validate_agent_checkpoint_contract(
+        checkpoint,
+        target_method="oracle_force_dsrl",
+        target_contract="oracle_v2",
+        dsrl_contract="dsrl_v2",
+        base_checkpoint_sha256="base-hash",
+        expected_observation_dim=17,
+        expected_residual_mode="flow_latent",
+        evaluation_mode=False,
+        allow_dsrl_for_controller_only_oracle=False,
+        allow_dsrl_for_oracle_training_branch=True,
+    )
+    transitions = support.validate_training_branch_checkpoint(
+        checkpoint,
+        resume_episode=2,
+        training_seed=1010000,
+    )
+
+    assert mode == "shared_dsrl_training_history_oracle_branch"
+    assert transitions == 125
+
+
+def test_oracle_training_branch_rejects_incomplete_or_misaligned_history():
+    support = load_support_module()
+    checkpoint = {
+        "completed_episodes": 2,
+        "training_seed": 1010000,
+        "force_range_decisions": [
+            {"completed_episode_index": 0, "applies_to_episode_index": 1},
+            {"completed_episode_index": 1, "applies_to_episode_index": 2},
+        ],
+        "current_force_range_n": [2.2, 2.8],
+        "replay_transitions": 125,
+        "replay_state": {"capacity": 500, "size": 125, "position": 125},
+    }
+
+    for mutation in (
+        {"completed_episodes": 1},
+        {"training_seed": 1010001},
+        {"force_range_decisions": checkpoint["force_range_decisions"][:1]},
+        {"current_force_range_n": [2.8, 2.2]},
+        {"replay_state": None},
+        {"replay_transitions": 124},
+    ):
+        try:
+            support.validate_training_branch_checkpoint(
+                {**checkpoint, **mutation},
+                resume_episode=2,
+                training_seed=1010000,
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"expected invalid branch state to fail: {mutation}")
 
 
 def test_semantic_residual_stops_before_calibrated_pull_but_legacy_latent_remains_active():

@@ -176,6 +176,7 @@ class ForceControlDiagnostics:
     error_n: torch.Tensor
     command_width_m: torch.Tensor
     safety_override: torch.Tensor
+    safety_threshold_n: torch.Tensor
 
 
 class GrapeForceController:
@@ -224,6 +225,7 @@ class GrapeForceController:
         contact_force_n: torch.Tensor,
         bilateral_contact: torch.Tensor,
         dt_s: float,
+        safety_force_limit_n: float | torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, ForceControlDiagnostics]:
         config = self.config
         if policy_action.ndim != 2 or policy_action.shape[-1] != config.action_dim:
@@ -303,9 +305,29 @@ class GrapeForceController:
         width_rate = torch.where(
             settling, torch.clamp(width_rate, min=0.0), width_rate
         )
-        safety_threshold = min(
-            self.target_range.maximum_n, config.hard_force_limit_n
-        )
+        if safety_force_limit_n is None:
+            safety_threshold = torch.full_like(
+                measured,
+                min(self.target_range.maximum_n, config.hard_force_limit_n),
+            )
+        else:
+            safety_threshold = torch.as_tensor(
+                safety_force_limit_n,
+                dtype=policy_action.dtype,
+                device=policy_action.device,
+            ).reshape(-1)
+            if safety_threshold.numel() == 1:
+                safety_threshold = safety_threshold.expand_as(measured)
+            if len(safety_threshold) != len(measured):
+                raise ValueError("safety force limit batch does not match action batch")
+            if not bool(torch.isfinite(safety_threshold).all()) or bool(
+                (safety_threshold <= 0.0).any()
+            ):
+                raise ValueError("safety force limit must be finite and positive")
+            safety_threshold = torch.clamp(
+                safety_threshold,
+                max=float(config.hard_force_limit_n),
+            )
         safety_override = measured >= safety_threshold
         width_rate = torch.where(
             safety_override,
@@ -349,6 +371,7 @@ class GrapeForceController:
             error_n=error.detach().clone(),
             command_width_m=self._command_width.detach().clone(),
             safety_override=safety_override.detach().clone(),
+            safety_threshold_n=safety_threshold.detach().clone(),
         )
         return executed, diagnostics
 

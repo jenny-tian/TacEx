@@ -123,6 +123,12 @@ class GrapePickEnvCfg(DirectRLEnvCfg):
     stem_stiffness_n_per_m: float = 180.0
     stem_damping_n_s_per_m: float = 0.35
     stem_max_tension_n: float = 8.0
+    # Optional pedicel bending/torsion resistance.  Zero preserves the legacy
+    # translational-only grape tether; delicate-fruit variants may override it.
+    stem_angular_stiffness_nm_per_rad: float = 0.0
+    stem_angular_damping_nm_s_per_rad: float = 0.0
+    stem_max_restoring_torque_nm: float = 0.0
+    stem_lock_rotation_while_attached: bool = False
     detach_force_threshold_n: float = 3.0
     randomize_force_thresholds: bool = True
     # This calibrated range overlaps the learned policy's achievable pull

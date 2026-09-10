@@ -76,6 +76,69 @@ def test_threshold_requires_consecutive_dwell_steps():
     assert triggered.tolist() == [True, False]
 
 
+def test_stem_restoring_torque_resists_rotation_and_angular_velocity():
+    compute_torque = load_physics_module().compute_stem_restoring_torque
+
+    half_angle = torch.tensor(torch.pi / 4.0)
+    current = torch.tensor(
+        [[torch.cos(half_angle), 0.0, 0.0, torch.sin(half_angle)]]
+    )
+    rest = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+    angular_velocity = torch.tensor([[0.0, 0.0, 2.0]])
+    torque, error = compute_torque(
+        current,
+        rest,
+        angular_velocity,
+        stiffness_nm_per_rad=0.01,
+        damping_nm_s_per_rad=0.001,
+        max_torque_nm=1.0,
+    )
+
+    torch.testing.assert_close(error, torch.tensor([torch.pi / 2.0]))
+    torch.testing.assert_close(torque[:, :2], torch.zeros((1, 2)))
+    torch.testing.assert_close(
+        torque[:, 2], torch.tensor([-(0.01 * torch.pi / 2.0 + 0.002)])
+    )
+
+    # Quaternion sign must not change the physical restoring moment.
+    negative_torque, negative_error = compute_torque(
+        -current,
+        rest,
+        angular_velocity,
+        stiffness_nm_per_rad=0.01,
+        damping_nm_s_per_rad=0.001,
+        max_torque_nm=1.0,
+    )
+    torch.testing.assert_close(negative_torque, torque)
+    torch.testing.assert_close(negative_error, error)
+
+
+def test_stem_restoring_torque_is_bounded_and_zero_at_rest():
+    compute_torque = load_physics_module().compute_stem_restoring_torque
+    rest = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+
+    at_rest, error = compute_torque(
+        rest,
+        rest,
+        torch.zeros((1, 3)),
+        stiffness_nm_per_rad=0.01,
+        damping_nm_s_per_rad=0.001,
+        max_torque_nm=0.012,
+    )
+    torch.testing.assert_close(at_rest, torch.zeros((1, 3)))
+    torch.testing.assert_close(error, torch.zeros(1))
+
+    bounded, _ = compute_torque(
+        torch.tensor([[0.0, 1.0, 0.0, 0.0]]),
+        rest,
+        torch.tensor([[100.0, 0.0, 0.0]]),
+        stiffness_nm_per_rad=0.01,
+        damping_nm_s_per_rad=0.001,
+        max_torque_nm=0.012,
+    )
+    torch.testing.assert_close(torch.linalg.vector_norm(bounded, dim=-1), torch.tensor([0.012]))
+
+
 def test_task_uses_real_pad_contacts_without_virtual_force_fallback():
     root_package = (TASK_ROOT.parent / "__init__.py").read_text(encoding="utf-8")
     cfg = read("grape_pick_env_cfg.py")

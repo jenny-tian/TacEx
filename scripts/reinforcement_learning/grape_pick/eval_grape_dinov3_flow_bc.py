@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 import hashlib
 import importlib.util
 import json
@@ -63,6 +64,16 @@ parser.add_argument("--report", type=Path, required=True)
 parser.add_argument("--episodes", type=int, default=20)
 parser.add_argument("--num-envs", type=int, default=4)
 parser.add_argument("--seed", type=int, default=910000)
+parser.add_argument(
+    "--fixed-episode-seed",
+    action="store_true",
+    help="Reset every episode to --seed; requires --num-envs 1 and is intended for replay tests.",
+)
+parser.add_argument(
+    "--enhanced-determinism",
+    action="store_true",
+    help="Enable PhysX enhanced determinism for repeated single-seed evaluation.",
+)
 parser.add_argument("--max-episode-steps", type=int, default=790)
 parser.add_argument("--action-repeat", type=int, default=4)
 parser.add_argument("--chunk-execute-steps", type=int, default=1)
@@ -160,10 +171,28 @@ parser.add_argument("--video-camera", choices=("third", "wrist"), default="third
 parser.add_argument("--video-env-index", type=int, default=0)
 parser.add_argument("--video-fps", type=float, default=30.0)
 parser.add_argument("--video-stride", type=int, default=4)
+parser.add_argument(
+    "--two-stage-force-control",
+    action="store_true",
+    help=(
+        "Overlay oracle grip-force and pedicle-tension feedback on the frozen base policy. "
+        "The simulator thresholds are used only by the controller."
+    ),
+)
+parser.add_argument("--oracle-grip-damage-margin-n", type=float, default=0.20)
+parser.add_argument("--oracle-grip-range-width-n", type=float, default=0.60)
+parser.add_argument("--oracle-tension-margin-n", type=float, default=0.08)
+parser.add_argument("--contact-confirm-steps", type=int, default=3)
+parser.add_argument("--grip-stable-steps", type=int, default=6)
+parser.add_argument("--tension-kp-velocity-m-s-per-n", type=float, default=0.012)
+parser.add_argument("--maximum-pull-velocity-m-s", type=float, default=0.010)
+parser.add_argument("--maximum-pull-offset-m", type=float, default=0.060)
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 if args.episodes < 1 or args.num_envs < 1:
     parser.error("--episodes and --num-envs must be positive")
+if args.fixed_episode_seed and args.num_envs != 1:
+    parser.error("--fixed-episode-seed requires --num-envs 1")
 if args.action_repeat < 1 or args.chunk_execute_steps < 1:
     parser.error("--action-repeat and --chunk-execute-steps must be positive")
 if args.video_env_index < 0 or args.video_env_index >= args.num_envs:
@@ -174,6 +203,21 @@ if not 0.0 <= args.pull_z_start_phase < args.pull_z_ramp_end_phase <= 1.0:
     parser.error("pull Z phases must satisfy 0 <= start < ramp end <= 1")
 if not 0.0 <= args.late_gripper_start_phase <= 1.0:
     parser.error("--late-gripper-start-phase must be in [0, 1]")
+if args.two_stage_force_control:
+    if args.oracle_grip_damage_margin_n <= 0.0:
+        parser.error("--oracle-grip-damage-margin-n must be positive")
+    if args.oracle_grip_range_width_n <= 0.0:
+        parser.error("--oracle-grip-range-width-n must be positive")
+    if args.oracle_tension_margin_n <= 0.0:
+        parser.error("--oracle-tension-margin-n must be positive")
+    if args.grip_stable_steps < 1:
+        parser.error("--grip-stable-steps must be positive")
+    if args.contact_confirm_steps < 1:
+        parser.error("--contact-confirm-steps must be positive")
+    if args.randomize_force_thresholds and args.num_envs != 1:
+        parser.error(
+            "oracle two-stage control with randomized thresholds currently requires --num-envs 1"
+        )
 args.enable_cameras = True
 
 launcher = AppLauncher(args)
@@ -187,6 +231,12 @@ if str(BC_TRAINING_DIR) not in sys.path:
 
 import dinov3_flow as flow  # noqa: E402
 import train_bc as common  # noqa: E402
+from grape_force_control import ForceRange  # noqa: E402
+from two_stage_force_control import (  # noqa: E402
+    STAGE_NAMES,
+    TwoStageBerryForceController,
+    TwoStageForceControllerConfig,
+)
 if IS_RASPBERRY:
     from tacex_tasks.raspberry_pick.raspberry_pick_env import (  # noqa: E402
         RaspberryPickEnv as GrapePickEnv,
@@ -400,6 +450,7 @@ def main() -> None:
     if args.grape_position_range is not None:
         config.grape_position_randomization_m = tuple(args.grape_position_range)
     config.randomize_force_thresholds = args.randomize_force_thresholds
+    config.sim.physx.enable_enhanced_determinism = bool(args.enhanced_determinism)
     config.damage_force_randomization_range_n = tuple(args.damage_range)
     config.detach_force_randomization_range_n = tuple(args.detach_range)
     if args.damage_threshold_n is not None:
@@ -429,6 +480,22 @@ def main() -> None:
     if args.chunk_execute_steps > model.config.chunk_size:
         raise ValueError("--chunk-execute-steps exceeds checkpoint chunk size")
 
+    two_stage_controller: TwoStageBerryForceController | None = None
+    two_stage_config: TwoStageForceControllerConfig | None = None
+    if args.two_stage_force_control:
+        two_stage_config = TwoStageForceControllerConfig(
+            contact_confirm_steps=args.contact_confirm_steps,
+            grip_stable_steps=args.grip_stable_steps,
+            tension_kp_velocity_m_s_per_n=args.tension_kp_velocity_m_s_per_n,
+            maximum_pull_velocity_m_s=args.maximum_pull_velocity_m_s,
+            maximum_pull_offset_m=args.maximum_pull_offset_m,
+        )
+        # Reset below replaces this placeholder with the current episode's
+        # simulator-ground-truth target interval before any action is applied.
+        two_stage_controller = TwoStageBerryForceController(
+            ForceRange(1.0, 1.1), two_stage_config
+        )
+
     print("[INFO] Policy ready; starting closed-loop evaluation", flush=True)
     position_command_offset = torch.tensor(
         args.position_command_offset_m, dtype=torch.float32, device=device
@@ -454,8 +521,33 @@ def main() -> None:
         print(f"[VIDEO] Recording {args.video_camera} camera to {video_path}", flush=True)
     try:
         while len(records) < args.episodes and simulation_app.is_running():
-            batch_seed = args.seed + batch * args.num_envs
+            batch_seed = (
+                args.seed
+                if args.fixed_episode_seed
+                else args.seed + batch * args.num_envs
+            )
             env.reset(seed=batch_seed)
+            oracle_grip_range: ForceRange | None = None
+            oracle_tension_target_n: torch.Tensor | None = None
+            oracle_grip_safety_limit_n: torch.Tensor | None = None
+            if two_stage_controller is not None:
+                damage_threshold = env.damage_threshold_n.detach().clone()
+                detach_threshold = env.detach_threshold_n.detach().clone()
+                grip_high = float(damage_threshold[0].item()) - float(
+                    args.oracle_grip_damage_margin_n
+                )
+                grip_low = grip_high - float(args.oracle_grip_range_width_n)
+                if grip_low <= 0.0:
+                    raise ValueError("oracle grip range is not positive")
+                oracle_grip_range = ForceRange(grip_low, grip_high)
+                two_stage_controller.set_grip_target_range(oracle_grip_range)
+                two_stage_controller.reset()
+                oracle_tension_target_n = detach_threshold + float(
+                    args.oracle_tension_margin_n
+                )
+                oracle_grip_safety_limit_n = damage_threshold - 0.5 * float(
+                    args.oracle_grip_damage_margin_n
+                )
             active = torch.ones(args.num_envs, dtype=torch.bool, device=device)
             previous_action: torch.Tensor | None = None
             state_history: list[torch.Tensor] = []
@@ -464,6 +556,24 @@ def main() -> None:
             generator = torch.Generator(device=device).manual_seed(batch_seed + 909_731)
             physics_step = 0
             batch_records: dict[int, dict[str, Any]] = {}
+            force_stage_steps = torch.zeros(
+                (args.num_envs, len(STAGE_NAMES)), dtype=torch.long, device=device
+            )
+            force_grip_active_steps = torch.zeros(
+                args.num_envs, dtype=torch.long, device=device
+            )
+            force_safety_override_steps = torch.zeros(
+                args.num_envs, dtype=torch.long, device=device
+            )
+            force_pull_command_steps = torch.zeros(
+                args.num_envs, dtype=torch.long, device=device
+            )
+            maximum_controlled_pull_offset_m = torch.zeros(
+                args.num_envs, dtype=torch.float32, device=device
+            )
+            maximum_controlled_pull_velocity_m_s = torch.zeros(
+                args.num_envs, dtype=torch.float32, device=device
+            )
             min_gripper_object_distance_m = torch.full(
                 (args.num_envs,), float("inf"), device=device
             )
@@ -576,6 +686,46 @@ def main() -> None:
                             alpha = float(args.action_smoothing)
                             action = alpha * target + (1.0 - alpha) * previous_action
                         previous_action = action
+                        force_diagnostics = None
+                        if two_stage_controller is not None:
+                            assert oracle_tension_target_n is not None
+                            assert oracle_grip_safety_limit_n is not None
+                            force_metrics = env.get_contact_force_metrics()
+                            flags_before = env.get_task_flags()
+                            action, force_diagnostics = two_stage_controller.control(
+                                action,
+                                grip_force_n=force_metrics["grip_force_n"],
+                                bilateral_contact=force_metrics["bilateral_contact"],
+                                pedicle_tension_n=flags_before["stem_tension_n"],
+                                stem_attached=flags_before["stem_attached"],
+                                pull_direction=env.pull_direction_b,
+                                target_tension_n=oracle_tension_target_n,
+                                dt_s=float(env.physics_dt),
+                                grip_safety_limit_n=oracle_grip_safety_limit_n,
+                            )
+                            force_stage_steps.scatter_add_(
+                                1,
+                                force_diagnostics.stage[:, None],
+                                active.long()[:, None],
+                            )
+                            force_grip_active_steps += (
+                                force_diagnostics.grip.active & active
+                            ).long()
+                            force_safety_override_steps += (
+                                force_diagnostics.grip.safety_override & active
+                            ).long()
+                            force_pull_command_steps += (
+                                (force_diagnostics.pull_velocity_m_s.abs() > 1.0e-9)
+                                & active
+                            ).long()
+                            maximum_controlled_pull_offset_m = torch.maximum(
+                                maximum_controlled_pull_offset_m,
+                                force_diagnostics.pull_offset_m,
+                            )
+                            maximum_controlled_pull_velocity_m_s = torch.maximum(
+                                maximum_controlled_pull_velocity_m_s,
+                                force_diagnostics.pull_velocity_m_s.abs(),
+                            )
                         commanded_position_min_m = torch.minimum(
                             commanded_position_min_m, action[:, :3]
                         )
@@ -634,6 +784,15 @@ def main() -> None:
                                 "peak_stem_tension_n": float(
                                     env.peak_stem_tension_n[index].item()
                                 ),
+                                "peak_stem_rotation_error_deg": math.degrees(
+                                    float(env.peak_stem_rotation_error_rad[index].item())
+                                ),
+                                "peak_stem_restoring_torque_nm": float(
+                                    env.peak_stem_restoring_torque_nm[index].item()
+                                ),
+                                "final_stem_rotation_error_deg": math.degrees(
+                                    float(env.stem_rotation_error_rad[index].item())
+                                ),
                                 "min_gripper_object_distance_m": float(
                                     min_gripper_object_distance_m[index].item()
                                 ),
@@ -665,6 +824,38 @@ def main() -> None:
                                 ),
                                 "detach_threshold_n": float(
                                     env.detach_threshold_n[index].item()
+                                ),
+                                "two_stage_force_control": bool(
+                                    two_stage_controller is not None
+                                ),
+                                "oracle_grip_force_range_n": (
+                                    None
+                                    if oracle_grip_range is None
+                                    else oracle_grip_range.as_list()
+                                ),
+                                "oracle_tension_target_n": (
+                                    None
+                                    if oracle_tension_target_n is None
+                                    else float(oracle_tension_target_n[index].item())
+                                ),
+                                "force_stage_steps": {
+                                    name: int(force_stage_steps[index, stage].item())
+                                    for stage, name in enumerate(STAGE_NAMES)
+                                },
+                                "force_grip_active_steps": int(
+                                    force_grip_active_steps[index].item()
+                                ),
+                                "force_safety_override_steps": int(
+                                    force_safety_override_steps[index].item()
+                                ),
+                                "force_pull_command_steps": int(
+                                    force_pull_command_steps[index].item()
+                                ),
+                                "maximum_controlled_pull_offset_m": float(
+                                    maximum_controlled_pull_offset_m[index].item()
+                                ),
+                                "maximum_controlled_pull_velocity_m_s": float(
+                                    maximum_controlled_pull_velocity_m_s[index].item()
                                 ),
                             }
                         active &= ~just_finished
@@ -735,6 +926,23 @@ def main() -> None:
     report = {
         "task": TASK,
         "policy": "frozen_dinov3_tactile_conditional_flow_matching_bc",
+        "control": (
+            "oracle_two_stage_grip_and_pedicle_tension"
+            if two_stage_controller is not None
+            else "base_policy_only"
+        ),
+        "two_stage_force_controller_config": (
+            None if two_stage_config is None else asdict(two_stage_config)
+        ),
+        "oracle_grip_damage_margin_n": (
+            args.oracle_grip_damage_margin_n if two_stage_controller is not None else None
+        ),
+        "oracle_grip_range_width_n": (
+            args.oracle_grip_range_width_n if two_stage_controller is not None else None
+        ),
+        "oracle_tension_margin_n": (
+            args.oracle_tension_margin_n if two_stage_controller is not None else None
+        ),
         "contract": CONTRACT,
         "model_type": checkpoint["model_type"],
         "checkpoint": str(checkpoint_path),
@@ -744,7 +952,11 @@ def main() -> None:
         "state_fields": ["robot0_pos[10]", "finger_normal_force_n[2]"],
         "camera_views": ["wrist", "third"],
         "seed_start": args.seed,
+        "episode_seed_mode": "fixed" if args.fixed_episode_seed else "sequential",
+        "enhanced_determinism": bool(args.enhanced_determinism),
+        "num_envs": args.num_envs,
         "episodes": len(records),
+        "max_episode_steps": args.max_episode_steps,
         "successes": successes,
         "success_rate": successes / max(len(records), 1),
         "wilson_95_ci": wilson(successes, len(records)),
@@ -754,12 +966,17 @@ def main() -> None:
         "randomize_force_thresholds": args.randomize_force_thresholds,
         "fixed_damage_threshold_n": config.damage_grip_force_threshold_n,
         "fixed_detach_threshold_n": config.detach_force_threshold_n,
+        "stem_angular_stiffness_nm_per_rad": config.stem_angular_stiffness_nm_per_rad,
+        "stem_angular_damping_nm_s_per_rad": config.stem_angular_damping_nm_s_per_rad,
+        "stem_max_restoring_torque_nm": config.stem_max_restoring_torque_nm,
+        "stem_lock_rotation_while_attached": config.stem_lock_rotation_while_attached,
         f"randomize_{OBJECT_NAME}_pose": args.randomize_grape_pose,
         f"{OBJECT_NAME}_position_randomization_m": list(
             config.grape_position_randomization_m
         ),
         "action_repeat": args.action_repeat,
         "chunk_execute_steps": args.chunk_execute_steps,
+        "action_smoothing": args.action_smoothing,
         "position_command_offset_m": list(args.position_command_offset_m),
         "gripper_command_offset_m": args.gripper_command_offset_m,
         "late_gripper_max_width_m": args.late_gripper_max_width_m,
