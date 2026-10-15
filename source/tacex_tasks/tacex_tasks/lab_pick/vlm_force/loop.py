@@ -65,6 +65,11 @@ class EpisodeForceAdaptationLoop:
             prompt = str(getattr(self.advisor, "last_prompt", ""))
             row: dict[str, Any] = {
                 "schema_version": 1,
+                "advisor_class": type(self.advisor).__name__,
+                "advisor_model": getattr(self.advisor, "model", None),
+                "advisor_reasoning_effort": getattr(
+                    self.advisor, "reasoning_effort", None
+                ),
                 "advisor_call_index": len(self.history),
                 "episode": episode.to_dict(),
                 "history_size_before_call": len(history_before),
@@ -73,6 +78,7 @@ class EpisodeForceAdaptationLoop:
                 "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
                 "prompt": prompt,
                 "image_paths": [str(Path(path)) for path in image_paths],
+                "provider_call": getattr(self.advisor, "last_call_audit", None),
             }
             with self.log_path.open("a", encoding="utf-8") as stream:
                 stream.write(

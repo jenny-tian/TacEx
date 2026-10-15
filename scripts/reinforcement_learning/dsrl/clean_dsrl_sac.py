@@ -25,11 +25,19 @@ except ImportError:
 
 
 CLEAN_DSRL_CONTRACT_VERSION = 4
+SUPPORTED_CLEAN_DSRL_CONTRACT_VERSIONS = (3, 4)
 CLEAN_DSRL_CONTRACT_BUFFER = "_clean_dsrl_contract_version"
 
 
-def validate_absolute_dsrl_policy_state(policy_state: Mapping[str, object]) -> None:
-    """Reject checkpoints that predate the base-anchored tactile v4 contract."""
+def validate_absolute_dsrl_policy_state(
+    policy_state: Mapping[str, object],
+    *,
+    expected_version: int = CLEAN_DSRL_CONTRACT_VERSION,
+) -> None:
+    """Validate a checkpoint against an explicitly selected DSRL contract."""
+
+    if expected_version not in SUPPORTED_CLEAN_DSRL_CONTRACT_VERSIONS:
+        raise ValueError(f"Unsupported Clean DSRL contract version: {expected_version}.")
 
     if CLEAN_DSRL_CONTRACT_BUFFER not in policy_state:
         raise ValueError(
@@ -37,11 +45,11 @@ def validate_absolute_dsrl_policy_state(policy_state: Mapping[str, object]) -> N
             "contract: the policy has no contract-version marker."
         )
     version = torch.as_tensor(policy_state[CLEAN_DSRL_CONTRACT_BUFFER]).reshape(-1)
-    if version.numel() != 1 or int(version.item()) != CLEAN_DSRL_CONTRACT_VERSION:
+    if version.numel() != 1 or int(version.item()) != expected_version:
         received = version.tolist()
         raise ValueError(
-            "Clean DSRL checkpoint contract mismatch: expected base-anchored tactile "
-            f"v{CLEAN_DSRL_CONTRACT_VERSION}, received {received}."
+            "Clean DSRL checkpoint contract mismatch: expected "
+            f"v{expected_version}, received {received}."
         )
 
 
@@ -57,6 +65,7 @@ class CleanDSRLLayout:
     padding_mode: str = "repeat_last"
     tactile: int = 5
     residual_scale: float = 0.25
+    contract_version: int = CLEAN_DSRL_CONTRACT_VERSION
 
     def __post_init__(self) -> None:
         for name in (
@@ -84,6 +93,11 @@ class CleanDSRLLayout:
             raise ValueError("learned_noise_steps cannot exceed flow_horizon.")
         if self.padding_mode not in {"repeat_last", "zeros"}:
             raise ValueError("padding_mode must be 'repeat_last' or 'zeros'.")
+        if self.contract_version not in SUPPORTED_CLEAN_DSRL_CONTRACT_VERSIONS:
+            raise ValueError(
+                "contract_version must be one of "
+                f"{SUPPORTED_CLEAN_DSRL_CONTRACT_VERSIONS}."
+            )
         if not math.isfinite(self.residual_scale) or self.residual_scale < 0.0:
             raise ValueError("residual_scale must be finite and non-negative.")
 

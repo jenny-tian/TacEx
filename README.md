@@ -25,6 +25,15 @@ This fork, `jenny-tian/TacEx`, adds an IsaacLab LabPick data-collection pipeline
 The framework integrates multiple simulation approaches for VBTS's and aims to be modular and extendable.
 Components can be easily switched out, added and modified.
 
+## Episode-wise GPT-5.6-Sol force and torque adaptation
+
+The LabPick and SealTwist rollouts support a structured Codex CLI visual advisor
+using `gpt-5.6-sol` with high reasoning effort. In the audited protocol, the
+advisor runs once after every completed episode and proposes the single-finger
+contact-force interval for LabPick or the cap-tightening torque interval for
+SealTwist. See the [LabPick VLM/DSRL guide](scripts/reinforcement_learning/vlm_dsrl/README.md)
+and [SealTwist guide](scripts/demos/seal_twist/README.md) for reproducible commands.
+
 Currently, only the **GelSight Mini** is supported, but you can also easily add your own sensor (guide coming soon). We also plan to add more VBTS types later.
 
 ## Force-Constrained Grape Picking

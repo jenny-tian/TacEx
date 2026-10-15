@@ -2,9 +2,11 @@
 """Train SealTwist tactile DSRL with an online Codex visual advisor.
 
 The SAC actor learns a bounded semantic tool-Y correction on top of the frozen
-Flow Matching policy.  After every episode, Codex reads a source-grounded
-force/torque diagnostic image and structured trajectory summary, then proposes
-the fingertip-force interval used by the next episode's tactile projection.
+Flow Matching policy.  When enabled by the call policy, Codex reads a
+source-grounded force/torque diagnostic image and structured trajectory summary,
+then proposes the interval used by the next episode.  Torque adaptation changes
+only the policy's maximum turn angle and keeps the true success window hidden
+from the advisor.
 """
 
 from __future__ import annotations
@@ -66,6 +68,7 @@ if str(GRAPE_HELPERS) not in sys.path:
 
 DEFAULT_FLOW_CHECKPOINT = ROOT / "exp_report" / "bottle" / "checkpoints" / "flow_bc_6d_force_v5.pt"
 DEFAULT_SCHEMA = Path(__file__).with_name("codex_vlm_force_schema.json")
+DEFAULT_TORQUE_SCHEMA = Path(__file__).with_name("codex_vlm_torque_schema.json")
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--flow-checkpoint", type=Path, default=DEFAULT_FLOW_CHECKPOINT)
@@ -93,9 +96,9 @@ parser.add_argument(
     ),
 )
 parser.add_argument("--max-episode-steps", type=int, default=900)
-parser.add_argument("--chunk-execute-steps", type=int, default=4)
+parser.add_argument("--chunk-execute-steps", type=int, default=10)
 parser.add_argument("--action-repeat", type=int, default=4)
-parser.add_argument("--integration-steps", type=int, default=16)
+parser.add_argument("--integration-steps", type=int, default=10)
 parser.add_argument("--action-smoothing", type=float, default=0.35)
 parser.add_argument("--normalized-observation-clip", type=float, default=6.0)
 parser.add_argument("--noise-residual-scale", type=float, default=0.50)
@@ -166,6 +169,21 @@ parser.add_argument("--physical-force-bounds", type=float, nargs=2, default=(6.2
 parser.add_argument("--force-range-minimum-width", type=float, default=0.40)
 parser.add_argument("--force-range-smoothing", type=float, default=0.50)
 parser.add_argument(
+    "--adaptation-target",
+    choices=("force", "torque"),
+    default="force",
+    help="Quantity inferred by the episode-level VLM; force preserves the legacy protocol.",
+)
+parser.add_argument(
+    "--initial-torque-range-nm", type=float, nargs=2, default=(0.35, 0.50)
+)
+parser.add_argument(
+    "--physical-torque-bounds-nm", type=float, nargs=2, default=(0.10, 0.60)
+)
+parser.add_argument("--torque-range-minimum-width-nm", type=float, default=0.08)
+parser.add_argument("--torque-range-smoothing", type=float, default=1.0)
+parser.add_argument("--vlm-max-torque-center-step-nm", type=float, default=0.08)
+parser.add_argument(
     "--vlm-max-center-step-n",
     type=float,
     default=0.30,
@@ -214,8 +232,16 @@ parser.add_argument("--codex-cli", type=Path, default=None)
 parser.add_argument("--codex-model", default="gpt-5.6-sol")
 parser.add_argument("--codex-reasoning-effort", choices=("low", "medium", "high", "xhigh"), default="high")
 parser.add_argument("--codex-output-schema", type=Path, default=DEFAULT_SCHEMA)
+parser.add_argument(
+    "--codex-torque-output-schema", type=Path, default=DEFAULT_TORQUE_SCHEMA
+)
 parser.add_argument("--codex-timeout-s", type=float, default=300.0)
 parser.add_argument("--codex-max-attempts", type=int, default=3)
+parser.add_argument(
+    "--vlm-call-policy",
+    choices=("every_episode", "failure_only"),
+    default="every_episode",
+)
 parser.add_argument("--disable-vlm", action="store_true")
 parser.add_argument("--physx-contact-capacity", type=int, default=2**20)
 AppLauncher.add_app_launcher_args(parser)
@@ -240,6 +266,10 @@ if args.codex_max_attempts < 1:
     parser.error("codex-max-attempts must be positive")
 if args.vlm_max_center_step_n < 0.0:
     parser.error("vlm-max-center-step-n must be non-negative")
+if args.vlm_max_torque_center_step_nm < 0.0:
+    parser.error("vlm-max-torque-center-step-nm must be non-negative")
+if args.adaptation_target == "torque" and args.resume_run is not None:
+    parser.error("torque adaptation does not yet support --resume-run")
 if args.force_threshold_block_episodes < 1:
     parser.error("force-threshold-block-episodes must be positive")
 if len(args.force_threshold_profiles) % 2:
@@ -288,6 +318,9 @@ from learning import (
 from online_rl_support import (
     ACTOR_OBSERVATION_DIM,
     CRITIC_FORCE_CONTEXT_DIM,
+    OnlineTorqueRangeAdapter,
+    TorqueRange,
+    TorqueRangeAdapterConfig,
     critic_force_context,
     exploration_scale_for_episode,
     force_balance_action_prior,
@@ -295,6 +328,7 @@ from online_rl_support import (
     force_evidence,
     force_shaping_term,
     guard_vlm_force_proposal,
+    guard_vlm_torque_proposal,
 )
 from tacex_tasks.seal_twist.flow_policy import (
     PREVIOUS_GRIPPER_WIDTH_OBSERVATION_INDEX,
@@ -302,7 +336,7 @@ from tacex_tasks.seal_twist.flow_policy import (
     load_flow_checkpoint,
 )
 from tacex_tasks.seal_twist.seal_twist_env import SealTwistEnv
-from tacex_tasks.seal_twist.seal_twist_env_cfg import SealTwistEnvCfg
+from tacex_tasks.seal_twist.seal_twist_env_cfg import SealTwistEnvCfg, target_angle_for_torque
 
 
 def sha256(path: Path) -> str:
@@ -398,14 +432,19 @@ class FlowNoiseDSRLLayout:
 
 
 class CodexVisualForceAdvisor:
-    """One fresh, schema-constrained Codex vision call per completed episode."""
+    """Schema-constrained Codex vision advisor for force or torque adaptation."""
 
     def __init__(self, output_root: Path) -> None:
         executable = str(args.codex_cli) if args.codex_cli is not None else shutil.which("codex")
         if not executable:
             raise FileNotFoundError("Codex CLI was not found")
         self.executable = str(Path(executable).expanduser().resolve())
-        self.schema = args.codex_output_schema.expanduser().resolve()
+        schema_path = (
+            args.codex_torque_output_schema
+            if args.adaptation_target == "torque"
+            else args.codex_output_schema
+        )
+        self.schema = schema_path.expanduser().resolve()
         if not self.schema.is_file():
             raise FileNotFoundError(f"Codex output schema not found: {self.schema}")
         self.output_dir = output_root / "codex_vlm"
@@ -424,6 +463,23 @@ class CodexVisualForceAdvisor:
 
     @staticmethod
     def _prompt(request: dict[str, Any]) -> str:
+        if args.adaptation_target == "torque":
+            return (
+                "You are the visual-tactile torque advisor inside an online robotic "
+                "bottle-cap tightening experiment. The acceptable seal-torque window is "
+                "hidden and persistent for this run. Infer the target torque interval for "
+                "the next episode from the attached diagnostic image, the directional "
+                "torque-constraint label, and recent history. An under-torque label supports "
+                "increasing the interval centre; an over-torque label supports decreasing it. "
+                "Force-constraint, bilateral-imbalance, alignment, trajectory, and no-contact "
+                "failures are not evidence for changing torque. Preserve approximately the "
+                "current interval width and prefer a decisive 0.08–0.12 N m centre change after "
+                "a directional torque failure. Keep both endpoints inside "
+                "physical_torque_bounds_nm. Do not infer or state an unobserved ground-truth "
+                "window, do not use tools, and do not inspect repository files. Return only "
+                "the schema-conforming JSON.\n\n"
+                + json.dumps(request, ensure_ascii=False, sort_keys=True)
+            )
         schedule = str(request["force_threshold_schedule"]["mode"])
         if schedule == "iid":
             temporal_guidance = (
@@ -525,13 +581,21 @@ class CodexVisualForceAdvisor:
                         "Codex CLI audit did not confirm the requested reasoning effort"
                     )
                 response = json.loads(response_path.read_text(encoding="utf-8"))
-                low, high = map(float, response["force_range_n"])
-                physical_low, physical_high = map(
-                    float, request["physical_force_bounds_n"]
+                response_key = (
+                    "torque_range_nm"
+                    if args.adaptation_target == "torque"
+                    else "force_range_n"
                 )
+                bounds_key = (
+                    "physical_torque_bounds_nm"
+                    if args.adaptation_target == "torque"
+                    else "physical_force_bounds_n"
+                )
+                low, high = map(float, response[response_key])
+                physical_low, physical_high = map(float, request[bounds_key])
                 if not physical_low <= low < high <= physical_high:
                     raise ValueError(
-                        f"Codex force range {[low, high]} violates physical bounds "
+                        f"Codex {args.adaptation_target} range {[low, high]} violates physical bounds "
                         f"{[physical_low, physical_high]}"
                     )
                 record = {
@@ -590,6 +654,16 @@ def force_constraint_violation(flags: dict[str, torch.Tensor]) -> str:
     if bool(flags["above_maximum_force_threshold"][0].item()):
         return "over"
     if bool(flags["below_minimum_force_threshold"][0].item()):
+        return "under"
+    return "none"
+
+
+def torque_constraint_violation(flags: dict[str, torch.Tensor]) -> str:
+    """Return only the directional torque failure label, never its hidden bounds."""
+
+    if bool(flags["over_torqued"][0].item()):
+        return "over"
+    if bool(flags["under_torqued"][0].item()):
         return "under"
     return "none"
 
@@ -668,6 +742,7 @@ def capture_advisor_visual(
     trace: list[dict[str, float | int | bool]],
     outcome: str,
     attempted_range: ForceRange,
+    attempted_torque_range: TorqueRange | None = None,
 ) -> None:
     """Render only observed trajectory values into a two-panel visual card."""
 
@@ -676,11 +751,17 @@ def capture_advisor_visual(
     image = Image.new("RGB", (width, height), (250, 251, 253))
     draw = ImageDraw.Draw(image)
     draw.text((32, 18), f"SealTwist episode: {outcome}", fill=(20, 25, 35))
-    draw.text(
-        (32, 42),
-        f"applied force target: {attempted_range.minimum_n:.2f}-{attempted_range.maximum_n:.2f} N",
-        fill=(28, 115, 70),
-    )
+    if attempted_torque_range is None:
+        subtitle = (
+            f"applied force target: {attempted_range.minimum_n:.2f}-"
+            f"{attempted_range.maximum_n:.2f} N"
+        )
+    else:
+        subtitle = (
+            f"applied torque target: {attempted_torque_range.minimum_nm:.2f}-"
+            f"{attempted_torque_range.maximum_nm:.2f} N m"
+        )
+    draw.text((32, 42), subtitle, fill=(28, 115, 70))
     force_box = (78, 90, 950, 350)
     torque_box = (78, 400, 950, 610)
     draw.rectangle(force_box, outline=(85, 95, 110), width=2)
@@ -705,11 +786,19 @@ def capture_advisor_visual(
         (force_box[0], force_band_top, force_box[2], force_band_bottom),
         fill=(224, 244, 229),
     )
-    torque_band_top = y_coord(0.50, torque_max, torque_box)
-    torque_band_bottom = y_coord(0.35, torque_max, torque_box)
+    torque_band_range = (
+        (0.35, 0.50)
+        if attempted_torque_range is None
+        else (
+            attempted_torque_range.minimum_nm,
+            attempted_torque_range.maximum_nm,
+        )
+    )
+    torque_band_top = y_coord(torque_band_range[1], torque_max, torque_box)
+    torque_band_bottom = y_coord(torque_band_range[0], torque_max, torque_box)
     draw.rectangle(
         (torque_box[0], torque_band_top, torque_box[2], torque_band_bottom),
-        fill=(253, 226, 226),
+        fill=(224, 244, 229) if attempted_torque_range is not None else (253, 226, 226),
     )
     if len(steps) >= 2:
         draw.line(
@@ -731,7 +820,12 @@ def capture_advisor_visual(
         y = y_coord(float(force_tick), force_max, force_box)
         draw.line((force_box[0] - 5, y, force_box[0], y), fill=(80, 90, 105), width=1)
         draw.text((35, y - 7), f"{force_tick}N", fill=(60, 70, 85))
-    for torque_tick in (0.0, 0.2, 0.35, 0.50, 0.6):
+    torque_ticks = (
+        (0.0, 0.15, 0.30, 0.45, 0.60)
+        if attempted_torque_range is not None
+        else (0.0, 0.2, 0.35, 0.50, 0.6)
+    )
+    for torque_tick in torque_ticks:
         y = y_coord(torque_tick, torque_max, torque_box)
         draw.line((torque_box[0] - 5, y, torque_box[0], y), fill=(80, 90, 105), width=1)
         draw.text((24, y - 7), f"{torque_tick:.2f}", fill=(60, 70, 85))
@@ -739,7 +833,16 @@ def capture_advisor_visual(
     draw.text((260, 360), "cyan: right fingertip", fill=(0, 125, 135))
     draw.text((485, 360), "green: applied target band", fill=(28, 115, 70))
     draw.text((80, 618), "orange: seal torque (N m)", fill=(190, 95, 10))
-    draw.text((335, 618), "red band: success torque window", fill=(170, 45, 45))
+    torque_band_label = (
+        "green band: current torque estimate"
+        if attempted_torque_range is not None
+        else "red band: success torque window"
+    )
+    draw.text(
+        (335, 618),
+        torque_band_label,
+        fill=(28, 115, 70) if attempted_torque_range is not None else (170, 45, 45),
+    )
     image.save(path)
 
 
@@ -751,6 +854,7 @@ def save_training_checkpoint(
     completed_episodes: int,
     layout: FlowNoiseDSRLLayout,
     adapter: OnlineForceRangeAdapter,
+    torque_adapter: OnlineTorqueRangeAdapter | None,
     flow_hash: str,
     total_transitions: int,
     balance_prior_value: float,
@@ -759,7 +863,8 @@ def save_training_checkpoint(
     payload = {
         **agent.checkpoint(),
         "contract": (
-            "seal_twist_zero_latent_flow_dsrl_sac_with_online_codex_vlm_force_adaptation"
+            "seal_twist_zero_latent_flow_dsrl_sac_with_online_codex_vlm_"
+            f"{args.adaptation_target}_adaptation"
             if args.online_algorithm == "dsrl"
             else f"seal_twist_online_{args.online_algorithm}_semantic_residual"
         ),
@@ -855,9 +960,15 @@ def save_training_checkpoint(
         "codex_vlm": {
             "model": args.codex_model,
             "reasoning_effort": args.codex_reasoning_effort,
-            "one_call_after_each_episode": not args.disable_vlm,
+            "call_policy": args.vlm_call_policy,
             "input": "source-grounded force/torque diagnostic image plus structured trajectory summary",
-            "output_schema": str(args.codex_output_schema.resolve()),
+            "output_schema": str(
+                (
+                    args.codex_torque_output_schema
+                    if args.adaptation_target == "torque"
+                    else args.codex_output_schema
+                ).resolve()
+            ),
         },
         "force_projection": {
             "action_index": 9,
@@ -869,8 +980,16 @@ def save_training_checkpoint(
         "completed_episodes": completed_episodes,
         "total_transitions": total_transitions,
         "train_seed": args.train_seed,
+        "adaptation_target": args.adaptation_target,
+        "vlm_call_policy": args.vlm_call_policy,
         "current_force_range_n": adapter.current_range.as_list(),
         "force_range_decisions": adapter.decisions,
+        "current_torque_range_nm": (
+            None if torque_adapter is None else torque_adapter.current_range.as_list()
+        ),
+        "torque_range_decisions": (
+            [] if torque_adapter is None else torque_adapter.decisions
+        ),
         "replay_state": (
             replay.state_dict() if isinstance(agent, SACResidualAgent) else None
         ),
@@ -943,7 +1062,11 @@ def main() -> None:
     for directory in (frame_dir, trajectory_dir, checkpoint_dir):
         directory.mkdir()
     training_log = output_root / "training_episodes.jsonl"
-    decision_log = output_root / "force_range_decisions.jsonl"
+    decision_log = output_root / (
+        "torque_range_decisions.jsonl"
+        if args.adaptation_target == "torque"
+        else "force_range_decisions.jsonl"
+    )
     if resume_root is not None:
         shutil.copy2(resume_root / "training_episodes.jsonl", training_log)
         source_decisions = resume_root / "force_range_decisions.jsonl"
@@ -1051,6 +1174,19 @@ def main() -> None:
             smoothing=float(args.force_range_smoothing),
         ),
     )
+    torque_adapter = (
+        OnlineTorqueRangeAdapter(
+            TorqueRange(*map(float, args.initial_torque_range_nm)),
+            TorqueRangeAdapterConfig(
+                physical_minimum_nm=float(args.physical_torque_bounds_nm[0]),
+                physical_maximum_nm=float(args.physical_torque_bounds_nm[1]),
+                minimum_width_nm=float(args.torque_range_minimum_width_nm),
+                smoothing=float(args.torque_range_smoothing),
+            ),
+        )
+        if args.adaptation_target == "torque"
+        else None
+    )
     optimizer_restored = False
     replay_restored = False
     if resume_checkpoint is not None:
@@ -1137,6 +1273,13 @@ def main() -> None:
     try:
         for episode_index in range(start_episode, args.train_episodes):
             episode_seed = args.train_seed + episode_index
+            attempted_torque_range = (
+                None if torque_adapter is None else torque_adapter.current_range
+            )
+            if attempted_torque_range is not None:
+                env.cfg.policy_max_turn_angle_rad = target_angle_for_torque(
+                    env.cfg, attempted_torque_range.center_nm
+                )
             env.reset(seed=episode_seed)
             attempted_range = adapter.current_range
             previous_action: torch.Tensor | None = None
@@ -1509,6 +1652,7 @@ def main() -> None:
             terminal_left_force = float(final_flags["left_finger_force_n"][0].item())
             terminal_right_force = float(final_flags["right_finger_force_n"][0].item())
             terminal_constraint_violation = force_constraint_violation(final_flags)
+            terminal_torque_constraint_violation = torque_constraint_violation(final_flags)
             threshold_stays = threshold_persists_next_episode(episode_index)
             terminal_force_evidence = force_evidence(
                 left_force_n=terminal_left_force,
@@ -1543,6 +1687,7 @@ def main() -> None:
                 trace=trace,
                 outcome=outcome,
                 attempted_range=attempted_range,
+                attempted_torque_range=attempted_torque_range,
             )
             episode_record: dict[str, Any] = {
                 "online_algorithm": args.online_algorithm,
@@ -1554,6 +1699,17 @@ def main() -> None:
                 "return": episode_return,
                 "attempted_force_range_n": attempted_range.as_list(),
                 "target_force_n": attempted_range.center_n,
+                "attempted_torque_range_nm": (
+                    None
+                    if attempted_torque_range is None
+                    else attempted_torque_range.as_list()
+                ),
+                "target_torque_nm": (
+                    None
+                    if attempted_torque_range is None
+                    else attempted_torque_range.center_nm
+                ),
+                "policy_max_turn_angle_rad": float(env.cfg.policy_max_turn_angle_rad),
                 "mean_bilateral_finger_force_n": mean_force,
                 "force_rmse_n": force_rmse,
                 "peak_left_force_n": float(env.peak_left_force_n[0].item()),
@@ -1570,6 +1726,7 @@ def main() -> None:
                 ),
                 "terminal_force_evidence": terminal_force_evidence,
                 "force_constraint_violation": terminal_constraint_violation,
+                "torque_constraint_violation": terminal_torque_constraint_violation,
                 "force_threshold_schedule": args.force_threshold_schedule,
                 "force_threshold_profile_index": int(
                     env.force_threshold_profile_index[0].item()
@@ -1611,114 +1768,274 @@ def main() -> None:
                 "last_update": last_update,
             }
             sampled_trace = trace[:: max(1, len(trace) // 40)][:40]
-            request = {
-                "task": "SealTwist bottle-cap tightening",
-                "visual_type": "source-grounded force/torque diagnostic",
-                "physical_force_bounds_n": list(map(float, args.physical_force_bounds)),
-                "force_threshold_schedule": {
-                    "mode": args.force_threshold_schedule,
-                    "block_episodes": args.force_threshold_block_episodes,
-                    "persists_next_episode": threshold_stays,
-                },
-                "candidate_hidden_force_profiles_n": [
-                    list(profile) for profile in force_threshold_profiles
-                ],
-                "independent_minimum_force_population_range_n": (
-                    None
-                    if force_threshold_profiles
-                    else list(map(float, args.minimum_force_range))
-                ),
-                "independent_maximum_force_population_range_n": (
-                    None
-                    if force_threshold_profiles
-                    else list(map(float, args.maximum_force_range))
-                ),
-                "torque_window_nm": [0.35, 0.50],
-                "current_range_n": attempted_range.as_list(),
-                "episode": {
-                    "episode_index": episode_index,
-                    "outcome": outcome,
-                    "success": outcome == "success",
-                    "attempted_force_range_n": attempted_range.as_list(),
-                    "mean_bilateral_finger_force_n": mean_force,
-                    "force_rmse_n": force_rmse,
-                    "peak_left_force_n": episode_record["peak_left_force_n"],
-                    "peak_right_force_n": episode_record["peak_right_force_n"],
-                    "peak_torque_nm": episode_record["peak_torque_nm"],
-                    "final_torque_nm": episode_record["final_torque_nm"],
-                    "final_left_finger_force_n": terminal_left_force,
-                    "final_right_finger_force_n": terminal_right_force,
-                    "terminal_force_evidence": terminal_force_evidence,
-                    "force_constraint_violation": terminal_constraint_violation,
-                    "final_alignment_error_m": episode_record["final_alignment_error_m"],
-                    "bilateral_contact_fraction": episode_record[
-                        "bilateral_contact_fraction"
+            if args.adaptation_target == "torque":
+                assert attempted_torque_range is not None
+                request = {
+                    "task": "SealTwist bottle-cap tightening",
+                    "visual_type": "source-grounded force/torque diagnostic",
+                    "physical_torque_bounds_nm": list(
+                        map(float, args.physical_torque_bounds_nm)
+                    ),
+                    "current_range_nm": attempted_torque_range.as_list(),
+                    "episode": {
+                        "episode_index": episode_index,
+                        "outcome": outcome,
+                        "success": outcome == "success",
+                        "attempted_torque_range_nm": attempted_torque_range.as_list(),
+                        "peak_torque_nm": episode_record["peak_torque_nm"],
+                        "final_torque_nm": episode_record["final_torque_nm"],
+                        "torque_constraint_violation": (
+                            terminal_torque_constraint_violation
+                        ),
+                        "force_constraint_violation": terminal_constraint_violation,
+                        "mean_bilateral_finger_force_n": mean_force,
+                        "peak_left_force_n": episode_record["peak_left_force_n"],
+                        "peak_right_force_n": episode_record["peak_right_force_n"],
+                        "final_left_finger_force_n": terminal_left_force,
+                        "final_right_finger_force_n": terminal_right_force,
+                        "terminal_force_evidence": terminal_force_evidence,
+                        "final_alignment_error_m": episode_record[
+                            "final_alignment_error_m"
+                        ],
+                        "bilateral_contact_fraction": episode_record[
+                            "bilateral_contact_fraction"
+                        ],
+                        "force_trace_sample": sampled_trace,
+                    },
+                    "recent_history": list(recent_history),
+                }
+            else:
+                request = {
+                    "task": "SealTwist bottle-cap tightening",
+                    "visual_type": "source-grounded force/torque diagnostic",
+                    "physical_force_bounds_n": list(
+                        map(float, args.physical_force_bounds)
+                    ),
+                    "force_threshold_schedule": {
+                        "mode": args.force_threshold_schedule,
+                        "block_episodes": args.force_threshold_block_episodes,
+                        "persists_next_episode": threshold_stays,
+                    },
+                    "candidate_hidden_force_profiles_n": [
+                        list(profile) for profile in force_threshold_profiles
                     ],
-                    "in_force_band_fraction_given_bilateral": episode_record[
-                        "in_force_band_fraction_given_bilateral"
-                    ],
-                    "force_trace_sample": sampled_trace,
-                },
-                "recent_history": list(recent_history),
-            }
+                    "independent_minimum_force_population_range_n": (
+                        None
+                        if force_threshold_profiles
+                        else list(map(float, args.minimum_force_range))
+                    ),
+                    "independent_maximum_force_population_range_n": (
+                        None
+                        if force_threshold_profiles
+                        else list(map(float, args.maximum_force_range))
+                    ),
+                    "torque_window_nm": [0.35, 0.50],
+                    "current_range_n": attempted_range.as_list(),
+                    "episode": {
+                        "episode_index": episode_index,
+                        "outcome": outcome,
+                        "success": outcome == "success",
+                        "attempted_force_range_n": attempted_range.as_list(),
+                        "mean_bilateral_finger_force_n": mean_force,
+                        "force_rmse_n": force_rmse,
+                        "peak_left_force_n": episode_record["peak_left_force_n"],
+                        "peak_right_force_n": episode_record["peak_right_force_n"],
+                        "peak_torque_nm": episode_record["peak_torque_nm"],
+                        "final_torque_nm": episode_record["final_torque_nm"],
+                        "final_left_finger_force_n": terminal_left_force,
+                        "final_right_finger_force_n": terminal_right_force,
+                        "terminal_force_evidence": terminal_force_evidence,
+                        "force_constraint_violation": terminal_constraint_violation,
+                        "final_alignment_error_m": episode_record[
+                            "final_alignment_error_m"
+                        ],
+                        "bilateral_contact_fraction": episode_record[
+                            "bilateral_contact_fraction"
+                        ],
+                        "in_force_band_fraction_given_bilateral": episode_record[
+                            "in_force_band_fraction_given_bilateral"
+                        ],
+                        "force_trace_sample": sampled_trace,
+                    },
+                    "recent_history": list(recent_history),
+                }
+
+            vlm_should_call = advisor is not None and (
+                args.vlm_call_policy == "every_episode" or outcome != "success"
+            )
+            vlm_called = False
+            vlm_ok = False
             if advisor is None:
                 response = {
-                    "force_range_n": attempted_range.as_list(),
+                    (
+                        "torque_range_nm"
+                        if args.adaptation_target == "torque"
+                        else "force_range_n"
+                    ): (
+                        attempted_torque_range.as_list()
+                        if attempted_torque_range is not None
+                        else attempted_range.as_list()
+                    ),
                     "failure_cause": "unknown",
-                    "force_assessment": "unknown",
+                    (
+                        "torque_assessment"
+                        if args.adaptation_target == "torque"
+                        else "force_assessment"
+                    ): "unknown",
                     "rationale": "Codex VLM explicitly disabled",
                     "confidence": 0.0,
                 }
                 proposal = None
-                vlm_ok = False
+                adapter_error = "Codex VLM disabled"
+            elif not vlm_should_call:
+                response = {
+                    (
+                        "torque_range_nm"
+                        if args.adaptation_target == "torque"
+                        else "force_range_n"
+                    ): (
+                        attempted_torque_range.as_list()
+                        if attempted_torque_range is not None
+                        else attempted_range.as_list()
+                    ),
+                    "failure_cause": "unknown",
+                    (
+                        "torque_assessment"
+                        if args.adaptation_target == "torque"
+                        else "force_assessment"
+                    ): "safe",
+                    "rationale": "VLM call skipped after a successful episode",
+                    "confidence": 1.0,
+                }
+                proposal = (
+                    attempted_torque_range
+                    if attempted_torque_range is not None
+                    else attempted_range
+                )
+                adapter_error = None
             else:
+                vlm_called = True
                 response = advisor.recommend(
                     episode_index=episode_index,
                     image_path=frame_path,
                     request=request,
                 )
-                raw_proposal = ForceRange(*map(float, response["force_range_n"]))
-                guarded = guard_vlm_force_proposal(
-                    current_range_n=(
-                        attempted_range.minimum_n,
-                        attempted_range.maximum_n,
-                    ),
-                    proposed_range_n=(raw_proposal.minimum_n, raw_proposal.maximum_n),
-                    physical_bounds_n=tuple(map(float, args.physical_force_bounds)),
-                    terminal_left_force_n=terminal_left_force,
-                    terminal_right_force_n=terminal_right_force,
-                    outcome=outcome,
-                    maximum_center_step_n=float(args.vlm_max_center_step_n),
-                    threshold_schedule=args.force_threshold_schedule,
-                    force_constraint_violation=terminal_constraint_violation,
-                    threshold_persists_next_episode=threshold_stays,
-                )
-                proposal = ForceRange(*guarded.force_range_n)
-                response["proposal_guard"] = {
-                    "raw_vlm_range_n": raw_proposal.as_list(),
-                    "guarded_range_n": proposal.as_list(),
-                    "terminal_force_evidence": guarded.evidence,
-                    "decision": guarded.decision,
-                }
                 vlm_ok = True
-            decision = adapter.update_after_episode(
-                episode_index=episode_index,
-                proposed_range=proposal,
-                raw_response=json.dumps(response, ensure_ascii=False),
-                error=None if vlm_ok else "Codex VLM disabled",
-            )
+                adapter_error = None
+                if args.adaptation_target == "torque":
+                    assert attempted_torque_range is not None
+                    raw_proposal = TorqueRange(
+                        *map(float, response["torque_range_nm"])
+                    )
+                    guarded = guard_vlm_torque_proposal(
+                        current_range_nm=(
+                            attempted_torque_range.minimum_nm,
+                            attempted_torque_range.maximum_nm,
+                        ),
+                        proposed_range_nm=(
+                            raw_proposal.minimum_nm,
+                            raw_proposal.maximum_nm,
+                        ),
+                        physical_bounds_nm=tuple(
+                            map(float, args.physical_torque_bounds_nm)
+                        ),
+                        torque_constraint_violation=(
+                            terminal_torque_constraint_violation
+                        ),
+                        outcome=outcome,
+                        maximum_center_step_nm=float(
+                            args.vlm_max_torque_center_step_nm
+                        ),
+                    )
+                    proposal = TorqueRange(*guarded.torque_range_nm)
+                    response["proposal_guard"] = {
+                        "raw_vlm_range_nm": raw_proposal.as_list(),
+                        "guarded_range_nm": proposal.as_list(),
+                        "torque_constraint_violation": (
+                            terminal_torque_constraint_violation
+                        ),
+                        "decision": guarded.decision,
+                    }
+                else:
+                    raw_proposal = ForceRange(
+                        *map(float, response["force_range_n"])
+                    )
+                    guarded = guard_vlm_force_proposal(
+                        current_range_n=(
+                            attempted_range.minimum_n,
+                            attempted_range.maximum_n,
+                        ),
+                        proposed_range_n=(
+                            raw_proposal.minimum_n,
+                            raw_proposal.maximum_n,
+                        ),
+                        physical_bounds_n=tuple(map(float, args.physical_force_bounds)),
+                        terminal_left_force_n=terminal_left_force,
+                        terminal_right_force_n=terminal_right_force,
+                        outcome=outcome,
+                        maximum_center_step_n=float(args.vlm_max_center_step_n),
+                        threshold_schedule=args.force_threshold_schedule,
+                        force_constraint_violation=terminal_constraint_violation,
+                        threshold_persists_next_episode=threshold_stays,
+                    )
+                    proposal = ForceRange(*guarded.force_range_n)
+                    response["proposal_guard"] = {
+                        "raw_vlm_range_n": raw_proposal.as_list(),
+                        "guarded_range_n": proposal.as_list(),
+                        "terminal_force_evidence": guarded.evidence,
+                        "decision": guarded.decision,
+                    }
+
+            if args.adaptation_target == "torque":
+                assert torque_adapter is not None
+                decision = torque_adapter.update_after_episode(
+                    episode_index=episode_index,
+                    proposed_range=proposal,
+                    raw_response=json.dumps(response, ensure_ascii=False),
+                    error=adapter_error,
+                    vlm_called=vlm_called,
+                )
+                next_force_range = attempted_range.as_list()
+                next_torque_range = decision["applied_range_nm"]
+            else:
+                decision = adapter.update_after_episode(
+                    episode_index=episode_index,
+                    proposed_range=proposal,
+                    raw_response=json.dumps(response, ensure_ascii=False),
+                    error=adapter_error,
+                )
+                decision["vlm_called"] = vlm_called
+                next_force_range = decision["applied_range_n"]
+                next_torque_range = None
             episode_record.update(
                 {
                     "vlm_model": args.codex_model if vlm_ok else None,
                     "vlm_reasoning_effort": args.codex_reasoning_effort if vlm_ok else None,
-                    "vlm_call_succeeded": vlm_ok,
+                    "vlm_called": vlm_called,
+                    "vlm_call_succeeded": vlm_ok if vlm_called else None,
                     "vlm_response": response,
-                    "next_force_range_n": decision["applied_range_n"],
+                    "next_force_range_n": next_force_range,
+                    "next_torque_range_nm": next_torque_range,
                 }
             )
             records.append(episode_record)
-            recent_history.append(
-                {
+            if args.adaptation_target == "torque":
+                recent_history.append(
+                    {
+                        "episode_index": episode_index,
+                        "outcome": outcome,
+                        "attempted_range_nm": attempted_torque_range.as_list(),
+                        "peak_torque_nm": episode_record["peak_torque_nm"],
+                        "final_torque_nm": episode_record["final_torque_nm"],
+                        "torque_constraint_violation": (
+                            terminal_torque_constraint_violation
+                        ),
+                        "force_constraint_violation": terminal_constraint_violation,
+                        "next_range_nm": next_torque_range,
+                    }
+                )
+            else:
+                recent_history.append({
                     "episode_index": episode_index,
                     "outcome": outcome,
                     "attempted_range_n": attempted_range.as_list(),
@@ -1732,9 +2049,8 @@ def main() -> None:
                     "final_right_force_n": terminal_right_force,
                     "force_evidence": terminal_force_evidence,
                     "force_constraint_violation": terminal_constraint_violation,
-                    "next_range_n": decision["applied_range_n"],
-                }
-            )
+                    "next_range_n": next_force_range,
+                })
             append_jsonl(training_log, episode_record)
             append_jsonl(decision_log, decision)
             if (episode_index + 1) % args.checkpoint_every == 0:
@@ -1745,18 +2061,25 @@ def main() -> None:
                     completed_episodes=episode_index + 1,
                     layout=layout,
                     adapter=adapter,
+                    torque_adapter=torque_adapter,
                     flow_hash=flow_hash,
                     total_transitions=total_transitions,
                     balance_prior_value=balance_prior_value,
                     continuation=continuation,
                 )
             recent_successes = sum(int(item["success"]) for item in records[-10:])
+            if args.adaptation_target == "torque":
+                range_transition = (
+                    f"{attempted_torque_range.as_list()}->{next_torque_range} Nm"
+                )
+            else:
+                range_transition = f"{attempted_range.as_list()}->{next_force_range} N"
             print(
                 f"[ONLINE] episode={episode_index + 1}/{args.train_episodes} "
                 f"outcome={outcome} rolling10={recent_successes / min(10, len(records)):.1%} "
                 f"force={mean_force:.3f}N torque={episode_record['peak_torque_nm']:.3f}Nm "
-                f"range={attempted_range.as_list()}->{decision['applied_range_n']} "
-                f"replay={replay.size} updates={agent.updates} codex_ok={vlm_ok}",
+                f"range={range_transition} replay={replay.size} updates={agent.updates} "
+                f"vlm_called={vlm_called} codex_ok={vlm_ok}",
                 flush=True,
             )
     finally:
@@ -1770,6 +2093,7 @@ def main() -> None:
         completed_episodes=len(records),
         layout=layout,
         adapter=adapter,
+        torque_adapter=torque_adapter,
         flow_hash=flow_hash,
         total_transitions=total_transitions,
         balance_prior_value=balance_prior_value,
@@ -1780,6 +2104,7 @@ def main() -> None:
     summary = {
         "experiment": "SealTwist online semantic residual learning",
         "online_algorithm": args.online_algorithm,
+        "adaptation_target": args.adaptation_target,
         "training_seed": args.train_seed,
         "completed_episodes": len(records),
         "new_episodes_this_process": len(records) - start_episode,
@@ -1851,10 +2176,33 @@ def main() -> None:
         "vlm_is_codex": advisor is not None,
         "vlm_calls": 0 if advisor is None else advisor.calls,
         "vlm_successful_calls": 0 if advisor is None else advisor.successful_calls,
+        "vlm_call_policy": args.vlm_call_policy,
+        "failure_episodes": sum(int(not item["success"]) for item in records),
+        "episodes_with_vlm_call": sum(int(item["vlm_called"]) for item in records),
         "vlm_input": "source-grounded diagnostic image plus structured force/torque trace",
         "initial_force_range_n": list(map(float, args.initial_force_range)),
         "final_force_range_n": adapter.current_range.as_list(),
         "physical_force_bounds_n": list(map(float, args.physical_force_bounds)),
+        "initial_torque_range_nm": (
+            list(map(float, args.initial_torque_range_nm))
+            if torque_adapter is not None
+            else None
+        ),
+        "final_torque_range_nm": (
+            torque_adapter.current_range.as_list()
+            if torque_adapter is not None
+            else None
+        ),
+        "physical_torque_bounds_nm": (
+            list(map(float, args.physical_torque_bounds_nm))
+            if torque_adapter is not None
+            else None
+        ),
+        "flow_execution": {
+            "integration_steps": args.integration_steps,
+            "chunk_execute_steps": args.chunk_execute_steps,
+            "action_repeat": args.action_repeat,
+        },
         "final_checkpoint": str(final_checkpoint.resolve()),
         "elapsed_seconds": time.time() - started,
         "cumulative_elapsed_seconds": (

@@ -105,6 +105,7 @@ class CleanDSRLLabPickWrapper(gym.Wrapper):
         learned_noise_steps: int = 1,
         padding_mode: str = "repeat_last",
         noise_residual_scale: float = 0.25,
+        dsrl_contract_version: int = 4,
         chunk_execute_steps: int = DEFAULT_EXECUTE_STEPS,
         chunk_discount: float = 0.99,
         flow_num_inference_steps: int = 20,
@@ -185,6 +186,7 @@ class CleanDSRLLabPickWrapper(gym.Wrapper):
             learned_noise_steps=int(learned_noise_steps),
             padding_mode=padding_mode,
             residual_scale=float(noise_residual_scale),
+            contract_version=int(dsrl_contract_version),
         )
         self._flow_policy_steps = 0
         self._flow_needs_warmup = True
@@ -531,10 +533,11 @@ class CleanDSRLLabPickWrapper(gym.Wrapper):
     def _step_noise(self, policy_action: torch.Tensor | None):
         self._ensure_flow_observation_ready()
         self._decision_tactile_actor = self._last_tactile_actor.detach().clone()
-        native_noise = self.adapter.sample_native_noise(batch_size=self.num_envs)
         if policy_action is None:
+            native_noise = self.adapter.sample_native_noise(batch_size=self.num_envs)
             decoder_noise = native_noise
             policy_noise_rms = torch.zeros((), device=self.device)
+            native_noise_rms = native_noise.square().mean().sqrt().detach()
         else:
             policy_action = torch.as_tensor(
                 policy_action,
@@ -549,10 +552,15 @@ class CleanDSRLLabPickWrapper(gym.Wrapper):
                     f"DSRL action batch must equal num_envs={self.num_envs}, "
                     f"received {policy_action.shape[0]}."
                 )
-            decoder_noise = self.layout.compose_noise(native_noise, policy_action)
+            if self.layout.contract_version == 3:
+                decoder_noise = self.layout.expand_noise(policy_action)
+                native_noise_rms = torch.zeros((), device=self.device)
+            else:
+                native_noise = self.adapter.sample_native_noise(batch_size=self.num_envs)
+                decoder_noise = self.layout.compose_noise(native_noise, policy_action)
+                native_noise_rms = native_noise.square().mean().sqrt().detach()
             policy_noise_rms = policy_action.square().mean().sqrt().detach()
         action_chunk = self.adapter.decode(decoder_noise.reshape(self.num_envs, -1))
-        native_noise_rms = native_noise.square().mean().sqrt().detach()
         decoder_noise_rms = decoder_noise.square().mean().sqrt().detach()
 
         _validate_matrix(action_chunk, name="decoded_action_chunk", width=10)

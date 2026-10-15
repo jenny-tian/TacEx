@@ -333,6 +333,39 @@ def test_non_force_failure_does_not_move_or_shrink_estimate():
     assert estimator.informative_episode_count == 0
 
 
+@pytest.mark.parametrize(
+    "reason", ["bad_alignment", "force_tracking_error", "no_contact", "trajectory_error"]
+)
+def test_source_diagnosed_non_force_failure_overrides_vlm_too_low_label(reason: str):
+    estimator = ConvergentForceEstimator(
+        ForceEstimatorConfig(initial_range_n=ForceRange(2.8, 3.2))
+    )
+    current = estimator.current_range_n
+    recommendation = VLMRecommendation(
+        target_range_n=ForceRange(3.0, 3.2),
+        failure_cause="insufficient_force",
+        force_assessment="too_low",
+        rationale="incorrect causal attribution",
+        next_experiment="repeat",
+        confidence=0.9,
+    )
+
+    decision = estimator.update(
+        recommendation,
+        feedback(
+            0,
+            reason=reason,
+            attempted=current,
+            mean_force=2.0,
+            contact_fraction=0.5,
+        ),
+    )
+
+    assert decision.update_kind == "non_force"
+    assert decision.target_range_n == current
+    assert estimator.informative_episode_count == 0
+
+
 def test_force_controller_only_overrides_gripper_width_and_changes_correct_direction():
     controller = TactileForceController(
         ForceRange(1.8, 2.2),

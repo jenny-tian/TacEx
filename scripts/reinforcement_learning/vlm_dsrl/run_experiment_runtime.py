@@ -51,6 +51,14 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--freeze-force-adaptation",
+    action="store_true",
+    help=(
+        "During evaluation, hold --initial-force-range-n fixed and do not call "
+        "or update the episode-level advisor."
+    ),
+)
+parser.add_argument(
     "--dsrl-checkpoint",
     type=Path,
     default=None,
@@ -73,7 +81,7 @@ parser.add_argument(
 parser.add_argument("--initial-force-range-n", type=float, nargs=2, default=(1.0, 3.0))
 parser.add_argument("--minimum-range-width-n", type=float, default=0.30)
 parser.add_argument(
-    "--advisor", choices=("deterministic", "openai"), default="deterministic"
+    "--advisor", choices=("deterministic", "openai", "codex"), default="deterministic"
 )
 parser.add_argument(
     "--vlm-model", default=os.environ.get("LAB_PICK_VLM_MODEL", "gpt-4.1-mini")
@@ -85,6 +93,14 @@ parser.add_argument("--api-key-env", default="OPENAI_API_KEY")
 parser.add_argument(
     "--api-mode", choices=("responses", "chat_completions"), default="responses"
 )
+parser.add_argument("--codex-cli", type=Path, default=None)
+parser.add_argument(
+    "--codex-reasoning-effort",
+    choices=("low", "medium", "high", "xhigh"),
+    default="high",
+)
+parser.add_argument("--codex-timeout-s", type=float, default=300.0)
+parser.add_argument("--codex-max-attempts", type=int, default=3)
 parser.add_argument(
     "--save-advisor-images", action=argparse.BooleanOptionalAction, default=False
 )
@@ -104,6 +120,13 @@ parser.add_argument(
     "--noise-padding-mode", choices=("repeat_last", "zeros"), default="repeat_last"
 )
 parser.add_argument("--dsrl-noise-residual-scale", type=float, default=0.25)
+parser.add_argument(
+    "--dsrl-contract-version",
+    type=int,
+    choices=(3, 4),
+    default=4,
+    help="Use v3 absolute Flow noise for legacy checkpoints or v4 base-anchored residual noise.",
+)
 parser.add_argument("--dsrl-action-l2-weight", type=float, default=10.0)
 parser.add_argument("--dsrl-max-gradient-updates", type=int, default=500)
 parser.add_argument("--chunk-execute-steps", type=int, default=32)
@@ -191,6 +214,13 @@ if args_cli.flow_ppo_learning_rate <= 0.0 or args_cli.flow_ppo_grad_clip <= 0.0:
     parser.error("Flow-PPO learning rate and gradient clip must be positive.")
 if args_cli.phase == "evaluation" and args_cli.training_interactions:
     parser.error("--training-interactions is only valid during online training.")
+if args_cli.freeze_force_adaptation and (
+    args_cli.phase != "evaluation"
+    or args_cli.mode not in {"ours_tactile", "joint", "joint_bilateral", "guarded_joint", "vlm"}
+):
+    parser.error(
+        "--freeze-force-adaptation is only valid for force-adaptive evaluation modes."
+    )
 if args_cli.video_every_n_physics_steps < 1 or args_cli.video_fps < 1:
     parser.error("Video sampling interval and FPS must be positive.")
 if args_cli.advisor == "openai" and args_cli.mode in {
@@ -202,6 +232,17 @@ if args_cli.advisor == "openai" and args_cli.mode in {
 }:
     if not os.environ.get(args_cli.api_key_env):
         parser.error(f"Set {args_cli.api_key_env} for --advisor openai.")
+if args_cli.advisor == "codex" and args_cli.mode in {
+    "ours_tactile",
+    "joint",
+    "joint_bilateral",
+    "guarded_joint",
+    "vlm",
+}:
+    if not args_cli.save_advisor_images:
+        parser.error("--advisor codex requires --save-advisor-images.")
+    if args_cli.codex_max_attempts < 1 or args_cli.codex_timeout_s <= 0.0:
+        parser.error("Codex timeout and maximum attempts must be positive.")
 if args_cli.phase == "evaluation":
     if args_cli.mode in {
         "ours_tactile",
@@ -259,6 +300,7 @@ from flow_rwr import (  # noqa: E402
 from flow_ppo import build_flow_ppo_models  # noqa: E402
 from tactile_observation import tactile_contract_metadata  # noqa: E402
 from vlm_force import (  # noqa: E402
+    CodexCLIVLMAdvisor,
     ConvergentForceEstimator,
     DeterministicVLMAdvisor,
     EpisodeForceAdaptationLoop,
@@ -313,6 +355,17 @@ def _make_adaptation(output_dir: Path):
             break_force_threshold_n=args_cli.break_force_threshold_n,
             api_base=args_cli.api_base,
             api_mode=args_cli.api_mode,
+        )
+    elif args_cli.advisor == "codex":
+        advisor = CodexCLIVLMAdvisor(
+            model=args_cli.vlm_model,
+            physical_range_n=physical_range,
+            break_force_threshold_n=args_cli.break_force_threshold_n,
+            output_dir=output_dir / "codex_vlm",
+            executable=args_cli.codex_cli,
+            reasoning_effort=args_cli.codex_reasoning_effort,
+            timeout_s=args_cli.codex_timeout_s,
+            max_attempts=args_cli.codex_max_attempts,
         )
     else:
         advisor = DeterministicVLMAdvisor(
@@ -417,7 +470,9 @@ def _run_frozen_evaluation(
         )
         if "policy" not in checkpoint:
             raise KeyError(f"Checkpoint has no policy state: {checkpoint_path}")
-        validate_absolute_dsrl_policy_state(checkpoint["policy"])
+        validate_absolute_dsrl_policy_state(
+            checkpoint["policy"], expected_version=env.layout.contract_version
+        )
         actor.load_state_dict(checkpoint["policy"], strict=True)
         actor.eval()
 
@@ -720,6 +775,7 @@ def main(
         learned_noise_steps=args_cli.learned_noise_steps,
         padding_mode=args_cli.noise_padding_mode,
         noise_residual_scale=args_cli.dsrl_noise_residual_scale,
+        dsrl_contract_version=args_cli.dsrl_contract_version,
         chunk_execute_steps=args_cli.chunk_execute_steps,
         chunk_discount=args_cli.chunk_discount,
         flow_num_inference_steps=args_cli.flow_num_inference_steps,
@@ -750,6 +806,7 @@ def main(
             checkpoint,
             mode=args_cli.mode,
             adaptation=adaptation,
+            freeze_force_adaptation=bool(args_cli.freeze_force_adaptation),
             **common_wrapper_kwargs,
         )
     metadata = {
@@ -769,7 +826,22 @@ def main(
         "bc_policy": str(checkpoint),
         "bc_checkpoint_sha256": _sha256(checkpoint),
         "advisor": None if adaptation is None else args_cli.advisor,
-        "advisor_is_real_vlm": args_cli.advisor == "openai" and adaptation is not None,
+        "advisor_is_real_vlm": args_cli.advisor in {"openai", "codex"}
+        and adaptation is not None,
+        "vlm_model": (
+            args_cli.vlm_model if args_cli.advisor in {"openai", "codex"} else None
+        ),
+        "vlm_reasoning_effort": (
+            args_cli.codex_reasoning_effort if args_cli.advisor == "codex" else None
+        ),
+        "vlm_call_policy": (
+            "frozen_disabled"
+            if args_cli.freeze_force_adaptation
+            else "every_episode"
+            if adaptation is not None
+            else "disabled"
+        ),
+        "force_adaptation_frozen": bool(args_cli.freeze_force_adaptation),
         "break_force_threshold_n": args_cli.break_force_threshold_n,
         "physical_force_range_n": list(args_cli.physical_force_range_n),
         "initial_force_range_n": list(args_cli.initial_force_range_n),
@@ -873,7 +945,7 @@ def main(
                 "fps": args_cli.video_fps,
             }
         ),
-        "dsrl_contract_version": CLEAN_DSRL_CONTRACT_VERSION,
+        "dsrl_contract_version": args_cli.dsrl_contract_version,
         "input_dsrl_checkpoint": (
             None
             if args_cli.dsrl_checkpoint is None

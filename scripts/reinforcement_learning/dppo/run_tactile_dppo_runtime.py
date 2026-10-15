@@ -20,8 +20,17 @@ from isaaclab.app import AppLauncher
 
 
 parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument(
+    "--phase", choices=("online_training", "evaluation"), default="online_training"
+)
 parser.add_argument("--bc-policy", type=Path, required=True)
 parser.add_argument("--bc-validation-metrics", type=Path, required=True)
+parser.add_argument(
+    "--checkpoint",
+    type=Path,
+    default=None,
+    help="Frozen DPPO checkpoint required during evaluation.",
+)
 parser.add_argument("--output-dir", type=Path, required=True)
 parser.add_argument("--num-episodes", type=int, default=100)
 parser.add_argument("--seed", type=int, default=4200)
@@ -51,6 +60,10 @@ args_cli, hydra_args = parser.parse_known_args()
 args_cli.enable_cameras = True
 if args_cli.num_episodes < 1:
     parser.error("--num-episodes must be positive.")
+if args_cli.phase == "evaluation" and args_cli.checkpoint is None:
+    parser.error("DPPO evaluation requires --checkpoint.")
+if args_cli.phase == "online_training" and args_cli.checkpoint is not None:
+    parser.error("--checkpoint is only valid during evaluation.")
 if args_cli.rollout_steps < 1 or args_cli.learning_epochs < 1 or args_cli.mini_batches < 1:
     parser.error("DPPO rollout and update counts must be positive.")
 if args_cli.rollout_steps % args_cli.mini_batches:
@@ -137,6 +150,62 @@ def _parameter_signature(module: torch.nn.Module) -> dict[str, float | int]:
             "sum": sum(float(parameter.sum().cpu()) for parameter in parameters),
             "squared_sum": sum(float(parameter.square().sum().cpu()) for parameter in parameters),
         }
+
+
+def _evaluate(
+    env: OnlineEpisodeRecorder,
+    wrapper: TactileDPPOLabPickWrapper,
+    checkpoint: Path,
+) -> tuple[int, int, int]:
+    """Evaluate one frozen stochastic DPPO policy on explicit episode seeds."""
+
+    payload = torch.load(checkpoint, map_location=wrapper.agent.device, weights_only=False)
+    wrapper.agent.load_checkpoint_payload(payload, load_optimizer=False)
+    wrapper.agent.eval()
+    source_optimizer_steps = int(wrapper.agent.optimizer_steps)
+    maximum = args_cli.max_outer_interactions or 20
+    interactions = 0
+    total_denoising_steps = 0
+    total_physics_steps = 0
+    generator = torch.Generator(device=wrapper.agent.device)
+    for episode in range(args_cli.num_episodes):
+        episode_seed = args_cli.seed + episode
+        random.seed(episode_seed)
+        np.random.seed(episode_seed)
+        torch.manual_seed(episode_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(episode_seed)
+        generator.manual_seed(episode_seed)
+        observation, _ = env.reset(seed=episode_seed)
+        for _ in range(maximum):
+            with torch.inference_mode():
+                sample = wrapper.agent.sample(
+                    observation["global_condition"],
+                    observation["tactile_actor"],
+                    observation["visual_xy"],
+                    generator=generator,
+                )
+            observation, _, terminated, truncated, info = env.step(sample["action"])
+            interactions += 1
+            total_denoising_steps += int(sample["denoising_steps"].item())
+            total_physics_steps += int(info["dppo/physics_steps_executed"])
+            if bool(torch.as_tensor(terminated | truncated).any().item()):
+                result = env.complete_pending_episode(dsrl_updates_completed=0)
+                print(
+                    "[EVALUATION] "
+                    f"mode=dppo_tactile episode={episode + 1}/{args_cli.num_episodes} "
+                    f"seed={episode_seed} success={result['success']} "
+                    f"reason={result['terminal_reason']}",
+                    flush=True,
+                )
+                break
+        else:
+            raise RuntimeError(
+                f"DPPO evaluation seed {episode_seed} exceeded its interaction limit."
+            )
+    if wrapper.agent.optimizer_steps != source_optimizer_steps:
+        raise RuntimeError("Frozen DPPO evaluation unexpectedly changed optimizer state.")
+    return interactions, total_denoising_steps, total_physics_steps
 
 
 @hydra_task_config(TASK, "skrl_clean_dsrl_cfg_entry_point")
@@ -248,7 +317,7 @@ def main(
         "schema_version": 1,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "method": "dppo_tactile",
-        "phase": "online_training",
+        "phase": args_cli.phase,
         "num_episodes": args_cli.num_episodes,
         "seed": args_cli.seed,
         "task": TASK,
@@ -257,6 +326,19 @@ def main(
         "bc_checkpoint_tree_sha256": _tree_sha256(checkpoint),
         "bc_validation_metrics": str(validation_metrics),
         "bc_validation_metrics_sha256": _sha256(validation_metrics),
+        "input_checkpoint": (
+            None
+            if args_cli.checkpoint is None
+            else str(args_cli.checkpoint.expanduser().resolve())
+        ),
+        "input_checkpoint_sha256": (
+            None
+            if args_cli.checkpoint is None
+            else _sha256(args_cli.checkpoint.expanduser().resolve())
+        ),
+        "evaluation_policy": (
+            "seeded_stochastic_ddpm" if args_cli.phase == "evaluation" else None
+        ),
         "bc_camera_contract": DIFFUSION_BC_CAMERA_CONTRACT,
         "break_force_threshold_n": args_cli.break_force_threshold_n,
         "labware_random_xy_m": list(args_cli.labware_random_xy_m),
@@ -275,89 +357,103 @@ def main(
     dump_yaml(str(output_dir / "resolved_env.yaml"), env_cfg)
     dump_pickle(str(output_dir / "resolved_env.pkl"), env_cfg)
 
-    rollout = DPPORollout(capacity=args_cli.rollout_steps)
-    diagnostics_path = output_dir / "optimizer_diagnostics.jsonl"
     interactions = 0
     total_denoising_steps = 0
     total_physics_steps = 0
-    maximum = args_cli.max_outer_interactions or args_cli.num_episodes * 20
-    generator = torch.Generator(device=wrapper.agent.device)
-    generator.manual_seed(args_cli.seed)
-    observation, _ = env.reset(seed=args_cli.seed)
     started = time.perf_counter()
     try:
-        while simulation_app.is_running() and env.completed_episodes < args_cli.num_episodes:
-            sample = wrapper.agent.sample(
-                observation["global_condition"],
-                observation["tactile_actor"],
-                observation["visual_xy"],
-                generator=generator,
+        if args_cli.phase == "evaluation":
+            assert args_cli.checkpoint is not None
+            input_checkpoint = args_cli.checkpoint.expanduser().resolve()
+            if not input_checkpoint.is_file():
+                raise FileNotFoundError(input_checkpoint)
+            interactions, total_denoising_steps, total_physics_steps = _evaluate(
+                env, wrapper, input_checkpoint
             )
-            next_observation, reward, terminated, truncated, info = env.step(sample["action"])
-            done = bool(torch.as_tensor(terminated | truncated).any().item())
-            rollout.add(
-                global_condition=observation["global_condition"],
-                tactile=observation["tactile_actor"],
-                chain_previous=sample["chain_previous"],
-                chain_next=sample["chain_next"],
-                timesteps=sample["timesteps"],
-                old_log_probs=sample["old_log_probs"],
-                value=sample["value"],
-                reward=reward,
-                done=done,
-            )
-            interactions += 1
-            total_denoising_steps += int(sample["denoising_steps"].item())
-            total_physics_steps += int(info["dppo/physics_steps_executed"])
-            observation = next_observation
+        else:
+            rollout = DPPORollout(capacity=args_cli.rollout_steps)
+            diagnostics_path = output_dir / "optimizer_diagnostics.jsonl"
+            maximum = args_cli.max_outer_interactions or args_cli.num_episodes * 20
+            generator = torch.Generator(device=wrapper.agent.device)
+            generator.manual_seed(args_cli.seed)
+            observation, _ = env.reset(seed=args_cli.seed)
+            while simulation_app.is_running() and env.completed_episodes < args_cli.num_episodes:
+                sample = wrapper.agent.sample(
+                    observation["global_condition"],
+                    observation["tactile_actor"],
+                    observation["visual_xy"],
+                    generator=generator,
+                )
+                next_observation, reward, terminated, truncated, info = env.step(sample["action"])
+                done = bool(torch.as_tensor(terminated | truncated).any().item())
+                rollout.add(
+                    global_condition=observation["global_condition"],
+                    tactile=observation["tactile_actor"],
+                    chain_previous=sample["chain_previous"],
+                    chain_next=sample["chain_next"],
+                    timesteps=sample["timesteps"],
+                    old_log_probs=sample["old_log_probs"],
+                    value=sample["value"],
+                    reward=reward,
+                    done=done,
+                )
+                interactions += 1
+                total_denoising_steps += int(sample["denoising_steps"].item())
+                total_physics_steps += int(info["dppo/physics_steps_executed"])
+                observation = next_observation
 
-            if rollout.full:
-                with torch.no_grad():
-                    bootstrap = (
-                        torch.zeros((), device=wrapper.agent.device)
-                        if done
-                        else wrapper.agent.predict_value(
-                            observation["global_condition"], observation["tactile_actor"]
-                        )[0]
+                if rollout.full:
+                    with torch.no_grad():
+                        bootstrap = (
+                            torch.zeros((), device=wrapper.agent.device)
+                            if done
+                            else wrapper.agent.predict_value(
+                                observation["global_condition"], observation["tactile_actor"]
+                            )[0]
+                        )
+                    diagnostics = wrapper.agent.update(rollout, bootstrap)
+                    _append_jsonl(
+                        diagnostics_path,
+                        {
+                            "ending_outer_interaction": interactions,
+                            "completed_episodes": env.completed_episodes,
+                            "cumulative_optimizer_steps": wrapper.agent.optimizer_steps,
+                            **diagnostics.to_dict(),
+                        },
                     )
-                diagnostics = wrapper.agent.update(rollout, bootstrap)
-                _append_jsonl(
-                    diagnostics_path,
-                    {
-                        "ending_outer_interaction": interactions,
-                        "completed_episodes": env.completed_episodes,
-                        "cumulative_optimizer_steps": wrapper.agent.optimizer_steps,
-                        **diagnostics.to_dict(),
-                    },
-                )
 
-            if done:
-                result = env.complete_pending_episode(
-                    dsrl_updates_completed=wrapper.agent.optimizer_steps
-                )
-                print(
-                    "[EPISODE] "
-                    f"mode=dppo_tactile episode={result['episode_index'] + 1}/{args_cli.num_episodes} "
-                    f"success={result['success']} reason={result['terminal_reason']} "
-                    f"force_peak={result['peak_contact_force_n']:.3f}N "
-                    f"optimizer_steps={wrapper.agent.optimizer_steps}",
-                    flush=True,
-                )
-                if env.completed_episodes < args_cli.num_episodes:
-                    env.begin_auto_reset_episode()
+                if done:
+                    result = env.complete_pending_episode(
+                        dsrl_updates_completed=wrapper.agent.optimizer_steps
+                    )
+                    print(
+                        "[EPISODE] "
+                        f"mode=dppo_tactile episode={result['episode_index'] + 1}/{args_cli.num_episodes} "
+                        f"success={result['success']} reason={result['terminal_reason']} "
+                        f"force_peak={result['peak_contact_force_n']:.3f}N "
+                        f"optimizer_steps={wrapper.agent.optimizer_steps}",
+                        flush=True,
+                    )
+                    if env.completed_episodes < args_cli.num_episodes:
+                        env.begin_auto_reset_episode()
 
-            if args_cli.checkpoint_interval and interactions % args_cli.checkpoint_interval == 0:
-                _save_checkpoint(output_dir / f"dppo_interaction_{interactions:06d}.pt", wrapper)
-            if interactions >= maximum and env.completed_episodes < args_cli.num_episodes:
-                raise RuntimeError(
-                    f"Reached {maximum} interactions before completing {args_cli.num_episodes} episodes."
-                )
+                if args_cli.checkpoint_interval and interactions % args_cli.checkpoint_interval == 0:
+                    _save_checkpoint(output_dir / f"dppo_interaction_{interactions:06d}.pt", wrapper)
+                if interactions >= maximum and env.completed_episodes < args_cli.num_episodes:
+                    raise RuntimeError(
+                        f"Reached {maximum} interactions before completing {args_cli.num_episodes} episodes."
+                    )
     finally:
         elapsed_seconds = time.perf_counter() - started
         env.close()
 
-    final_checkpoint = output_dir / "dppo_final.pt"
-    _save_checkpoint(final_checkpoint, wrapper)
+    final_checkpoint = (
+        args_cli.checkpoint.expanduser().resolve()
+        if args_cli.phase == "evaluation" and args_cli.checkpoint is not None
+        else output_dir / "dppo_final.pt"
+    )
+    if args_cli.phase == "online_training":
+        _save_checkpoint(final_checkpoint, wrapper)
     successes = sum(int(item["success"]) for item in env.results)
     failures = Counter(
         item["terminal_reason"] for item in env.results if not item["success"]
@@ -371,7 +467,12 @@ def main(
         "outer_interactions": interactions,
         "physics_steps": total_physics_steps,
         "denoising_steps": total_denoising_steps,
-        "gradient_updates": wrapper.agent.optimizer_steps,
+        "gradient_updates": (
+            0 if args_cli.phase == "evaluation" else wrapper.agent.optimizer_steps
+        ),
+        "source_checkpoint_optimizer_steps": (
+            wrapper.agent.optimizer_steps if args_cli.phase == "evaluation" else None
+        ),
         "wall_time_seconds": elapsed_seconds,
         "learned_checkpoint": str(final_checkpoint),
         "learned_checkpoint_sha256": _sha256(final_checkpoint),
@@ -384,7 +485,8 @@ def main(
     }
     _write_json(output_dir / "results.json", summary)
     print(
-        f"[SUMMARY] mode=dppo_tactile success={successes}/{env.completed_episodes} "
+        f"[SUMMARY] mode=dppo_tactile phase={args_cli.phase} "
+        f"success={successes}/{env.completed_episodes} "
         f"({summary['success_rate']:.1%}) interactions={interactions} "
         f"optimizer_steps={wrapper.agent.optimizer_steps} output={output_dir}",
         flush=True,

@@ -46,7 +46,31 @@ explicit low-force range is applied to the new 2 N runs. Each run's
 
 The default advisor is a deterministic offline substitute. To use a real
 OpenAI-compatible multimodal model, set `OPENAI_API_KEY` and pass
-`--advisor openai`. Do not label substitute runs as real VLM inference.
+`--advisor openai`. To use the authenticated Codex CLI with audited model and
+reasoning metadata, pass `--advisor codex --vlm-model gpt-5.6-sol
+--codex-reasoning-effort high --save-advisor-images`. Do not label substitute
+runs as real VLM inference.
+
+The 12-episode wrong-initialization convergence run is reproduced with:
+
+```bash
+PYTHONPATH=source/tacex:source/tacex_assets:source/tacex_tasks \
+/home/limx/anaconda3/envs/env_isaaclab/bin/python \
+  scripts/reinforcement_learning/vlm_dsrl/run_experiment_runtime.py \
+  --headless --mode vlm \
+  --bc-policy outputs/lab_pick_dinov3_flow_bc200_yaw0/best.pt \
+  --output-dir exp_report/lab_pick/codex_force_convergence/seed262100_n12_v2 \
+  --num-episodes 12 --seed 262100 --break-force-threshold-n 4.5 \
+  --physical-force-range-n 0.5 3.8 --initial-force-range-n 2.4 2.8 \
+  --advisor codex --vlm-model gpt-5.6-sol \
+  --codex-reasoning-effort high --save-advisor-images \
+  --gpu-max-rigid-contact-count 1048576 \
+  --gpu-max-rigid-patch-count 1048576
+```
+
+The two explicit PhysX capacities are required on the IOMMU-enabled workstation
+used for the recorded run. The output preserves one response, CLI audit log,
+image set and compressed physical trajectory per episode.
 
 Record one MP4 per episode from a physical-step camera stream with
 `run_experiment.py --record-videos --video-camera third`. The sampling interval

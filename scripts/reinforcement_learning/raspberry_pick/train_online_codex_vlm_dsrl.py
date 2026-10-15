@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Post-train RaspberryPick DINOv3 Flow BC with DSRL and online Codex VLM force inference.
+"""Post-train RaspberryPick DINOv3 Flow BC with online residual learners.
 
-The frozen policy and its visual-XY head remain unchanged. SAC learns a bounded
-correction to selected channels of the zero initial Flow latent. After every
-episode, a schema-constrained Codex vision call reads a source-grounded force
-and pedicle-tension diagnostic image and proposes the next safe force interval.
+The frozen policy and its visual-XY head remain unchanged. DSRL, Residual RL,
+AWR, or DPPO learns a bounded residual while an optional schema-constrained
+Codex vision call proposes the next safe force interval.
 """
 
 from __future__ import annotations
@@ -91,12 +90,17 @@ parser.add_argument(
     "--agent-checkpoint",
     type=Path,
     default=None,
-    help="Load a trained residual SAC checkpoint before running episodes.",
+    help="Load a trained residual learner checkpoint before running episodes.",
 )
 parser.add_argument(
     "--evaluation-mode",
     action="store_true",
     help="Use the loaded residual actor deterministically without replay updates.",
+)
+parser.add_argument(
+    "--freeze-force-adaptation",
+    action="store_true",
+    help="Evaluate with the checkpoint's final force interval and no new advisor calls.",
 )
 parser.add_argument(
     "--allow-dsrl-checkpoint-for-controller-only-oracle",
@@ -137,6 +141,16 @@ parser.add_argument(
     help="Run at most this many new episodes, leaving a resumable incomplete run.",
 )
 parser.add_argument("--train-seed", type=int, default=1_010_000)
+parser.add_argument(
+    "--online-algorithm",
+    choices=("dsrl", "residual_rl", "awr", "dppo"),
+    default="dsrl",
+    help=(
+        "Online residual learner. All algorithms share observations, rewards, "
+        "contact-gated data, and residual authority; only DSRL receives the "
+        "privileged critic context and force-balance actor prior."
+    ),
+)
 parser.add_argument(
     "--fixed-episode-seed",
     action="store_true",
@@ -402,6 +416,18 @@ if args.controller_mode is None:
         or (args.method == "oracle_force_dsrl" and args.oracle_control_mode == "two_stage")
         else "single_stage"
     )
+if args.online_algorithm != "dsrl" and args.method != "dsrl_only":
+    parser.error("non-DSRL baselines require --method dsrl_only")
+if args.online_algorithm != "dsrl" and (
+    args.force_range_source != "fixed" or args.controller_mode != "single_stage"
+):
+    parser.error("non-DSRL baselines require fixed force range and single-stage control")
+if args.online_algorithm != "dsrl" and (
+    args.resume
+    or args.branch_from_dsrl_checkpoint
+    or (args.agent_checkpoint is not None and not args.evaluation_mode)
+):
+    parser.error("non-DSRL checkpoints support evaluation only, not training continuation")
 if min(
     args.train_episodes,
     args.action_repeat,
@@ -518,8 +544,10 @@ if args.resume and (
     or args.evaluation_mode
 ):
     parser.error("--resume cannot be combined with checkpoint branching or evaluation")
-if args.evaluation_mode and args.agent_checkpoint is None:
-    parser.error("--evaluation-mode requires --agent-checkpoint")
+if args.evaluation_mode and args.agent_checkpoint is None and not args.freeze_dsrl:
+    parser.error("--evaluation-mode requires --agent-checkpoint or --freeze-dsrl")
+if args.freeze_force_adaptation and not args.evaluation_mode:
+    parser.error("--freeze-force-adaptation requires --evaluation-mode")
 if args.allow_dsrl_checkpoint_for_controller_only_oracle and (
     not args.evaluation_mode
     or args.agent_checkpoint is None
@@ -562,7 +590,14 @@ from grape_force_control import (
     GrapeForceController,
     OnlineForceRangeAdapter,
 )
-from learning import ReplayBuffer, SACBatch, SACResidualAgent
+from learning import (
+    AWRAgent,
+    DiffusionPPOAgent,
+    ReplayBuffer,
+    SACBatch,
+    SACResidualAgent,
+    discounted_returns,
+)
 from two_stage_force_control import (
     ForceBalanceAligner,
     ForceBalanceAlignmentConfig,
@@ -609,7 +644,11 @@ METHOD_CONTRACTS = {
     "vlm_semantic_xy_v4": "raspberry_dinov3_flow_bc_semantic_xy_dsrl_sac_prepull_guarded_vlm_force_v4",
     "vlm_semantic_xy_v5": "raspberry_dinov3_flow_bc_semantic_xy_dsrl_sac_prepull_delayed_credit_guarded_vlm_force_v5",
 }
-CONTRACT = METHOD_CONTRACTS[args.method]
+CONTRACT = (
+    METHOD_CONTRACTS[args.method]
+    if args.online_algorithm == "dsrl"
+    else f"raspberry_dinov3_flow_bc_zero_latent_{args.online_algorithm}_fixed_force_v1"
+)
 CONTRACT_VERSION = int(CONTRACT.rsplit("_v", 1)[-1])
 SEMANTIC_METHODS = {
     "dsrl_semantic_v2",
@@ -1185,7 +1224,8 @@ def compose_advisor_visual(
 def save_training_checkpoint(
     path: Path,
     *,
-    agent: SACResidualAgent,
+    agent: SACResidualAgent | AWRAgent | DiffusionPPOAgent,
+    actor_observation_dim: int,
     layout: FlowNoiseDSRLLayout,
     semantic_layout: SemanticResidualLayout | None,
     bottle_layout: BottleStyleLateralResidualLayout | None,
@@ -1208,6 +1248,7 @@ def save_training_checkpoint(
         "contract_version": CONTRACT_VERSION,
         "task": TASK,
         "method": args.method,
+        "online_algorithm": args.online_algorithm,
         "force_range_source": args.force_range_source,
         "controller_mode": args.controller_mode,
         "flow_num_inference_steps": int(args.num_inference_steps),
@@ -1256,14 +1297,22 @@ def save_training_checkpoint(
                     "measured_grip_force",
                     "measured_pedicle_tension",
                 ],
-                "force_balance_prior_gain": args.force_balance_prior_gain,
-                "force_balance_prior_weight": args.force_balance_prior_weight,
+                "force_balance_prior_gain": (
+                    args.force_balance_prior_gain
+                    if args.online_algorithm == "dsrl"
+                    else 0.0
+                ),
+                "force_balance_prior_weight": (
+                    args.force_balance_prior_weight
+                    if args.online_algorithm == "dsrl"
+                    else 0.0
+                ),
                 "force_balance_prior_limit": args.force_balance_prior_limit,
                 "force_balance_prior_smoothing": args.force_balance_prior_smoothing,
                 "current_prior_value": balance_prior_value,
             }
         ),
-        "actor_observation_dim": agent.actor.network[0].in_features,
+        "actor_observation_dim": actor_observation_dim,
         "actor_observation_features": (
             "pooled_condition+visual_xy+normalized_state+physics+per_finger_target_errors"
             if bottle_layout is not None
@@ -1286,7 +1335,9 @@ def save_training_checkpoint(
         "force_range_decisions": adapter.decisions,
         "completed_episodes": completed_episodes,
         "replay_transitions": replay_transitions,
-        "replay_state": replay.state_dict(),
+        "replay_state": (
+            replay.state_dict() if isinstance(agent, SACResidualAgent) else None
+        ),
         "training_seed": args.train_seed,
         "fixed_episode_seed": bool(args.fixed_episode_seed),
         "stem_lock_rotation_while_attached": True,
@@ -1406,6 +1457,7 @@ def main() -> None:
     manifest = {
         "protocol": args.protocol_name,
         "method": args.method,
+        "online_algorithm": args.online_algorithm,
         "force_range_source": args.force_range_source,
         "controller_mode": args.controller_mode,
         "flow_num_inference_steps": int(args.num_inference_steps),
@@ -1436,6 +1488,7 @@ def main() -> None:
         recorded_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         legacy_protocol_defaults = {
             "protocol": "raspberry_0909_v1",
+            "online_algorithm": "dsrl",
             "flow_num_inference_steps": 20,
             "chunk_execute_steps": 1,
             "action_repeat": 4,
@@ -1444,6 +1497,7 @@ def main() -> None:
         for key in (
             "protocol",
             "method",
+            "online_algorithm",
             "force_range_source",
             "controller_mode",
             "flow_num_inference_steps",
@@ -1508,20 +1562,27 @@ def main() -> None:
         actor_observation_dim += 2 + model.config.state_dim
     if bottle_layout is not None:
         actor_observation_dim += 3
-    critic_action_context_dim = 4 if bottle_layout is not None else 0
-    agent = SACResidualAgent(
-        observation_dim=actor_observation_dim,
-        action_dim=correction_dim,
-        device=device,
-        learning_rate=args.learning_rate,
-        gamma=0.995,
-        tau=0.01,
-        residual_l2_weight=0.10,
-        initial_log_std=args.initial_log_std,
-        initial_alpha=0.03,
-        critic_action_context_dim=critic_action_context_dim,
-        critic_context_mode="concat",
+    critic_action_context_dim = (
+        4 if bottle_layout is not None and args.online_algorithm == "dsrl" else 0
     )
+    if args.online_algorithm in {"dsrl", "residual_rl"}:
+        agent: SACResidualAgent | AWRAgent | DiffusionPPOAgent = SACResidualAgent(
+            observation_dim=actor_observation_dim,
+            action_dim=correction_dim,
+            device=device,
+            learning_rate=args.learning_rate,
+            gamma=0.995,
+            tau=0.01,
+            residual_l2_weight=0.10,
+            initial_log_std=args.initial_log_std,
+            initial_alpha=0.03,
+            critic_action_context_dim=critic_action_context_dim,
+            critic_context_mode="concat",
+        )
+    elif args.online_algorithm == "awr":
+        agent = AWRAgent(actor_observation_dim, correction_dim, device)
+    else:
+        agent = DiffusionPPOAgent(actor_observation_dim, correction_dim, device)
     replay = ReplayBuffer(
         args.replay_capacity,
         actor_observation_dim,
@@ -1549,6 +1610,8 @@ def main() -> None:
         loaded_agent_checkpoint = checkpoint_to_load
         payload = torch.load(loaded_agent_checkpoint, map_location="cpu", weights_only=False)
         loaded_agent_payload = payload
+        if payload.get("online_algorithm", "dsrl") != args.online_algorithm:
+            raise ValueError("checkpoint online algorithm does not match this run")
         loaded_agent_checkpoint_mode = validate_agent_checkpoint_contract(
             payload,
             target_method=args.method,
@@ -1641,6 +1704,18 @@ def main() -> None:
             smoothing=float(args.force_range_smoothing),
         ),
     )
+    if args.freeze_force_adaptation and loaded_agent_payload is not None:
+        for key, expected in (
+            ("force_range_source", args.force_range_source),
+            ("controller_mode", args.controller_mode),
+        ):
+            if loaded_agent_payload.get(key) != expected:
+                raise ValueError(f"frozen evaluation checkpoint mismatch for {key}")
+        restored_range = tuple(map(float, loaded_agent_payload["current_force_range_n"]))
+        if not args.physical_force_bounds[0] <= restored_range[0] < restored_range[1] <= args.physical_force_bounds[1]:
+            raise ValueError("checkpoint force interval violates the evaluation bounds")
+        adapter.current_range = ForceRange(*restored_range)
+        effective_initial_force_range = restored_range
     if args.branch_from_dsrl_checkpoint or args.resume:
         if loaded_agent_payload is None:
             raise AssertionError("training checkpoint was validated above")
@@ -1703,7 +1778,7 @@ def main() -> None:
             raise ValueError("checkpoint force-controller configuration does not match run")
     advisor = (
         CodexVisualForceAdvisor(output_root)
-        if args.force_range_source == "vlm"
+        if args.force_range_source == "vlm" and not args.freeze_force_adaptation
         else None
     )
     position_offset = torch.tensor(
@@ -1896,6 +1971,12 @@ def main() -> None:
             damage_risk_steps = 0
             public_safety_risk_steps = 0
             force_trace: list[dict[str, float | int | bool]] = []
+            online_observations: list[torch.Tensor] = []
+            online_actions: list[torch.Tensor] = []
+            online_rewards: list[float] = []
+            online_dones: list[float] = []
+            online_old_log_probs: list[torch.Tensor] = []
+            online_diffusion_traces: list[torch.Tensor] = []
 
             env.sim.render()
             state_now = policy_state(env)
@@ -1969,12 +2050,25 @@ def main() -> None:
                         else None
                     )
                     with torch.inference_mode():
+                        old_log_prob: torch.Tensor | None = None
+                        diffusion_trace: torch.Tensor | None = None
                         if dsrl_active and not args.freeze_dsrl:
-                            correction = agent.act(
-                                policy_observation,
-                                deterministic=args.evaluation_mode,
-                                exploration_scale=exploration,
-                            )
+                            if isinstance(agent, SACResidualAgent):
+                                correction = agent.act(
+                                    policy_observation,
+                                    deterministic=args.evaluation_mode,
+                                    exploration_scale=exploration,
+                                )
+                            elif isinstance(agent, AWRAgent):
+                                correction = agent.act(
+                                    policy_observation,
+                                    deterministic=args.evaluation_mode,
+                                )
+                            else:
+                                correction, old_log_prob, diffusion_trace = agent.act(
+                                    policy_observation,
+                                    deterministic=args.evaluation_mode,
+                                )
                         else:
                             correction = torch.zeros(
                                 (1, correction_dim), dtype=embedding.dtype, device=device
@@ -2292,51 +2386,66 @@ def main() -> None:
                             else None
                         )
                     if dsrl_active and not args.freeze_dsrl and not args.evaluation_mode:
-                        replay_index = replay.add(
-                            SACBatch(
-                                observation=policy_observation.detach().cpu(),
-                                action=correction.detach().cpu(),
-                                reward=torch.tensor(
-                                    [transition_reward / 10.0], dtype=torch.float32
-                                ),
-                                next_observation=next_policy_observation.detach().cpu(),
-                                done=torch.tensor(
-                                    [float(terminal or not next_dsrl_active)], dtype=torch.float32
-                                ),
-                                action_context=(
-                                    action_context.detach().cpu()
-                                    if action_context is not None
-                                    else None
-                                ),
-                                next_action_context=(
-                                    next_action_context.detach().cpu()
-                                    if next_action_context is not None
-                                    else None
-                                ),
-                            )
-                        )
-                        if (
-                            args.method in DELAYED_CREDIT_METHODS
-                            and not terminal
-                            and not next_dsrl_active
-                        ):
-                            pending_terminal_credit_index = replay_index
                         total_transitions += 1
-                        if replay.size >= args.learning_starts:
-                            for _ in range(args.updates_per_decision):
-                                sampled_batch = replay.sample(args.batch_size)
-                                if bottle_layout is not None:
-                                    action_prior = torch.full_like(
-                                        sampled_batch.action, balance_prior_value
-                                    )
-                                    last_update = agent.update(
-                                        sampled_batch,
-                                        action_prior=action_prior,
-                                        action_prior_mask=torch.ones_like(action_prior),
-                                        action_prior_weight=args.force_balance_prior_weight,
-                                    )
-                                else:
-                                    last_update = agent.update(sampled_batch)
+                        transition_done = float(terminal or not next_dsrl_active)
+                        if isinstance(agent, SACResidualAgent):
+                            use_dsrl_context = args.online_algorithm == "dsrl"
+                            replay_index = replay.add(
+                                SACBatch(
+                                    observation=policy_observation.detach().cpu(),
+                                    action=correction.detach().cpu(),
+                                    reward=torch.tensor(
+                                        [transition_reward / 10.0], dtype=torch.float32
+                                    ),
+                                    next_observation=next_policy_observation.detach().cpu(),
+                                    done=torch.tensor([transition_done], dtype=torch.float32),
+                                    action_context=(
+                                        action_context.detach().cpu()
+                                        if use_dsrl_context and action_context is not None
+                                        else None
+                                    ),
+                                    next_action_context=(
+                                        next_action_context.detach().cpu()
+                                        if use_dsrl_context and next_action_context is not None
+                                        else None
+                                    ),
+                                )
+                            )
+                            if (
+                                args.method in DELAYED_CREDIT_METHODS
+                                and not terminal
+                                and not next_dsrl_active
+                            ):
+                                pending_terminal_credit_index = replay_index
+                            if replay.size >= args.learning_starts:
+                                for _ in range(args.updates_per_decision):
+                                    sampled_batch = replay.sample(args.batch_size)
+                                    if bottle_layout is not None and use_dsrl_context:
+                                        action_prior = torch.full_like(
+                                            sampled_batch.action, balance_prior_value
+                                        )
+                                        last_update = agent.update(
+                                            sampled_batch,
+                                            action_prior=action_prior,
+                                            action_prior_mask=torch.ones_like(action_prior),
+                                            action_prior_weight=args.force_balance_prior_weight,
+                                        )
+                                    else:
+                                        last_update = agent.update(sampled_batch)
+                        else:
+                            online_observations.append(
+                                policy_observation.detach().cpu()
+                            )
+                            online_actions.append(correction.detach().cpu())
+                            online_rewards.append(transition_reward / 10.0)
+                            online_dones.append(transition_done)
+                            if isinstance(agent, DiffusionPPOAgent):
+                                assert old_log_prob is not None
+                                assert diffusion_trace is not None
+                                online_old_log_probs.append(old_log_prob.detach().cpu())
+                                online_diffusion_traces.append(
+                                    diffusion_trace.detach().cpu()
+                                )
                     if terminal:
                         break
                     cond_tokens, visual_xy = next_cond_tokens, next_visual_xy
@@ -2350,6 +2459,39 @@ def main() -> None:
                 if raw_outcome == "no_detach"
                 else raw_outcome
             )
+            if online_observations:
+                observations = torch.cat(online_observations, dim=0)
+                actions = torch.cat(online_actions, dim=0)
+                rewards = torch.tensor(online_rewards, dtype=torch.float32).unsqueeze(1)
+                dones = torch.tensor(online_dones, dtype=torch.float32).unsqueeze(1)
+                returns = discounted_returns(
+                    rewards,
+                    dones,
+                    torch.ones_like(dones, dtype=torch.bool),
+                    gamma=0.995,
+                )[:, 0]
+                if isinstance(agent, AWRAgent):
+                    last_update = agent.update(
+                        observations,
+                        actions,
+                        returns,
+                        epochs=6,
+                        batch_size=args.batch_size,
+                    )
+                elif isinstance(agent, DiffusionPPOAgent):
+                    diffusion_traces = torch.cat(online_diffusion_traces, dim=0)
+                    old_log_probs = torch.cat(online_old_log_probs, dim=0)
+                    with torch.no_grad():
+                        values = agent.value(observations.to(device)).cpu()
+                    last_update = agent.update(
+                        observations,
+                        diffusion_traces,
+                        old_log_probs,
+                        returns,
+                        returns - values,
+                        epochs=4,
+                        batch_size=args.batch_size,
+                    )
             if (
                 args.method in DELAYED_CREDIT_METHODS
                 and pending_terminal_credit_index is not None
@@ -2366,7 +2508,7 @@ def main() -> None:
             damage_risk_fraction = damage_risk_steps / contact_count
             public_safety_risk_fraction = public_safety_risk_steps / contact_count
             balance_prior_used = balance_prior_value
-            if bottle_layout is not None:
+            if bottle_layout is not None and args.online_algorithm == "dsrl":
                 terminal_left_force = float(
                     final_flags["left_normal_force_n"][0].item()
                 )
@@ -2380,10 +2522,11 @@ def main() -> None:
                     gain=args.force_balance_prior_gain,
                     limit=args.force_balance_prior_limit,
                 )
-                balance_prior_value = (
-                    (1.0 - args.force_balance_prior_smoothing) * balance_prior_value
-                    + args.force_balance_prior_smoothing * balance_prior_target
-                )
+                if not args.evaluation_mode:
+                    balance_prior_value = (
+                        (1.0 - args.force_balance_prior_smoothing) * balance_prior_value
+                        + args.force_balance_prior_smoothing * balance_prior_target
+                    )
             else:
                 balance_prior_used = 0.0
                 balance_prior_target = 0.0
@@ -2421,6 +2564,7 @@ def main() -> None:
                 "episode_index": episode_index,
                 "seed": episode_seed,
                 "method": args.method,
+                "online_algorithm": args.online_algorithm,
                 "force_range_source": args.force_range_source,
                 "controller_mode": args.controller_mode,
                 "berry_profile": args.berry_profile,
@@ -2495,7 +2639,10 @@ def main() -> None:
                 "exploration_scale": exploration,
                 "dsrl_active_decisions": dsrl_active_decisions,
                 "replay_size": replay.size,
-                "sac_updates": agent.updates,
+                "optimizer_updates": agent.updates,
+                "sac_updates": (
+                    agent.updates if isinstance(agent, SACResidualAgent) else None
+                ),
                 "delayed_terminal_credit": pending_terminal_credit_index is not None,
                 "last_update": last_update,
                 "trajectory": str(trajectory_path.resolve()),
@@ -2532,7 +2679,15 @@ def main() -> None:
             response: dict[str, Any]
             vlm_error: str | None = None
             vlm_called = False
-            if args.force_range_source == "oracle":
+            if args.freeze_force_adaptation:
+                response = {
+                    "force_range_n": attempted_range.as_list(),
+                    "failure_cause": "not_applicable",
+                    "force_assessment": "frozen_evaluation_range",
+                    "rationale": "Final-policy evaluation retains the trained force interval",
+                    "confidence": 1.0,
+                }
+            elif args.force_range_source == "oracle":
                 response = {
                     "force_range_n": attempted_range.as_list(),
                     "failure_cause": "not_applicable",
@@ -2602,7 +2757,15 @@ def main() -> None:
                     }
                     vlm_error = f"{type(exc).__name__}: {exc}"
             raw_proposal = ForceRange(*map(float, response["force_range_n"]))
-            if args.force_range_source == "oracle":
+            if args.freeze_force_adaptation:
+                guarded = GuardedForceProposal(
+                    tuple(attempted_range.as_list()),
+                    "frozen_evaluation_range",
+                    "hold_frozen_evaluation_range",
+                    "hold",
+                    0,
+                )
+            elif args.force_range_source == "oracle":
                 guarded = GuardedForceProposal(
                     tuple(attempted_range.as_list()),
                     (
@@ -2685,7 +2848,9 @@ def main() -> None:
                 raw_response=json.dumps(response, ensure_ascii=False),
                 error=vlm_error,
             )
-            if args.force_range_source == "vlm" and not vlm_called:
+            if args.freeze_force_adaptation:
+                decision["update_kind"] = "frozen_evaluation_hold"
+            elif args.force_range_source == "vlm" and not vlm_called:
                 decision["update_kind"] = "vlm_skipped_success_hold"
             decision.update(
                 {
@@ -2747,6 +2912,7 @@ def main() -> None:
             save_training_checkpoint(
                 latest_checkpoint,
                 agent=agent,
+                actor_observation_dim=actor_observation_dim,
                 layout=layout,
                 semantic_layout=semantic_layout,
                 bottle_layout=bottle_layout,
@@ -2807,6 +2973,7 @@ def main() -> None:
     save_training_checkpoint(
         final_checkpoint,
         agent=agent,
+        actor_observation_dim=actor_observation_dim,
         layout=layout,
         semantic_layout=semantic_layout,
         bottle_layout=bottle_layout,
@@ -2826,6 +2993,7 @@ def main() -> None:
     failures = Counter(item["outcome"] for item in records if not item["success"])
     summary = {
         "protocol": args.protocol_name,
+        "online_algorithm": args.online_algorithm,
         "experiment": (
             "RaspberryPick privileged ground-truth force plus DSRL ablation"
             if oracle_enabled
@@ -2925,6 +3093,10 @@ def main() -> None:
         ),
         "dsrl_frozen": bool(args.freeze_dsrl),
         "evaluation_mode": bool(args.evaluation_mode),
+        "freeze_force_adaptation": bool(args.freeze_force_adaptation),
+        "evaluation_success_rate": (
+            successes / max(len(records), 1) if args.evaluation_mode else None
+        ),
         "loaded_agent_checkpoint": (
             None if loaded_agent_checkpoint is None else str(loaded_agent_checkpoint)
         ),
@@ -2982,16 +3154,32 @@ def main() -> None:
                     "measured_grip_force",
                     "measured_pedicle_tension",
                 ],
-                "force_balance_prior_gain": args.force_balance_prior_gain,
-                "force_balance_prior_weight": args.force_balance_prior_weight,
+                "force_balance_prior_gain": (
+                    args.force_balance_prior_gain
+                    if args.online_algorithm == "dsrl"
+                    else 0.0
+                ),
+                "force_balance_prior_weight": (
+                    args.force_balance_prior_weight
+                    if args.online_algorithm == "dsrl"
+                    else 0.0
+                ),
                 "force_balance_prior_limit": args.force_balance_prior_limit,
                 "force_balance_prior_smoothing": args.force_balance_prior_smoothing,
                 "final_prior_value": balance_prior_value,
             }
         ),
         "exploration_anneal_episodes": args.exploration_anneal_episodes,
-        "sac_optimizer_updates": agent.updates,
-        "sac_optimizer_updates_this_run": agent.updates - starting_agent_updates,
+        "optimizer_updates": agent.updates,
+        "optimizer_updates_this_run": agent.updates - starting_agent_updates,
+        "sac_optimizer_updates": (
+            agent.updates if isinstance(agent, SACResidualAgent) else None
+        ),
+        "sac_optimizer_updates_this_run": (
+            agent.updates - starting_agent_updates
+            if isinstance(agent, SACResidualAgent)
+            else None
+        ),
         "replay_transitions": total_transitions,
         "vlm_advisor": None if advisor is None else args.codex_model,
         "vlm_reasoning_effort": None if advisor is None else args.codex_reasoning_effort,

@@ -227,3 +227,54 @@ def test_block_guard_holds_when_material_changes_before_next_episode():
 
     assert guarded.force_range_n == (7.2, 8.2)
     assert guarded.decision == "hold_without_symmetric_force_evidence"
+
+
+def test_torque_guard_accepts_only_directionally_supported_bounded_change():
+    support = load_support_module()
+
+    accepted = support.guard_vlm_torque_proposal(
+        current_range_nm=(0.12, 0.22),
+        proposed_range_nm=(0.32, 0.42),
+        physical_bounds_nm=(0.10, 0.60),
+        torque_constraint_violation="under",
+        outcome="under_force",
+        maximum_center_step_nm=0.08,
+    )
+    rejected = support.guard_vlm_torque_proposal(
+        current_range_nm=(0.12, 0.22),
+        proposed_range_nm=(0.10, 0.20),
+        physical_bounds_nm=(0.10, 0.60),
+        torque_constraint_violation="under",
+        outcome="under_force",
+        maximum_center_step_nm=0.08,
+    )
+
+    torch.testing.assert_close(
+        torch.tensor(accepted.torque_range_nm), torch.tensor([0.20, 0.30])
+    )
+    assert accepted.decision == "accept_under_torque_evidence"
+    assert rejected.torque_range_nm == (0.12, 0.22)
+
+
+def test_torque_adapter_holds_without_vlm_call_and_records_policy():
+    support = load_support_module()
+    adapter = support.OnlineTorqueRangeAdapter(
+        support.TorqueRange(0.35, 0.45),
+        support.TorqueRangeAdapterConfig(
+            physical_minimum_nm=0.10,
+            physical_maximum_nm=0.60,
+            minimum_width_nm=0.08,
+            smoothing=1.0,
+        ),
+    )
+
+    decision = adapter.update_after_episode(
+        episode_index=0,
+        proposed_range=support.TorqueRange(0.35, 0.45),
+        raw_response="held after success",
+        vlm_called=False,
+    )
+
+    assert decision["vlm_called"] is False
+    assert decision["update_kind"] == "hold_without_vlm_call"
+    assert decision["applied_range_nm"] == [0.35, 0.45]

@@ -5,7 +5,11 @@ from __future__ import annotations
 import base64
 import json
 import mimetypes
+import os
 import re
+import shutil
+import subprocess
+import time
 import urllib.error
 import urllib.request
 from collections import Counter
@@ -301,6 +305,220 @@ class OpenAICompatibleVLMAdvisor:
         return _parse_recommendation(
             _parse_json_text(text), physical_range_n=self.physical_range_n
         )
+
+
+class CodexCLIVLMAdvisor:
+    """Schema-constrained Codex vision advisor with a durable call audit.
+
+    ``call_count`` counts completed episode-level transactions, rather than
+    subprocess attempts.  This preserves the one-advisor-call-per-episode
+    contract even when a malformed response is retried internally.
+    """
+
+    def __init__(
+        self,
+        *,
+        model: str,
+        physical_range_n: ForceRange,
+        break_force_threshold_n: float,
+        output_dir: str | Path,
+        executable: str | Path | None = None,
+        reasoning_effort: str = "high",
+        timeout_s: float = 300.0,
+        max_attempts: int = 3,
+    ) -> None:
+        resolved_executable = (
+            str(Path(executable).expanduser().resolve())
+            if executable is not None
+            else shutil.which("codex")
+        )
+        if not resolved_executable:
+            raise FileNotFoundError("Codex CLI was not found.")
+        if not model.strip():
+            raise ValueError("model must be non-empty.")
+        if reasoning_effort not in {"low", "medium", "high", "xhigh"}:
+            raise ValueError("Unsupported Codex reasoning effort.")
+        if timeout_s <= 0.0 or max_attempts < 1:
+            raise ValueError("timeout_s and max_attempts must be positive.")
+        self.executable = resolved_executable
+        self.model = model
+        self.physical_range_n = physical_range_n
+        self.break_force_threshold_n = float(break_force_threshold_n)
+        self.reasoning_effort = reasoning_effort
+        self.timeout_s = float(timeout_s)
+        self.max_attempts = int(max_attempts)
+        self.output_dir = Path(output_dir).expanduser().resolve()
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.schema_path = self.output_dir / "labpick_force_response_schema.json"
+        schema = {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            **force_recommendation_schema(),
+        }
+        if self.schema_path.exists():
+            if json.loads(self.schema_path.read_text(encoding="utf-8")) != schema:
+                raise FileExistsError(
+                    f"Existing Codex schema differs from this run: {self.schema_path}"
+                )
+        else:
+            self.schema_path.write_text(
+                json.dumps(schema, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        self.audit_path = self.output_dir.parent / "codex_vlm_calls.jsonl"
+        if self.audit_path.exists():
+            raise FileExistsError(
+                f"Refusing to append to existing Codex audit: {self.audit_path}"
+            )
+        version = subprocess.run(
+            [self.executable, "--version"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.version = version.stdout.strip()
+        self.call_count = 0
+        self.attempt_count = 0
+        self.last_prompt = ""
+        self.last_raw_response: dict[str, Any] | None = None
+        self.last_call_audit: dict[str, Any] | None = None
+
+    @staticmethod
+    def _append_jsonl(path: Path, row: dict[str, Any]) -> None:
+        with path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+
+    def recommend(
+        self,
+        *,
+        current_range_n: ForceRange,
+        episode: EpisodeFeedback,
+        history: Sequence[EpisodeFeedback],
+        image_paths: Sequence[str | Path] = (),
+    ) -> VLMRecommendation:
+        if not image_paths:
+            raise ValueError(
+                "CodexCLIVLMAdvisor requires at least one episode image per call."
+            )
+        prompt = build_force_advisor_prompt(
+            current_range_n=current_range_n,
+            episode=episode,
+            history=history,
+            physical_range_n=self.physical_range_n,
+            break_force_threshold_n=self.break_force_threshold_n,
+        )
+        self.call_count += 1
+        self.last_prompt = prompt
+        last_error: Exception | None = None
+        for attempt in range(1, self.max_attempts + 1):
+            self.attempt_count += 1
+            stem = f"episode_{episode.episode_index:03d}_attempt_{attempt:02d}"
+            response_path = self.output_dir / f"{stem}_response.json"
+            log_path = self.output_dir / f"{stem}_cli.log"
+            if response_path.exists() or log_path.exists():
+                raise FileExistsError(
+                    f"Codex output already exists for {stem} in {self.output_dir}."
+                )
+            command = [
+                self.executable,
+                "exec",
+                "--ephemeral",
+                "--sandbox",
+                "read-only",
+                "--ignore-rules",
+                "--color",
+                "never",
+                "-m",
+                self.model,
+                "-c",
+                f'model_reasoning_effort="{self.reasoning_effort}"',
+            ]
+            for image_path in image_paths:
+                resolved_image = Path(image_path).expanduser().resolve()
+                if not resolved_image.is_file():
+                    raise FileNotFoundError(
+                        f"VLM image does not exist: {resolved_image}"
+                    )
+                command.extend(("--image", str(resolved_image)))
+            command.extend(
+                (
+                    "--output-schema",
+                    str(self.schema_path),
+                    "-o",
+                    str(response_path),
+                    "-",
+                )
+            )
+            started = time.time()
+            try:
+                completed = subprocess.run(
+                    command,
+                    input=prompt,
+                    cwd=self.output_dir.parent,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=self.timeout_s,
+                )
+                elapsed = time.time() - started
+                combined = completed.stdout + "\n" + completed.stderr
+                log_path.write_text(combined, encoding="utf-8")
+                if completed.returncode != 0:
+                    raise RuntimeError(
+                        f"Codex VLM call exited with code {completed.returncode}."
+                    )
+                if f"model: {self.model}" not in combined:
+                    raise RuntimeError("Codex CLI audit did not confirm the requested model.")
+                if f"reasoning effort: {self.reasoning_effort}" not in combined:
+                    raise RuntimeError(
+                        "Codex CLI audit did not confirm the requested reasoning effort."
+                    )
+                raw = json.loads(response_path.read_text(encoding="utf-8"))
+                recommendation = _parse_recommendation(
+                    raw, physical_range_n=self.physical_range_n
+                )
+                audit = {
+                    "advisor_call_index": self.call_count,
+                    "episode_index": episode.episode_index,
+                    "attempt": attempt,
+                    "model": self.model,
+                    "reasoning_effort": self.reasoning_effort,
+                    "codex_cli_version": self.version,
+                    "images": [
+                        str(Path(path).expanduser().resolve()) for path in image_paths
+                    ],
+                    "response": raw,
+                    "elapsed_seconds": elapsed,
+                    "success": True,
+                    "model_audit_confirmed": True,
+                    "reasoning_effort_audit_confirmed": True,
+                    "cli_log": str(log_path),
+                }
+                self._append_jsonl(self.audit_path, audit)
+                self.last_raw_response = raw
+                self.last_call_audit = audit
+                return recommendation
+            except Exception as exc:
+                last_error = exc
+                audit = {
+                    "advisor_call_index": self.call_count,
+                    "episode_index": episode.episode_index,
+                    "attempt": attempt,
+                    "model": self.model,
+                    "reasoning_effort": self.reasoning_effort,
+                    "elapsed_seconds": time.time() - started,
+                    "success": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "cli_log": str(log_path),
+                }
+                self._append_jsonl(self.audit_path, audit)
+                self.last_call_audit = audit
+        raise RuntimeError(
+            f"Codex VLM failed after {self.max_attempts} attempts."
+        ) from last_error
 
 
 class DeterministicVLMAdvisor:

@@ -1,6 +1,7 @@
 """Episode-level VLM force adaptation and high-rate tactile force control."""
 
 from .advisor import (
+    CodexCLIVLMAdvisor,
     DeterministicVLMAdvisor,
     OpenAICompatibleVLMAdvisor,
     VLMAdvisor,
@@ -19,6 +20,7 @@ from .loop import EpisodeForceAdaptationLoop
 
 __all__ = [
     "ConvergentForceEstimator",
+    "CodexCLIVLMAdvisor",
     "DeterministicVLMAdvisor",
     "EpisodeFeedback",
     "EpisodeForceAdaptationLoop",

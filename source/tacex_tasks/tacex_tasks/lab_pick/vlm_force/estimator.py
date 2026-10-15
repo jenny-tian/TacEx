@@ -43,6 +43,12 @@ class ConvergentForceEstimator:
 
     _LOW_FORCE_TOKENS = ("slip", "dropped", "insufficient_force", "too_low")
     _HIGH_FORCE_TOKENS = ("broken", "over_force", "excessive_force", "too_high")
+    _NON_FORCE_FAILURES = {
+        "bad_alignment",
+        "force_tracking_error",
+        "no_contact",
+        "trajectory_error",
+    }
 
     def __init__(self, config: ForceEstimatorConfig | None = None) -> None:
         self.config = ForceEstimatorConfig() if config is None else config
@@ -64,7 +70,16 @@ class ConvergentForceEstimator:
     ) -> str:
         if episode.success:
             return "success"
-        labels = f"{episode.failure_reason} {recommendation.failure_cause} {recommendation.force_assessment}".lower()
+        episode_reason = episode.failure_reason.lower()
+        # The source-grounded diagnosis owns causal attribution.  A VLM may
+        # describe low measured force during a tracking/alignment failure, but
+        # that is not evidence that the task-level target interval is too low.
+        if episode_reason in self._NON_FORCE_FAILURES:
+            return "non_force"
+        labels = (
+            f"{episode_reason} {recommendation.failure_cause} "
+            f"{recommendation.force_assessment}"
+        ).lower()
         if any(token in labels for token in self._HIGH_FORCE_TOKENS):
             return "too_high"
         if episode.contact_fraction > 0.0 and any(

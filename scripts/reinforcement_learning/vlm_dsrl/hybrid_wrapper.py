@@ -65,6 +65,7 @@ class VLMDSRLLabPickWrapper(CleanDSRLLabPickWrapper):
         mode: ExperimentMode,
         output_dir: str | Path,
         adaptation: EpisodeForceAdaptationLoop | None,
+        freeze_force_adaptation: bool = False,
         controller_config: ForceControllerConfig | None = None,
         save_advisor_images: bool = False,
         record_videos: bool = False,
@@ -109,6 +110,9 @@ class VLMDSRLLabPickWrapper(CleanDSRLLabPickWrapper):
             "x", encoding="utf-8", buffering=1
         )
         self.adaptation = adaptation
+        self.freeze_force_adaptation = bool(freeze_force_adaptation)
+        if self.freeze_force_adaptation and self.adaptation is None:
+            raise ValueError("Frozen force adaptation requires an adaptation state.")
         self.save_advisor_images = bool(save_advisor_images)
         self.record_videos = bool(record_videos)
         self.video_camera = str(video_camera)
@@ -612,7 +616,7 @@ class VLMDSRLLabPickWrapper(CleanDSRLLabPickWrapper):
     def complete_pending_episode(
         self, *, dsrl_updates_completed: int
     ) -> dict[str, Any]:
-        """Run the advisor after the terminal DSRL update and persist the result."""
+        """Commit an episode, optionally updating the online force estimate."""
 
         if self._pending_episode is None:
             raise RuntimeError("No terminal episode is waiting to be committed.")
@@ -621,7 +625,7 @@ class VLMDSRLLabPickWrapper(CleanDSRLLabPickWrapper):
         feedback = pending.pop("feedback")
         decision = None
         image_paths: list[Path] = []
-        if self.adaptation is not None:
+        if self.adaptation is not None and not self.freeze_force_adaptation:
             if feedback is None:
                 raise RuntimeError("VLM mode completed an episode without feedback.")
             image_paths = self._save_cached_images(episode_index)
@@ -711,9 +715,19 @@ class VLMDSRLLabPickWrapper(CleanDSRLLabPickWrapper):
                 None if decision is None else decision.vlm_range_n.as_list()
             ),
             "next_force_range_n": (
-                None if decision is None else decision.target_range_n.as_list()
+                self.adaptation.current_range_n.as_list()
+                if decision is None and self.adaptation is not None
+                else None
+                if decision is None
+                else decision.target_range_n.as_list()
             ),
-            "update_kind": None if decision is None else decision.update_kind,
+            "update_kind": (
+                "frozen_evaluation_hold"
+                if decision is None and self.freeze_force_adaptation
+                else None
+                if decision is None
+                else decision.update_kind
+            ),
             "trajectory": str(
                 self.trajectory_dir / f"episode_{episode_index:03d}.jsonl.gz"
             ),

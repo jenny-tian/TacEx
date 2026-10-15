@@ -5,6 +5,7 @@ import argparse
 import copy
 import json
 import math
+import os
 import random
 import time
 from collections import deque
@@ -1481,7 +1482,14 @@ class EMAModel:
 
 
 def load_dino_for_config(dino_path: Path | None) -> tuple[MinimalDINOv3ViT, Path]:
-    resolved = resolve_path(dino_path) if dino_path is not None else find_default_dino_path()
+    # Policy checkpoints intentionally omit the frozen encoder weights. Allow
+    # deployment hosts to map a training-machine snapshot without rewriting
+    # the checkpoint (and invalidating its provenance hash).
+    deployment_path = os.environ.get("TACEX_DINOV3_PATH")
+    if deployment_path:
+        resolved = resolve_path(Path(deployment_path))
+    else:
+        resolved = resolve_path(dino_path) if dino_path is not None else find_default_dino_path()
     if not (resolved / "config.json").exists() or not (resolved / "model.safetensors").exists():
         raise FileNotFoundError(f"DINO path must contain config.json and model.safetensors: {resolved}")
     dino = MinimalDINOv3ViT.from_pretrained_dir(resolved)

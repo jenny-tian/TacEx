@@ -756,6 +756,14 @@ class AWRAgent:
             "updates": self.updates,
         }
 
+    def load_checkpoint(self, checkpoint: dict) -> None:
+        """Restore the saved inference networks; legacy files omit optimizers."""
+        if checkpoint.get("algorithm") != "awr":
+            raise ValueError("AWR checkpoint algorithm mismatch")
+        self.actor.load_state_dict(checkpoint["actor"], strict=True)
+        self.value.load_state_dict(checkpoint["value"], strict=True)
+        self.updates = int(checkpoint["updates"])
+
 
 class DiffusionResidualPolicy(nn.Module):
     """Short stochastic denoising chain for DPPO residual actions."""
@@ -885,6 +893,16 @@ class DiffusionPPOAgent:
             "denoising_steps": self.policy.denoising_steps,
             "updates": self.updates,
         }
+
+    def load_checkpoint(self, checkpoint: dict) -> None:
+        """Restore the saved inference networks and denoising contract."""
+        if checkpoint.get("algorithm") != "diffusion_ppo":
+            raise ValueError("DPPO checkpoint algorithm mismatch")
+        if int(checkpoint["denoising_steps"]) != self.policy.denoising_steps:
+            raise ValueError("DPPO checkpoint denoising-step mismatch")
+        self.policy.load_state_dict(checkpoint["policy"], strict=True)
+        self.value.load_state_dict(checkpoint["value"], strict=True)
+        self.updates = int(checkpoint["updates"])
 
 
 def discounted_returns(

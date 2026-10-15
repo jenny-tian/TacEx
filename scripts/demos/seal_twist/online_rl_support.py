@@ -6,7 +6,9 @@ contracts can be unit tested without launching the simulator.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 
@@ -15,6 +17,196 @@ FLOW_OBSERVATION_DIM = 28
 ACTOR_FORCE_FEATURE_DIM = 6
 ACTOR_OBSERVATION_DIM = FLOW_OBSERVATION_DIM + ACTOR_FORCE_FEATURE_DIM
 CRITIC_FORCE_CONTEXT_DIM = 5
+
+
+@dataclass(frozen=True)
+class TorqueRange:
+    """A strictly ordered seal-torque target interval in N m."""
+
+    minimum_nm: float
+    maximum_nm: float
+
+    def __post_init__(self) -> None:
+        low = float(self.minimum_nm)
+        high = float(self.maximum_nm)
+        if not math.isfinite(low) or not math.isfinite(high):
+            raise ValueError("torque range endpoints must be finite")
+        if low < 0.0 or high <= low:
+            raise ValueError("torque range must satisfy 0 <= low < high")
+        object.__setattr__(self, "minimum_nm", low)
+        object.__setattr__(self, "maximum_nm", high)
+
+    @property
+    def center_nm(self) -> float:
+        return 0.5 * (self.minimum_nm + self.maximum_nm)
+
+    @property
+    def width_nm(self) -> float:
+        return self.maximum_nm - self.minimum_nm
+
+    def as_list(self) -> list[float]:
+        return [self.minimum_nm, self.maximum_nm]
+
+
+@dataclass(frozen=True)
+class TorqueRangeAdapterConfig:
+    physical_minimum_nm: float = 0.10
+    physical_maximum_nm: float = 0.60
+    minimum_width_nm: float = 0.08
+    smoothing: float = 1.0
+
+    def __post_init__(self) -> None:
+        if self.physical_minimum_nm < 0.0:
+            raise ValueError("physical_minimum_nm must be non-negative")
+        if self.physical_maximum_nm <= self.physical_minimum_nm:
+            raise ValueError("physical torque bounds are invalid")
+        if not 0.0 < self.minimum_width_nm <= (
+            self.physical_maximum_nm - self.physical_minimum_nm
+        ):
+            raise ValueError("minimum_width_nm is invalid")
+        if not 0.0 < self.smoothing <= 1.0:
+            raise ValueError("smoothing must lie in (0, 1]")
+
+
+class OnlineTorqueRangeAdapter:
+    """Project and smooth one episode-level VLM torque-range proposal."""
+
+    def __init__(
+        self,
+        initial_range: TorqueRange,
+        config: TorqueRangeAdapterConfig | None = None,
+    ) -> None:
+        self.config = TorqueRangeAdapterConfig() if config is None else config
+        self.current_range = self._project(initial_range)
+        self.decisions: list[dict[str, Any]] = []
+
+    def _project(self, proposed: TorqueRange) -> TorqueRange:
+        config = self.config
+        low = min(
+            max(proposed.minimum_nm, config.physical_minimum_nm),
+            config.physical_maximum_nm - config.minimum_width_nm,
+        )
+        high = min(
+            max(proposed.maximum_nm, low + config.minimum_width_nm),
+            config.physical_maximum_nm,
+        )
+        if high - low < config.minimum_width_nm:
+            low = max(config.physical_minimum_nm, high - config.minimum_width_nm)
+        return TorqueRange(low, high)
+
+    def update_after_episode(
+        self,
+        *,
+        episode_index: int,
+        proposed_range: TorqueRange | None,
+        raw_response: str,
+        error: str | None = None,
+        vlm_called: bool = True,
+    ) -> dict[str, Any]:
+        if episode_index != len(self.decisions):
+            raise RuntimeError(
+                f"expected completed episode {len(self.decisions)}, got {episode_index}"
+            )
+        previous = self.current_range
+        if proposed_range is None:
+            projected = previous
+            applied = previous
+            update_kind = "vlm_invalid_keep_previous"
+        else:
+            projected = self._project(proposed_range)
+            alpha = self.config.smoothing
+            applied = self._project(
+                TorqueRange(
+                    (1.0 - alpha) * previous.minimum_nm
+                    + alpha * projected.minimum_nm,
+                    (1.0 - alpha) * previous.maximum_nm
+                    + alpha * projected.maximum_nm,
+                )
+            )
+            update_kind = (
+                "vlm_projected_smoothed" if vlm_called else "hold_without_vlm_call"
+            )
+        self.current_range = applied
+        decision = {
+            "completed_episode_index": int(episode_index),
+            "applies_to_episode_index": int(episode_index + 1),
+            "previous_range_nm": previous.as_list(),
+            "vlm_proposed_range_nm": (
+                None if proposed_range is None else proposed_range.as_list()
+            ),
+            "projected_range_nm": projected.as_list(),
+            "applied_range_nm": applied.as_list(),
+            "update_kind": update_kind,
+            "vlm_called": bool(vlm_called),
+            "raw_response": str(raw_response),
+            "error": error,
+            "safety_bounds_nm": [
+                self.config.physical_minimum_nm,
+                self.config.physical_maximum_nm,
+            ],
+            "smoothing": self.config.smoothing,
+        }
+        self.decisions.append(decision)
+        return decision
+
+
+@dataclass(frozen=True)
+class GuardedTorqueProposal:
+    torque_range_nm: tuple[float, float]
+    decision: str
+
+
+def guard_vlm_torque_proposal(
+    *,
+    current_range_nm: tuple[float, float],
+    proposed_range_nm: tuple[float, float],
+    physical_bounds_nm: tuple[float, float],
+    torque_constraint_violation: str,
+    outcome: str,
+    maximum_center_step_nm: float,
+) -> GuardedTorqueProposal:
+    """Apply only directionally supported torque updates and preserve width."""
+
+    current_low, current_high = map(float, current_range_nm)
+    proposed_low, proposed_high = map(float, proposed_range_nm)
+    physical_low, physical_high = map(float, physical_bounds_nm)
+    if not physical_low <= current_low < current_high <= physical_high:
+        raise ValueError("current torque range violates physical bounds")
+    if not proposed_low < proposed_high:
+        raise ValueError("proposed torque range must be strictly ordered")
+    if maximum_center_step_nm < 0.0:
+        raise ValueError("maximum_center_step_nm must be non-negative")
+    violation = str(torque_constraint_violation).lower()
+    if violation not in {"none", "under", "over"}:
+        raise ValueError("torque_constraint_violation must be one of: none, under, over")
+    if outcome == "success":
+        return GuardedTorqueProposal((current_low, current_high), "hold_after_success")
+
+    current_center = 0.5 * (current_low + current_high)
+    proposed_center = 0.5 * (proposed_low + proposed_high)
+    requested_delta = proposed_center - current_center
+    direction_supported = (violation == "under" and requested_delta > 0.0) or (
+        violation == "over" and requested_delta < 0.0
+    )
+    if not direction_supported:
+        return GuardedTorqueProposal(
+            (current_low, current_high), "hold_without_directional_torque_evidence"
+        )
+
+    limited_delta = max(
+        -float(maximum_center_step_nm),
+        min(float(maximum_center_step_nm), requested_delta),
+    )
+    width = current_high - current_low
+    center = current_center + limited_delta
+    center = max(
+        physical_low + 0.5 * width,
+        min(physical_high - 0.5 * width, center),
+    )
+    return GuardedTorqueProposal(
+        (center - 0.5 * width, center + 0.5 * width),
+        f"accept_{violation}_torque_evidence",
+    )
 
 
 def exploration_scale_for_episode(
@@ -313,10 +505,15 @@ __all__ = [
     "ACTOR_OBSERVATION_DIM",
     "CRITIC_FORCE_CONTEXT_DIM",
     "GuardedForceProposal",
+    "GuardedTorqueProposal",
+    "OnlineTorqueRangeAdapter",
+    "TorqueRange",
+    "TorqueRangeAdapterConfig",
     "critic_force_context",
     "force_balance_action_prior",
     "force_conditioned_observation",
     "force_evidence",
     "force_shaping_term",
     "guard_vlm_force_proposal",
+    "guard_vlm_torque_proposal",
 ]

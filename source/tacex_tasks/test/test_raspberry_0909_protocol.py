@@ -10,6 +10,10 @@ ROOT = Path(__file__).resolve().parents[3]
 TRAINER = ROOT / "scripts/reinforcement_learning/raspberry_pick/train_online_codex_vlm_dsrl.py"
 RUNNER = ROOT / "scripts/reinforcement_learning/raspberry_pick/run_raspberry_0909.py"
 ANALYZER = ROOT / "scripts/reinforcement_learning/raspberry_pick/analyze_raspberry_0909.py"
+BASELINE_RUNNER = (
+    ROOT
+    / "scripts/reinforcement_learning/raspberry_pick/run_raspberry_0909_baseline_comparison.py"
+)
 
 
 def load_runner():
@@ -23,6 +27,17 @@ def load_runner():
 
 def load_analyzer():
     spec = importlib.util.spec_from_file_location("analyze_raspberry_0909_test", ANALYZER)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_baseline_runner():
+    spec = importlib.util.spec_from_file_location(
+        "run_raspberry_0909_baseline_test", BASELINE_RUNNER
+    )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -111,3 +126,27 @@ def test_analysis_uses_seed_level_rolling_metrics():
     assert curve.shape == (91,)
     assert all(abs(value - 0.5) < 1e-12 for value in curve)
     assert analyzer.longest_true_streak([False, True, True, False, True]) == 2
+
+
+def test_baseline_runner_changes_only_the_online_learner():
+    runner = load_baseline_runner()
+    commands = {
+        method: runner.command_for(
+            Path("/python"),
+            method=method,
+            output_root=Path(f"/tmp/{method}"),
+            seed=970000,
+            episodes=100,
+        )
+        for method in runner.METHODS
+    }
+
+    for method, command in commands.items():
+        assert command[command.index("--online-algorithm") + 1] == method
+        assert command[command.index("--method") + 1] == "dsrl_only"
+        assert command[command.index("--force-range-source") + 1] == "fixed"
+        assert command[command.index("--controller-mode") + 1] == "single_stage"
+        assert command[command.index("--pull-z-offset-m") + 1] == "0.0"
+        assert command[command.index("--initial-force-range") + 1 :][:2] == ["2.2", "2.8"]
+        assert "--bottle-style-lateral-dsrl" in command
+        assert "--enhanced-determinism" in command

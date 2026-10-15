@@ -174,6 +174,10 @@ def test_base_anchored_v4_checkpoint_marker_rejects_legacy_policy_state():
     with pytest.raises(ValueError, match="contract mismatch"):
         validate_absolute_dsrl_policy_state(wrong_version_state)
 
+    v3_state = dict(policy_state)
+    v3_state[CLEAN_DSRL_CONTRACT_BUFFER] = torch.tensor(3)
+    validate_absolute_dsrl_policy_state(v3_state, expected_version=3)
+
 
 def test_base_anchored_dsrl_entrypoints_expose_residual_scale():
     trainer_source = (SKRL_ROOT / "train_clean_dsrl_sac.py").read_text()
@@ -378,6 +382,21 @@ def test_wrapper_adds_scaled_noise_correction_and_returns_discounted_chunk_rewar
     assert info["clean_dsrl/action_steps_executed"] == 3
     assert info["clean_dsrl/physics_steps_executed"] == 6
     assert wrapper.outer_discount_factor == pytest.approx(0.125)
+
+
+def test_wrapper_replays_legacy_v3_absolute_noise_without_native_sample(monkeypatch):
+    wrapper, adapter = _wrapper(
+        monkeypatch,
+        chunk_execute_steps=1,
+        dsrl_contract_version=3,
+    )
+    wrapper.reset()
+    action = torch.linspace(-1.0, 1.0, 10).reshape(1, 10)
+    wrapper.step(action)
+
+    full_noise = adapter.decode_inputs[0].reshape(1, 32, 10)
+    for index in range(32):
+        torch.testing.assert_close(full_noise[:, index], action)
 
 
 def test_wrapper_masks_timeout_as_terminal_and_native_bc_uses_native_noise(monkeypatch):

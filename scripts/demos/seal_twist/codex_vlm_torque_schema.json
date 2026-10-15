@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "torque_range_nm",
+    "failure_cause",
+    "torque_assessment",
+    "rationale",
+    "confidence"
+  ],
+  "properties": {
+    "torque_range_nm": {
+      "type": "array",
+      "items": {"type": "number"},
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "failure_cause": {
+      "type": "string",
+      "enum": [
+        "under_torque",
+        "over_torque",
+        "force_constraint",
+        "bilateral_imbalance",
+        "trajectory",
+        "alignment",
+        "no_contact",
+        "unknown"
+      ]
+    },
+    "torque_assessment": {
+      "type": "string",
+      "enum": ["too_low", "safe", "too_high", "not_torque_related", "unknown"]
+    },
+    "rationale": {"type": "string", "minLength": 1, "maxLength": 600},
+    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0}
+  }
+}

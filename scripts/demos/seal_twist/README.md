@@ -132,3 +132,31 @@ Wilson 95% CI 46.4%-57.6%). The fixed 7.7 N tactile projection above uses
 only observed contact force and does not read the randomized success
 thresholds. See `exp_report/bottle/FLOW_6D_FORCE_RESULTS.md` for the audited
 result and failure breakdown.
+
+## Adapt the torque interval with GPT-5.6-Sol after every episode
+
+The online driver can adapt cap torque instead of fingertip force. The true
+`0.35-0.50 N m` success window remains hidden from the advisor; the adapter
+uses the model's structured torque interval to set the next episode's maximum
+turn angle. This command reproduces the 12-episode trajectory starting from the
+deliberately low, non-overlapping `0.12-0.22 N m` interval:
+
+```bash
+PYTHONPATH=source/tacex:source/tacex_assets:source/tacex_tasks \
+/home/limx/anaconda3/envs/env_isaaclab/bin/python \
+  scripts/demos/seal_twist/train_online_codex_vlm_dsrl.py \
+  --headless \
+  --flow-checkpoint exp_report/bottle/checkpoints/flow_bc_6d_force_h10.pt \
+  --output-root exp_report/bottle/torque_convergence_every_episode/seed262300_n12 \
+  --train-episodes 12 --train-seed 262300 \
+  --adaptation-target torque --initial-torque-range-nm 0.12 0.22 \
+  --physical-torque-bounds-nm 0.10 0.60 \
+  --initial-force-range 4.0 9.0 --physical-force-bounds 3.5 9.5 \
+  --force-threshold-profiles 4.0 9.0 --force-threshold-profile-index 0 \
+  --vlm-call-policy every_episode --vlm-max-torque-center-step-nm 0.08 \
+  --codex-model gpt-5.6-sol --codex-reasoning-effort high
+```
+
+The run stores `training_episodes.jsonl`, `torque_range_decisions.jsonl`, one
+advisor image and one audited Codex response per episode, plus compressed
+physical trajectories. Checkpoints are orthogonal to the convergence figure.
